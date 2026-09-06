@@ -340,6 +340,7 @@ table.fib td:first-child{color:var(--ink)}
           <option value="transit">Devices + shared segments</option>
           <option value="all">Everything</option>
           <option value="path">Traced path only</option>
+          <option value="link">Link detail</option>
         </select>
       </label>
       <label class="toggle"><input type="checkbox" id="opt-focus" checked> Focus path after trace</label>
@@ -356,7 +357,7 @@ table.fib td:first-child{color:var(--ink)}
       <span><i style="background:#1c2c3e; border:1px solid #3a5273"></i>Router / switch</span>
       <span><i style="background:#2a2416; border:1px solid #8a6a2e"></i>Firewall</span>
       <span><i style="background:#16241e; border:1px solid #3f7a63"></i>Switch</span>
-      <span><i style="background:#122b33; border:1px solid #2c6b7a"></i>L3 segment</span>
+      <span><i style="background:none; color:#4fc3d9; width:auto; font-family:var(--mono); font-size:10px">10.0.0.0/30</i>L3 segment</span>
       <span><i style="background:#3f7a63"></i>L2 link</span>
       <span><i style="background:#e8a13a"></i>Traced path</span>
     </div>
@@ -1543,17 +1544,19 @@ function graphStyle(){
         'line-color':'#3f7a63','line-style':'dashed','line-dash-pattern':[3,3],'width':1.6,
         'color':'#5d9c81','font-size':8.5,'z-index':1}},
       {selector:'node[kind="subnet"]', style:{
-        'shape':'round-rectangle','width':'label','height':24,'padding':'8px',
-        'background-color':'#122b33','border-width':1,'border-color':'#2c6b7a',
+        'shape':'round-rectangle','width':'label','height':'label','padding':'1px',
+        'background-opacity':0,'border-width':0,
         'label':'data(label)','color':'#4fc3d9','font-family':'IBM Plex Mono, monospace',
-        'font-size':11,'text-valign':'center','text-halign':'center'
+        'font-size':11,'text-valign':'center','text-halign':'center','text-wrap':'wrap',
+        'text-background-color':'#0e1621','text-background-opacity':0.92,'text-background-padding':3
       }},
       {selector:'edge', style:{
         'width':1.4,'line-color':'#33485f','curve-style':'bezier',
         'label':'data(label)','color':'#61799a','font-size':9
       }},
       {selector:'edge', style:{'color':'#61799a','font-family':'IBM Plex Mono, monospace',
-        'text-background-color':'#0e1621','text-background-opacity':0.85,'text-background-padding':2}},
+        'text-wrap':'wrap','text-background-color':'#0e1621','text-background-opacity':0.85,'text-background-padding':2}},
+      {selector:'edge[meta = 1]', style:{'color':'#7fd4a8','font-size':9.5}},
       {selector:'.hot', style:{'line-color':'#e8a13a','width':3,'color':'#e8a13a','z-index':20,
         'line-style':'dashed','line-dash-pattern':[7,6]}},
       {selector:'edge.fwd', style:{'mid-target-arrow-shape':'triangle','mid-target-arrow-color':'#e8a13a','arrow-scale':0.85}},
@@ -1575,6 +1578,8 @@ function graphStyle(){
         'width':11,'height':11,'shape':'ellipse','background-color':'#ffc766',
         'border-width':3,'border-color':'rgba(232,161,58,.28)','z-index':40,'events':'no','label':''}},
       {selector:'node.hot', style:{'border-color':'#e8a13a','border-width':2,'color':'#f0b256'}},
+      {selector:'node[kind="subnet"].hot', style:{'border-width':0,'color':'#e8a13a'}},
+      {selector:'node[kind="subnet"].drop', style:{'border-width':0,'color':'#e0625f'}},
       {selector:'node.drop', style:{'border-color':'#e0625f','border-width':2,'color':'#e0625f'}},
       {selector:'node.pick', style:{'border-color':'#4fc3d9','border-width':2}}
   ];
@@ -1615,25 +1620,25 @@ function render(){
       const a=ifc.addrs.find(x=>x.len<32);
       return a ? cidr(netOf(a.ip,a.len), a.len) : null;
     };
-    const netLabel=(key, ifc)=>{
-      const v=vlanOfIface(ifc);
-      const parts=[key];
-      if(v) parts.push('vlan '+v);
-      if(ifc && ifc.vrf && ifc.vrf!=='default') parts.push('vrf '+ifc.vrf);
-      return parts.join('\n');
-    };
-    const ifLabel=(ifc)=>{
-      if(!ifc) return '';
-      return ifc.name + (ifc.zone?' · '+ifc.zone:'');
+    /* VLAN, zone and VRF ride on the link rather than inside the subnet box —
+       the box only needs to say which subnet it is. */
+    const ifMeta=(ifc)=>{
+      if(!ifc) return {label:'', meta:0};
+      const bits=[];
+      const v=vlanOfIface(ifc); if(v) bits.push('vlan '+v);
+      if(ifc.zone) bits.push(ifc.zone);
+      if(ifc.vrf && ifc.vrf!=='default') bits.push('vrf '+ifc.vrf);
+      return {label: ifc.name+(bits.length?'\n'+bits.join(' · '):''), meta: bits.length?1:0};
     };
     const addCloud=(name)=>{
       const id='cl_'+name.replace(/[^\w]/g,'_');
       if(!made[id]){ made[id]=true; els.push({data:{id, label:name, kind:'wan'}}); }
       return id;
     };
-    const link=(src,tgt,label,mapKey)=>{
+    const link=(src,tgt,ifc,mapKey)=>{
+      const m=ifMeta(ifc);
       const id='e'+(++e);
-      els.push({data:{id, source:src, target:tgt, kind:'link', label:label||''}});
+      els.push({data:{id, source:src, target:tgt, kind:'link', label:m.label, meta:m.meta}});
       if(mapKey) edgeFor[mapKey]=id;
       return id;
     };
@@ -1645,8 +1650,8 @@ function render(){
         const k=netOfIface(h.inIf);
         if(k){
           const sid='s_'+k.replace(/[^\w]/g,'_');
-          if(!made[sid]){ made[sid]=true; els.push({data:{id:sid, label:netLabel(k,h.inIf), kind:'subnet'}}); }
-          link(sid, h.dev.id, ifLabel(h.inIf), h.dev.id+'::'+h.inIf.name);
+          if(!made[sid]){ made[sid]=true; els.push({data:{id:sid, label:k, net:k, kind:'subnet'}}); }
+          link(sid, h.dev.id, h.inIf, h.dev.id+'::'+h.inIf.name);
         }
       }
       if(!h.outIf) continue;
@@ -1654,9 +1659,9 @@ function render(){
       // handed across a provider network we cannot see inside
       if(h.viaCloud && n){
         const cid=addCloud(h.viaCloud);
-        link(h.dev.id, cid, ifLabel(h.outIf), h.dev.id+'::'+h.outIf.name);
+        link(h.dev.id, cid, h.outIf, h.dev.id+'::'+h.outIf.name);
         addDev(n.dev);
-        link(cid, n.dev.id, ifLabel(n.inIf), n.inIf?(n.dev.id+'::'+n.inIf.name):null);
+        link(cid, n.dev.id, n.inIf, n.inIf?(n.dev.id+'::'+n.inIf.name):null);
         continue;
       }
 
@@ -1664,17 +1669,17 @@ function render(){
       if(!k && h.route && h.route.len<32) k=cidr(h.route.net, h.route.len);
       if(!k) continue;
       const sid='s_'+k.replace(/[^\w]/g,'_');
-      if(!made[sid]){ made[sid]=true; els.push({data:{id:sid, label:netLabel(k,h.outIf), kind:'subnet'}}); }
-      link(h.dev.id, sid, ifLabel(h.outIf), h.dev.id+'::'+h.outIf.name);
+      if(!made[sid]){ made[sid]=true; els.push({data:{id:sid, label:k, net:k, kind:'subnet'}}); }
+      link(h.dev.id, sid, h.outIf, h.dev.id+'::'+h.outIf.name);
       if(n){
         addDev(n.dev);
-        link(sid, n.dev.id, ifLabel(n.inIf), n.inIf?(n.dev.id+'::'+n.inIf.name):null);
+        link(sid, n.dev.id, n.inIf, n.inIf?(n.dev.id+'::'+n.inIf.name):null);
       } else if(h.route && h.route.type==='connected'){
         const dk=cidr(h.route.net, h.route.len);
         if(dk!==k){
           const did='s_'+dk.replace(/[^\w]/g,'_');
-          if(!made[did]){ made[did]=true; els.push({data:{id:did, label:dk, kind:'subnet'}}); }
-          link(h.dev.id, did, ifLabel(h.outIf), null);
+          if(!made[did]){ made[did]=true; els.push({data:{id:did, label:dk, net:dk, kind:'subnet'}}); }
+          link(h.dev.id, did, h.outIf, null);
         }
       }
     }
@@ -1691,8 +1696,119 @@ function render(){
       const d=STATE.model.devices.find(x=>x.id===evt.target.id());
       if(d) showDevice(d);
     });
+    cyp.on('tap','node[kind="subnet"]', evt=>showSegment(evt.target.data('net')||evt.target.data('label')));
+    cyp.on('tap','edge', evt=>onEdgeTap(cyp, evt.target));
     STATE.cy=cyp; STATE.edgeFor=edgeFor; STATE.edgePair={}; STATE.viewIsPath=true;
     paintTrace(res);
+    return;
+  }
+
+  /* Link detail: the two devices side by side with every connection between
+     them drawn out — each parallel subnet, each L2 cable, any provider cloud. */
+  if(view==='link'){
+    const f=STATE.linkFocus;
+    const a=f && model.devices.find(d=>d.id===f.a);
+    const b=f && model.devices.find(d=>d.id===f.b);
+    if(!a || !b){
+      el.style.display='flex';
+      el.innerHTML='<strong>No link selected</strong><span>Click a link between two devices on the map to see everything that joins them.</span>';
+      if(STATE.cy){ STATE.cy.destroy(); STATE.cy=null; }
+      return;
+    }
+    const els=[]; const edgeFor={}; let e=0;
+    const shared=[];
+    for(const k in model.subnets){
+      const sn=model.subnets[k];
+      const ma=sn.members.filter(x=>x.dev===a), mb=sn.members.filter(x=>x.dev===b);
+      if(ma.length && mb.length) shared.push({key:k, a:ma, b:mb});
+    }
+    const l2=[];
+    for(const k in (model.l2links||{})){
+      const L=model.l2links[k];
+      if((L.a.dev===a&&L.b.dev===b)||(L.a.dev===b&&L.b.dev===a)) l2.push(L);
+    }
+    const clouds=(model.clouds||[]).filter(c=>
+      c.members.some(x=>x.dev===a) && c.members.some(x=>x.dev===b));
+
+    const mid=[];   // things that sit in the middle column
+    for(const s of shared) mid.push({type:'net', s});
+    for(const c of clouds) mid.push({type:'cloud', c});
+    const rows=Math.max(mid.length,1), step=140, top=-((rows-1)*step)/2;
+
+    els.push({data:{id:a.id, label:a.name, kind:'device', vendor:a.vendor,
+                    role:a.isSwitch?'switch':'router'}, position:{x:0, y:0}});
+    els.push({data:{id:b.id, label:b.name, kind:'device', vendor:b.vendor,
+                    role:b.isSwitch?'switch':'router'}, position:{x:620, y:0}});
+
+    const port=(m)=>{
+      const i=m.iface, bits=[];
+      const v=vlanOfIface(i); if(v) bits.push('vlan '+v);
+      if(i.zone) bits.push(i.zone);
+      if(i.vrf && i.vrf!=='default') bits.push('vrf '+i.vrf);
+      return {label: i.name+'\n'+int2ip(m.addr.ip)+(bits.length?'\n'+bits.join(' · '):''),
+              meta: bits.length?1:0};
+    };
+
+    mid.forEach((item,idx)=>{
+      const y=top+idx*step;
+      if(item.type==='net'){
+        const s=item.s;
+        const sid='s_'+s.key.replace(/[^\w]/g,'_');
+        els.push({data:{id:sid, label:s.key, net:s.key, kind:'subnet'}, position:{x:310, y}});
+        for(const m of s.a){
+          const id='e'+(++e), p=port(m);
+          els.push({data:{id, source:a.id, target:sid, kind:'link', label:p.label, meta:p.meta}});
+          edgeFor[a.id+'::'+m.iface.name]=id;
+        }
+        for(const m of s.b){
+          const id='e'+(++e), p=port(m);
+          els.push({data:{id, source:sid, target:b.id, kind:'link', label:p.label, meta:p.meta}});
+          edgeFor[b.id+'::'+m.iface.name]=id;
+        }
+      } else {
+        const c=item.c, cid='cl_'+c.id;
+        els.push({data:{id:cid, label:c.name, kind:'wan'}, position:{x:310, y}});
+        for(const dev of [a,b]){
+          const mem=c.members.find(x=>x.dev===dev);
+          const id='e'+(++e);
+          els.push({data:{id, source:dev===a?a.id:cid, target:dev===a?cid:b.id,
+                          kind:'wanlink', label:mem?mem.ifaceName:''}});
+          if(mem) edgeFor[dev.id+'::'+mem.ifaceName]=id;
+        }
+      }
+    });
+
+    // L2 cables run straight across, below the L3 detail
+    for(const L of l2){
+      const first = L.a.dev===a ? L.a : L.b, second = L.a.dev===a ? L.b : L.a;
+      const pa=findPort(a,first.port), pb=findPort(b,second.port);
+      const vl=(p)=>!p?'':(p.mode==='access'?('access '+(p.accessVlan||'?'))
+            :(Array.isArray(p.allowed)?('trunk '+(p.allowed.length?p.allowed.join(','):'none')):'trunk all'));
+      els.push({data:{id:'e'+(++e), source:a.id, target:b.id, kind:'l2',
+        label:first.port+(vl(pa)?'\n'+vl(pa):'')+'\n↔\n'+second.port+(vl(pb)?'\n'+vl(pb):'')}});
+    }
+
+    if(!mid.length && !l2.length){
+      el.style.display='flex';
+      el.innerHTML='<strong>Nothing joins these two</strong><span>'+esc(a.name)+' and '+esc(b.name)+
+        ' share no subnet, L2 link or cloud in the current model.</span>';
+      if(STATE.cy){ STATE.cy.destroy(); STATE.cy=null; }
+      return;
+    }
+
+    if(STATE.cy) STATE.cy.destroy();
+    const cyl = cytoscape({
+      container: document.getElementById('cy'),
+      elements: els, wheelSensitivity:0.2, motionBlur:false,
+      style: graphStyle(),
+      layout:{name:'preset', padding:60}
+    });
+    cyl.on('tap','node[kind="device"]', evt=>{
+      const d=model.devices.find(x=>x.id===evt.target.id());
+      if(d) showDevice(d);
+    });
+    cyl.on('tap','node[kind="subnet"]', evt=>showSegment(evt.target.data('net')||evt.target.data('label')));
+    STATE.cy=cyl; STATE.edgeFor=edgeFor; STATE.edgePair={}; STATE.viewIsPath=true;
     return;
   }
 
@@ -1783,7 +1899,7 @@ function render(){
 
     const sid='s_'+k.replace(/[^\w]/g,'_');
     drawnSubnets.add(sid);
-    els.push({data:{id:sid, label:k, kind:'subnet'}});
+    els.push({data:{id:sid, label:k, net:k, kind:'subnet'}});
     for(const m of members){
       const id='e'+(++e);
       els.push({data:{id, source:m.dev.id, target:sid, kind:'link', label:m.iface.name}});
@@ -1908,6 +2024,8 @@ function render(){
     const d = STATE.model.devices.find(x=>x.id===evt.target.id());
     if(d) showDevice(d);
   });
+  cy.on('tap','node[kind="subnet"]', evt=>showSegment(evt.target.data('net')||evt.target.data('label')));
+  cy.on('tap','edge', evt=>onEdgeTap(cy, evt.target));
   cy.on('dragfree','node', ()=>{ capturePositions(); autosave(); });
 
   STATE.cy=cy; STATE.edgeFor=edgeFor; STATE.edgePair=edgePair; STATE.viewIsPath=false;
@@ -2484,6 +2602,162 @@ function configTabHtml(d, editing, focusLine){
     '<div class="codeblock" id="cfg-orig">'+origHtml+'</div>'+
     '<div class="cfgpane-label"><span>Candidate — used for tracing</span><span>'+dp.bLines.length+' lines</span></div>'+
     '<div class="codeblock" id="cfg-cand">'+candHtml+'</div>';
+}
+
+/* ============================================================
+   Link and segment detail — what actually joins two devices
+   ============================================================ */
+function ifaceCell(i){
+  const bits=[];
+  const v=vlanOfIface(i); if(v) bits.push('vlan '+v);
+  if(i.zone) bits.push(i.zone);
+  if(i.vrf && i.vrf!=='default') bits.push('vrf '+i.vrf);
+  if(i.shutdown) bits.push('shutdown');
+  return esc(i.name)+
+    (bits.length?'<br><span style="color:var(--ink-faint)">'+esc(bits.join(' · '))+'</span>':'')+
+    (i.desc?'<br><span style="color:var(--ink-faint)">'+esc(i.desc)+'</span>':'');
+}
+function routesAcross(from, to){
+  const ips=new Set();
+  for(const i of to.interfaces) for(const a of i.addrs) ips.add(a.ip);
+  const out={connected:0, static:0, table:0, igp:0, list:[]};
+  for(const r of from.fib){
+    if(r.nextHop==null || !ips.has(r.nextHop)) continue;
+    out[r.type]=(out[r.type]||0)+1;
+    if(r.type!=='igp' && out.list.length<12) out.list.push(r);
+  }
+  return out;
+}
+function routeSummary(s){
+  const parts=[];
+  for(const k of ['static','table','igp']) if(s[k]) parts.push(s[k]+' '+k);
+  return parts.length?parts.join(', '):'connected only';
+}
+function showLink(a,b){
+  STATE.selected=null; renderDevList();
+  const m=STATE.model, r=document.getElementById('result');
+  const shared=[];
+  for(const k in m.subnets){
+    const sn=m.subnets[k];
+    const ma=sn.members.filter(x=>x.dev===a), mb=sn.members.filter(x=>x.dev===b);
+    if(ma.length && mb.length) shared.push({key:k, a:ma, b:mb});
+  }
+  const l2=[];
+  for(const k in (m.l2links||{})){
+    const L=m.l2links[k];
+    if((L.a.dev===a&&L.b.dev===b)||(L.a.dev===b&&L.b.dev===a)) l2.push(L);
+  }
+  const clouds=(m.clouds||[]).filter(c=>
+    c.members.some(x=>x.dev===a) && c.members.some(x=>x.dev===b));
+  const ab=routesAcross(a,b), ba=routesAcross(b,a);
+
+  let html='<h2 class="sec">'+esc(a.name)+' ↔ '+esc(b.name)+'</h2>'+
+    '<p class="note" style="margin-top:0">'+shared.length+' shared subnet'+(shared.length===1?'':'s')+
+    (l2.length?' · '+l2.length+' L2 link'+(l2.length===1?'':'s'):'')+
+    (clouds.length?' · via '+clouds.map(c=>esc(c.name)).join(', '):'')+'</p>'+
+    '<div class="btn-row" style="margin-bottom:14px">'+
+      '<button class="btn" id="lk-a">Open '+esc(a.name)+'</button>'+
+      '<button class="btn" id="lk-b">Open '+esc(b.name)+'</button>'+
+      '<button class="btn" id="lk-back">Back to map</button>'+
+    '</div>';
+
+  if(shared.length){
+    html+='<h2 class="sec">Layer 3 links</h2>';
+    for(const s of shared){
+      const vrf=s.a[0].iface.vrf;
+      html+='<div class="cfgpane-label"><span>'+esc(s.key)+'</span><span>'+
+        (vrf&&vrf!=='default'?esc('vrf '+vrf):'')+'</span></div>'+
+        '<table class="fib"><tr><th>'+esc(a.name)+'</th><th>'+esc(b.name)+'</th></tr><tr>'+
+        '<td>'+s.a.map(x=>ifaceCell(x.iface)+'<br>'+int2ip(x.addr.ip)).join('<br>')+'</td>'+
+        '<td>'+s.b.map(x=>ifaceCell(x.iface)+'<br>'+int2ip(x.addr.ip)).join('<br>')+'</td>'+
+        '</tr></table>';
+    }
+  }
+  if(l2.length){
+    const vl=(p)=>!p?'':(p.mode==='access'?('access vlan '+(p.accessVlan||'?'))
+          :(Array.isArray(p.allowed)?('trunk '+(p.allowed.length?p.allowed.join(','):'none')):'trunk all'));
+    html+='<h2 class="sec">Layer 2 links</h2><table class="fib">'+
+      '<tr><th>'+esc(a.name)+'</th><th>'+esc(b.name)+'</th></tr>'+
+      l2.map(L=>{
+        const first = L.a.dev===a ? L.a : L.b, second = L.a.dev===a ? L.b : L.a;
+        return '<tr><td>'+esc(first.port)+'<br><span style="color:var(--ink-faint)">'+esc(vl(findPort(a,first.port)))+'</span></td>'+
+               '<td>'+esc(second.port)+'<br><span style="color:var(--ink-faint)">'+esc(vl(findPort(b,second.port)))+'</span></td></tr>';
+      }).join('')+'</table>';
+  }
+  if(clouds.length){
+    html+='<h2 class="sec">Provider cloud</h2><table class="fib">'+
+      '<tr><th>Cloud</th><th>'+esc(a.name)+'</th><th>'+esc(b.name)+'</th></tr>'+
+      clouds.map(c=>'<tr><td>'+esc(c.name)+(c.transit?'':' <span class="tag deny">sink</span>')+'</td>'+
+        '<td>'+esc((c.members.find(x=>x.dev===a)||{}).ifaceName||'')+'</td>'+
+        '<td>'+esc((c.members.find(x=>x.dev===b)||{}).ifaceName||'')+'</td></tr>').join('')+'</table>';
+  }
+
+  html+='<h2 class="sec">Traffic that uses this link</h2><table class="fib">'+
+    '<tr><th>Direction</th><th>Routes pointing across</th></tr>'+
+    '<tr><td>'+esc(a.name)+' → '+esc(b.name)+'</td><td>'+routeSummary(ab)+'</td></tr>'+
+    '<tr><td>'+esc(b.name)+' → '+esc(a.name)+'</td><td>'+routeSummary(ba)+'</td></tr></table>';
+  const named=[...ab.list.map(x=>[a,b,x]), ...ba.list.map(x=>[b,a,x])];
+  if(named.length){
+    html+='<table class="fib" style="margin-top:10px"><tr><th>Prefix</th><th>From</th><th>Via</th><th></th></tr>'+
+      named.map(([f,t,x])=>'<tr><td>'+cidr(x.net,x.len)+'</td><td>'+esc(f.name)+'</td>'+
+        '<td>'+int2ip(x.nextHop)+'</td><td><span class="tag '+x.type+'">'+x.type+'</span></td></tr>').join('')+
+      '</table>';
+  }
+  html+='<div id="warnbox"></div>';
+  r.innerHTML=html;
+  renderWarnings();
+  document.getElementById('lk-a').onclick=()=>showDevice(a);
+  document.getElementById('lk-b').onclick=()=>showDevice(b);
+  const back=document.getElementById('lk-back');
+  if(back) back.onclick=()=>{
+    document.getElementById('opt-view').value = STATE.prevView || 'simple';
+    render();
+  };
+}
+
+function showSegment(key){
+  const m=STATE.model, sn=m.subnets[key];
+  const r=document.getElementById('result');
+  if(!sn){
+    r.innerHTML='<p class="note">That segment is not in the current model.</p><div id="warnbox"></div>';
+    renderWarnings(); return;
+  }
+  STATE.selected=null; renderDevList();
+  r.innerHTML='<h2 class="sec">'+esc(key)+'</h2>'+
+    '<p class="note" style="margin-top:0">'+sn.members.length+' device'+(sn.members.length===1?'':'s')+
+    ' on this segment'+(sn.members.length<2?' — endpoint subnet':'')+'</p>'+
+    '<table class="fib"><tr><th>Device</th><th>Interface</th><th>Address</th></tr>'+
+    sn.members.map((x,i)=>'<tr><td><a href="#" data-seg="'+i+'" style="color:var(--cyan);text-decoration:none">'+
+      esc(x.dev.name)+'</a></td><td>'+ifaceCell(x.iface)+'</td><td>'+int2ip(x.addr.ip)+'/'+x.addr.len+'</td></tr>').join('')+
+    '</table><div id="warnbox"></div>';
+  renderWarnings();
+  r.querySelectorAll('[data-seg]').forEach(el=>el.onclick=(ev)=>{
+    ev.preventDefault();
+    showDevice(sn.members[parseInt(el.dataset.seg,10)].dev);
+  });
+}
+
+function onEdgeTap(cy, edge){
+  if(!STATE.model) return;
+  const sd=cy.getElementById(edge.data('source')).data();
+  const td=cy.getElementById(edge.data('target')).data();
+  const devOf = d => d && d.kind==='device' ? STATE.model.devices.find(x=>x.id===d.id) : null;
+  const a=devOf(sd), b=devOf(td);
+  if(a && b){ openLink(a,b); return; }
+  const seg = sd.kind==='subnet' ? sd : (td.kind==='subnet' ? td : null);
+  if(seg){ showSegment(seg.net || seg.label); return; }
+  const dev=a||b;
+  if(dev) showDevice(dev);
+}
+
+/* Open the dedicated link screen: graph on the left, detail on the right. */
+function openLink(a,b){
+  const sel=document.getElementById('opt-view');
+  if(sel.value!=='link' && sel.value!=='path') STATE.prevView=sel.value;
+  STATE.linkFocus={a:a.id, b:b.id};
+  sel.value='link';
+  render();
+  showLink(a,b);
 }
 
 function showDevice(d, opts){
