@@ -1,0 +1,3148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<title>NetPath — topology and route trace from device configs</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js"></script>
+<style>
+:root{
+  --bg:#0e1621;
+  --panel:#182534;
+  --panel-2:#13202e;
+  --rule:#27394f;
+  --ink:#d3dfec;
+  --ink-dim:#7f93aa;
+  --ink-faint:#546a83;
+  --cyan:#4fc3d9;
+  --amber:#e8a13a;
+  --red:#e0625f;
+  --green:#5fb98a;
+  --mono:"IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+  --sans:"Inter", system-ui, -apple-system, sans-serif;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font-family:var(--sans); font-size:14px; line-height:1.5;
+  -webkit-font-smoothing:antialiased;
+}
+button{font-family:inherit; font-size:13px; cursor:pointer}
+input,textarea,select{font-family:var(--mono); font-size:13px}
+
+.shell{display:grid; grid-template-columns:290px minmax(0,1fr) 400px; height:100vh}
+@media (max-width:1100px){
+  .shell{grid-template-columns:1fr; height:auto; min-height:100vh}
+  .stage{height:60vh}
+}
+
+/* ---- panels ---- */
+.rail{background:var(--panel-2); border-right:1px solid var(--rule); display:flex; flex-direction:column; min-height:0}
+.rail-right{border-right:none; border-left:1px solid var(--rule)}
+.rail-head{padding:16px 16px 12px; border-bottom:1px solid var(--rule)}
+.rail-body{overflow:auto; padding:14px 16px; flex:1; min-height:0}
+
+.brand{font-size:17px; font-weight:600; letter-spacing:-.01em; margin:0}
+.brand span{color:var(--cyan)}
+.brand-sub{margin:4px 0 0; color:var(--ink-faint); font-size:12.5px}
+
+h2.sec{font-size:12.5px; font-weight:600; color:var(--ink-dim); margin:0 0 8px}
+h2.sec:not(:first-child){margin-top:22px}
+
+/* ---- drop zone ---- */
+.drop{
+  border:1px dashed var(--rule); border-radius:6px; padding:20px 14px; text-align:center;
+  color:var(--ink-faint); font-size:13px; transition:border-color .15s, background .15s;
+}
+.drop.over{border-color:var(--cyan); background:rgba(79,195,217,.06); color:var(--cyan)}
+.drop b{display:block; color:var(--ink); font-weight:500; margin-bottom:3px}
+
+.btn{
+  background:var(--panel); color:var(--ink); border:1px solid var(--rule);
+  border-radius:5px; padding:7px 12px; transition:border-color .15s, background .15s;
+}
+.btn:hover{border-color:var(--ink-faint)}
+.btn:focus-visible{outline:2px solid var(--cyan); outline-offset:1px}
+.btn-go{background:var(--amber); border-color:var(--amber); color:#1a1206; font-weight:600}
+.btn-go:hover{background:#f2ae48; border-color:#f2ae48}
+.btn-row{display:flex; gap:8px; flex-wrap:wrap; margin-top:12px}
+
+textarea.paste{
+  width:100%; height:120px; background:var(--bg); color:var(--ink);
+  border:1px solid var(--rule); border-radius:5px; padding:9px; resize:vertical;
+  line-height:1.45;
+}
+textarea.paste:focus{outline:none; border-color:var(--cyan)}
+
+/* ---- device list ---- */
+ul.devs{list-style:none; margin:0; padding:0}
+ul.devs li{
+  display:flex; align-items:center; gap:9px; padding:7px 8px; border-radius:5px;
+  font-family:var(--mono); font-size:12.5px; cursor:pointer;
+}
+ul.devs li:hover{background:var(--panel)}
+ul.devs li.sel{background:var(--panel); box-shadow:inset 2px 0 0 var(--cyan)}
+.devbox{accent-color:var(--cyan); margin:0; flex:none; cursor:pointer}
+ul.devs li.off .dev-name, ul.devs li.off .chip{opacity:.42}
+.chip{
+  font-family:var(--sans); font-size:10px; font-weight:600; padding:1px 5px;
+  border-radius:3px; letter-spacing:.02em; flex:none;
+}
+.chip.cisco{background:rgba(79,195,217,.16); color:var(--cyan)}
+.chip.pan{background:rgba(232,161,58,.16); color:var(--amber)}
+.dev-name{flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.dev-x{color:var(--ink-faint); background:none; border:none; padding:0 2px; font-size:15px; line-height:1}
+.dev-x:hover{color:var(--red)}
+
+/* ---- stage ---- */
+.stage{position:relative; min-width:0; background:
+  radial-gradient(circle at 1px 1px, #1b2836 1px, transparent 0) 0 0/26px 26px, var(--bg);}
+#cy{position:absolute; inset:0}
+.stage-bar{
+  position:absolute; top:12px; left:12px; right:12px; z-index:5;
+  display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+  pointer-events:none;
+}
+.stage-bar > *{pointer-events:auto}
+.toggle{
+  display:inline-flex; align-items:center; gap:7px; background:rgba(24,37,52,.92);
+  border:1px solid var(--rule); border-radius:5px; padding:6px 11px; font-size:12.5px;
+  color:var(--ink-dim); backdrop-filter:blur(6px);
+}
+.toggle input{accent-color:var(--cyan); margin:0}
+.toggle select{background:var(--bg); color:var(--ink); border:1px solid var(--rule);
+  border-radius:4px; padding:3px 6px; font-family:var(--sans); font-size:12.5px}
+.toggle select:focus{outline:none; border-color:var(--cyan)}
+.legend{
+  position:absolute; left:12px; bottom:12px; z-index:5; display:flex; gap:14px;
+  background:rgba(24,37,52,.92); border:1px solid var(--rule); border-radius:5px;
+  padding:7px 12px; font-size:12px; color:var(--ink-dim); backdrop-filter:blur(6px);
+}
+.legend i{display:inline-block; width:9px; height:9px; border-radius:2px; margin-right:6px; vertical-align:-1px}
+.empty-stage{
+  position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+  flex-direction:column; gap:6px; color:var(--ink-faint); text-align:center; padding:24px;
+}
+.empty-stage strong{color:var(--ink-dim); font-weight:500; font-size:15px}
+
+/* ---- trace form ---- */
+.field{margin-bottom:11px}
+.field label{display:block; font-size:12px; color:var(--ink-dim); margin-bottom:4px; font-family:var(--sans)}
+.field input, .field select{
+  width:100%; background:var(--bg); border:1px solid var(--rule); color:var(--ink);
+  border-radius:5px; padding:7px 9px;
+}
+.field input:focus,.field select:focus{outline:none; border-color:var(--cyan)}
+.pair{display:grid; grid-template-columns:1fr 1fr; gap:9px}
+
+/* ---- verdict + hops ---- */
+.verdict{
+  border-left:3px solid var(--rule); background:var(--panel); padding:10px 12px;
+  border-radius:0 5px 5px 0; margin:14px 0 12px; font-size:13px;
+}
+.verdict.ok{border-left-color:var(--green)}
+.verdict.bad{border-left-color:var(--red)}
+.verdict b{display:block; margin-bottom:2px; font-weight:600}
+.verdict.ok b{color:var(--green)}
+.verdict.bad b{color:var(--red)}
+.verdict p{margin:0; color:var(--ink-dim); font-family:var(--mono); font-size:12px}
+
+ol.hops{list-style:none; margin:0; padding:0; counter-reset:h}
+ol.hops li{
+  position:relative; padding:9px 0 9px 30px; border-bottom:1px solid var(--rule);
+  font-family:var(--mono); font-size:12px;
+}
+ol.hops li:last-child{border-bottom:none}
+ol.hops li::before{
+  counter-increment:h; content:counter(h);
+  position:absolute; left:0; top:9px; width:20px; height:20px; border-radius:50%;
+  background:var(--panel); border:1px solid var(--rule); color:var(--ink-faint);
+  font-size:11px; display:flex; align-items:center; justify-content:center;
+}
+.hop-dev{color:var(--amber); font-weight:600; font-size:13px}
+.hop-line{color:var(--ink-dim); margin-top:3px}
+.hop-line span{color:var(--ink)}
+.tag{font-family:var(--sans); font-size:10px; padding:1px 5px; border-radius:3px; margin-left:6px}
+.tag.connected{background:rgba(95,185,138,.16); color:var(--green)}
+.tag.static{background:rgba(79,195,217,.16); color:var(--cyan)}
+.tag.igp{background:rgba(127,147,170,.18); color:var(--ink-dim)}
+.tag.table{background:rgba(160,130,220,.18); color:#a98ede}
+.tag.manual{background:rgba(160,130,220,.18); color:#a98ede}
+.rt-form{display:grid; grid-template-columns:1fr 1fr; gap:7px; margin-top:9px}
+.rt-form input{background:var(--bg); border:1px solid var(--rule); color:var(--ink); border-radius:5px; padding:6px 8px; width:100%}
+.rt-form input:focus{outline:none; border-color:var(--cyan)}
+.rt-form .wide{grid-column:1 / -1}
+.rt-paste{width:100%; height:78px; background:var(--bg); color:var(--ink); border:1px solid var(--rule);
+  border-radius:5px; padding:8px; resize:vertical; margin-top:9px; font-size:12px; line-height:1.4}
+.rt-paste:focus{outline:none; border-color:var(--cyan)}
+.auth{display:flex; align-items:flex-start; gap:8px; margin-top:11px; font-size:12px; color:var(--ink-dim); line-height:1.45}
+.auth input{accent-color:var(--cyan); margin-top:2px; flex:none}
+.saved-note{font-size:11.5px; color:var(--ink-faint); margin:9px 0 0}
+
+.tabs{display:flex; gap:4px; margin:0 0 14px; border-bottom:1px solid var(--rule)}
+.tabbtn{background:none; border:none; color:var(--ink-faint); padding:7px 3px; font-size:12.5px;
+  font-weight:500; border-bottom:2px solid transparent; margin-bottom:-1px}
+.tabbtn.on{color:var(--ink); border-bottom-color:var(--cyan)}
+.tabbtn+.tabbtn{margin-left:10px}
+
+.modstate{display:flex; align-items:center; gap:8px; margin-bottom:11px; font-size:12.5px; color:var(--ink-dim)}
+.moddot{width:7px; height:7px; border-radius:50%; background:var(--ink-faint); flex:none}
+.moddot.on{background:var(--amber)}
+.cfgpane-label{font-size:11px; font-weight:600; color:var(--ink-faint); margin:14px 0 5px; display:flex; justify-content:space-between}
+.codeblock{
+  background:var(--bg); border:1px solid var(--rule); border-radius:5px; overflow:auto; max-height:280px;
+  font-family:var(--mono); font-size:11.5px; line-height:1.65;
+}
+.cline{display:flex; padding:0 8px}
+.cline .ln{width:34px; flex:none; color:var(--ink-faint); text-align:right; padding-right:10px; user-select:none}
+.cline .tx{white-space:pre; color:var(--ink-dim)}
+.cline.diff-del{background:rgba(224,98,95,.08)}
+.cline.diff-del .tx{color:#e08a88}
+.cline.diff-add{background:rgba(95,185,138,.09)}
+.cline.diff-add .tx{color:#8fcfad}
+.cline.pinned{background:rgba(232,161,58,.18); outline:1px solid var(--amber)}
+.cline.pinned .ln{color:var(--amber)}
+.cfg-edit{
+  width:100%; min-height:280px; background:var(--bg); color:var(--ink); border:1px solid var(--cyan);
+  border-radius:5px; padding:9px; resize:vertical; font-family:var(--mono); font-size:11.5px; line-height:1.55;
+}
+.cfg-edit:focus{outline:none}
+.cfg-note{font-size:11.5px; color:var(--ink-faint); margin:0 0 10px}
+
+.pin-card{border-left:3px solid #a98ede; background:var(--panel); padding:10px 12px; border-radius:0 5px 5px 0; margin:0 0 14px}
+.pin-card b{display:block; color:#c7a8ea; font-weight:600; margin-bottom:3px; font-size:13px}
+.pin-card p{margin:0 0 9px; color:var(--ink-dim); font-family:var(--mono); font-size:12px}
+.warn.clickable{cursor:pointer}
+.warn.clickable:hover{background:rgba(232,161,58,.06)}
+.devlist-dot{width:6px; height:6px; border-radius:50%; background:var(--amber); flex:none; margin-left:2px}
+
+.seg{display:flex; border:1px solid var(--rule); border-radius:5px; overflow:hidden}
+.seg button{flex:1; background:var(--bg); border:none; color:var(--ink-faint); padding:7px 4px; font-size:12.5px}
+.seg button+button{border-left:1px solid var(--rule)}
+.seg button.on{background:var(--panel); color:var(--ink); font-weight:500; box-shadow:inset 0 -2px 0 var(--cyan)}
+.seg button:hover:not(.on){color:var(--ink-dim)}
+
+.diverge{border-left:3px solid var(--cyan); background:var(--panel); padding:10px 12px;
+  border-radius:0 5px 5px 0; margin:0 0 14px}
+.diverge b{display:block; color:var(--cyan); font-weight:600; margin-bottom:3px; font-size:13px}
+.diverge p{margin:0 0 9px; color:var(--ink-dim); font-family:var(--mono); font-size:12px; line-height:1.5}
+.cmp-head{display:flex; align-items:center; gap:8px; font-size:12px; font-weight:600;
+  color:var(--ink-faint); margin:20px 0 2px; padding-bottom:5px; border-bottom:1px solid var(--rule)}
+.cmp-head .vr{margin-left:auto; font-family:var(--mono); font-weight:400; font-size:11.5px}
+.cmp-head.before .vr{color:var(--ink-dim)}
+.cmp-head.after .vr{color:var(--amber)}
+.nochange{font-size:12px; color:var(--ink-faint); border-left:2px solid var(--rule);
+  padding:4px 0 4px 10px; margin:0 0 14px; line-height:1.5}
+
+.dev-head{display:flex; align-items:center; gap:8px; margin-bottom:2px}
+.dev-head h2{margin:0 !important; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.btn.tiny{padding:4px 9px; font-size:11.5px}
+.btn.danger:hover{border-color:var(--red); color:var(--red)}
+.rename-row{display:flex; gap:7px; margin-bottom:10px}
+.rename-row input{flex:1; background:var(--bg); border:1px solid var(--cyan); color:var(--ink);
+  border-radius:5px; padding:6px 9px; font-family:var(--mono); font-size:13px}
+.rename-row input:focus{outline:none}
+.noconfig{font-size:12px; color:var(--ink-faint); border-left:2px solid var(--rule);
+  padding:6px 0 6px 10px; margin:0 0 12px; line-height:1.5}
+.tag.deny{background:rgba(224,98,95,.18); color:var(--red)}
+.tag.allow{background:rgba(95,185,138,.16); color:var(--green)}
+
+table.fib{width:100%; border-collapse:collapse; font-family:var(--mono); font-size:11.5px}
+table.fib th{
+  text-align:left; font-family:var(--sans); font-size:11px; font-weight:500;
+  color:var(--ink-faint); padding:5px 8px 5px 0; border-bottom:1px solid var(--rule);
+}
+table.fib td{padding:5px 8px 5px 0; border-bottom:1px solid rgba(39,57,79,.5); color:var(--ink-dim)}
+table.fib td:first-child{color:var(--ink)}
+
+.note{font-size:12px; color:var(--ink-faint); margin:10px 0 0; line-height:1.55}
+.warn{
+  font-family:var(--mono); font-size:11.5px; color:var(--ink-dim);
+  border-left:2px solid var(--amber); padding:4px 0 4px 10px; margin-bottom:7px;
+}
+.hidden{display:none}
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- ============ LEFT: config intake ============ -->
+  <aside class="rail">
+    <div class="rail-head">
+      <h1 class="brand">Net<span>Path</span></h1>
+      <p class="brand-sub">Topology and route trace, built from your device configs</p>
+    </div>
+    <div class="rail-body">
+      <h2 class="sec">Add configs</h2>
+      <div class="drop" id="drop">
+        <b>Drop config files here</b>
+        or click to browse
+      </div>
+      <input type="file" id="file" multiple accept=".txt,.cfg,.conf,.log,.xml,.set" class="hidden">
+
+      <textarea class="paste" id="paste" placeholder="…or paste one config here and press Add"></textarea>
+      <div class="btn-row">
+        <button class="btn" id="add-paste">Add config</button>
+        <button class="btn" id="load-sample">Load example lab</button>
+      </div>
+
+      <h2 class="sec">Project</h2>
+      <div class="btn-row" style="margin-top:0">
+        <button class="btn" id="save-proj">Save project</button>
+        <button class="btn" id="open-proj">Open project</button>
+        <button class="btn" id="clear-all">Clear all</button>
+      </div>
+      <input type="file" id="projfile" accept=".json,.netpath" class="hidden">
+      <p class="saved-note" id="autosave-note">Your work stays in this browser until you clear it.</p>
+
+      <h2 class="sec">Devices</h2>
+      <ul class="devs" id="devlist"></ul>
+      <p class="note" id="dev-empty">No devices yet.</p>
+
+      <h2 class="sec">Providers</h2>
+      <label class="auth" style="margin-top:0"><input type="checkbox" id="opt-autowan" checked>
+        <span>Detect carriers from interface descriptions. Unmatched default-route uplinks become Internet.</span></label>
+      <ul class="devs" id="provlist"></ul>
+      <div class="rt-form">
+        <input id="prov-name" placeholder="add a carrier, e.g. Orange" spellcheck="false">
+        <button class="btn" id="prov-add">Add</button>
+      </div>
+
+      <h2 class="sec">WAN clouds</h2>
+      <div id="cloudlist"></div>
+
+      <h2 class="sec">What it reads</h2>
+      <p class="note">
+        Cisco IOS / IOS-XE / NX-OS / ASA: hostname, interfaces and addresses, VRFs,
+        static routes, OSPF network statements, BGP neighbors.<br><br>
+        Palo Alto: set-format or XML export — interfaces and sub-interfaces, zones,
+        virtual routers, static routes, address objects, security rules.<br><br>
+        On PAN-OS run <code style="font-family:var(--mono);color:var(--ink-dim)">set cli config-output-format set</code>
+        then <code style="font-family:var(--mono);color:var(--ink-dim)">show config running</code>.
+      </p>
+    </div>
+  </aside>
+
+  <!-- ============ CENTER: graph ============ -->
+  <main class="stage">
+    <div class="stage-bar">
+      <label class="toggle">View
+        <select id="opt-view">
+          <option value="simple" selected>Topology only — one link per pair</option>
+          <option value="devices">Devices only</option>
+          <option value="transit">Devices + shared segments</option>
+          <option value="all">Everything</option>
+          <option value="path">Traced path only</option>
+        </select>
+      </label>
+      <label class="toggle"><input type="checkbox" id="opt-focus" checked> Focus path after trace</label>
+      <label class="toggle"><input type="checkbox" id="opt-igp" checked> Infer IGP reachability</label>
+      <button class="btn" id="relayout">Re-arrange</button>
+      <button class="btn" id="fit">Fit</button>
+    </div>
+    <div id="cy"></div>
+    <div class="empty-stage" id="stage-empty">
+      <strong>Nothing to draw yet</strong>
+      <span>Add a config on the left, or load the example lab to see how it works.</span>
+    </div>
+    <div class="legend">
+      <span><i style="background:#1c2c3e; border:1px solid #3a5273"></i>Router / switch</span>
+      <span><i style="background:#2a2416; border:1px solid #8a6a2e"></i>Firewall</span>
+      <span><i style="background:#16241e; border:1px solid #3f7a63"></i>Switch</span>
+      <span><i style="background:#122b33; border:1px solid #2c6b7a"></i>L3 segment</span>
+      <span><i style="background:#3f7a63"></i>L2 link</span>
+      <span><i style="background:#e8a13a"></i>Traced path</span>
+    </div>
+  </main>
+
+  <!-- ============ RIGHT: trace ============ -->
+  <aside class="rail rail-right">
+    <div class="rail-head">
+      <div class="field">
+        <label for="src">Source address</label>
+        <input id="src" placeholder="10.10.10.50" spellcheck="false">
+      </div>
+      <div class="field">
+        <label for="dst">Destination address</label>
+        <input id="dst" placeholder="192.168.50.20" spellcheck="false">
+      </div>
+      <div class="field">
+        <label for="startdev">Start from</label>
+        <select id="startdev"><option value="">Auto — device owning the source subnet</option></select>
+      </div>
+      <div class="field">
+        <label>Trace against</label>
+        <div class="seg" id="modeseg">
+          <button type="button" data-mode="after" class="on">After</button>
+          <button type="button" data-mode="before">Before</button>
+          <button type="button" data-mode="both">Compare</button>
+        </div>
+      </div>
+      <button class="btn btn-go" id="run" style="width:100%">Trace the path</button>
+    </div>
+    <div class="rail-body" id="result">
+      <p class="note">Enter two addresses and trace. Each hop shows the route that matched,
+      the interface it leaves by, and — on firewalls — which security rule the traffic hits.</p>
+      <div id="warnbox"></div>
+    </div>
+  </aside>
+</div>
+
+<script>
+/* ============================================================
+   IP helpers
+   ============================================================ */
+function ip2int(ip){
+  if(typeof ip!=='string') return null;
+  const p=ip.trim().split('.');
+  if(p.length!==4) return null;
+  let n=0;
+  for(const s of p){
+    if(!/^\d{1,3}$/.test(s)) return null;
+    const v=parseInt(s,10);
+    if(v>255) return null;
+    n=(n*256)+v;
+  }
+  return n>>>0;
+}
+function int2ip(n){ n=n>>>0; return [(n>>>24)&255,(n>>>16)&255,(n>>>8)&255,n&255].join('.'); }
+function len2mask(l){ return l<=0?0:(l>=32?0xFFFFFFFF:((0xFFFFFFFF<<(32-l))>>>0)); }
+function mask2len(m){
+  const n=ip2int(m); if(n===null) return null;
+  let len=0;
+  for(let i=31;i>=0;i--){ if((n>>>i)&1) len++; else break; }
+  return len;
+}
+function wild2len(w){
+  const n=ip2int(w); if(n===null) return null;
+  return mask2len(int2ip((~n)>>>0));
+}
+function netOf(ipInt,len){ return (ipInt & len2mask(len))>>>0; }
+function inNet(ipInt,net,len){ return netOf(ipInt,len)===(net>>>0); }
+function cidr(net,len){ return int2ip(net)+'/'+len; }
+function parseCidr(s){
+  if(typeof s!=='string') return null;
+  const m=s.trim().match(/^(\d+\.\d+\.\d+\.\d+)\/(\d{1,2})$/);
+  if(!m) return null;
+  const ip=ip2int(m[1]); const len=parseInt(m[2],10);
+  if(ip===null||len>32) return null;
+  return {ip,len,net:netOf(ip,len)};
+}
+
+/* ============================================================
+   State
+   ============================================================ */
+const STATE = { devices:[], model:null, cy:null, selected:null, lastTrace:null, devTab:'overview', editingConfig:false, pinFocusLine:null, traceMode:'after', renaming:false, clouds:[] };
+let cloudSeq = 0;
+let devSeq = 0;
+
+/* ============================================================
+   Vendor detection
+   ============================================================ */
+function detectVendor(text){
+  const head = text.slice(0, 4000);
+  if(/<\?xml|<config\b/i.test(head)) return 'pan-xml';
+  const setLines = (text.match(/^\s*set\s+(network|deviceconfig|vsys|zone|rulebase|address|device)\b/gmi)||[]).length;
+  if(setLines >= 3) return 'pan-set';
+  if(/^\s*(hostname|interface|ip route|router ospf|router bgp|version \d)/mi.test(text)) return 'cisco';
+  if(setLines > 0) return 'pan-set';
+  return 'cisco';
+}
+
+/* ============================================================
+   Cisco parser (IOS / IOS-XE / NX-OS / ASA)
+   ============================================================ */
+/* Expand "10,20,30-33" into [10,20,30,31,32,33]. */
+function expandVlanList(s){
+  const out=[];
+  if(!s) return out;
+  if(/^(none)$/i.test(s.trim())) return out;
+  if(/^all$/i.test(s.trim())) return null;          // null means "every VLAN"
+  for(const part of String(s).split(',')){
+    const p=part.trim(); if(!p) continue;
+    const r=p.match(/^(\d+)\s*-\s*(\d+)$/);
+    if(r){
+      let a=parseInt(r[1],10), b=parseInt(r[2],10);
+      if(b<a){ const t=a; a=b; b=t; }
+      if(b-a>4094) b=a+4094;
+      for(let v=a;v<=b;v++) out.push(v);
+    } else if(/^\d+$/.test(p)) out.push(parseInt(p,10));
+  }
+  return out;
+}
+
+/* Cisco writes the same port a dozen ways. Normalize so CDP output, LLDP
+   output and the config all agree on one spelling. */
+function normPort(raw){
+  if(!raw) return '';
+  const s=String(raw).trim().replace(/\s+/g,'');
+  const m=s.match(/^([A-Za-z\-]+)([\d][\d\/\.:]*)$/);
+  if(!m) return s;
+  const p=m[1].toLowerCase(), n=m[2];
+  const map=[[/^twe/,'TwentyFiveGigE'],[/^tw/,'TwoGigabitEthernet'],[/^te/,'TenGigabitEthernet'],
+             [/^fo/,'FortyGigabitEthernet'],[/^hu/,'HundredGigE'],[/^gi/,'GigabitEthernet'],
+             [/^fa/,'FastEthernet'],[/^po/,'Port-channel'],[/^vl/,'Vlan'],[/^se/,'Serial'],
+             [/^lo/,'Loopback'],[/^et/,'Ethernet'],[/^mg/,'Management']];
+  for(const [re,full] of map) if(re.test(p)) return full+n;
+  return s;
+}
+function baseName(s){
+  return String(s||'').trim().split(/[.\s(]/)[0];
+}
+
+function parseCisco(text, fname){
+  const dev = newDevice('cisco', fname);
+  const lines = text.split(/\r?\n/);
+  let cur=null, ctx=null, lastVlans=[];
+
+  lines.forEach((raw, idx) => {
+    const lineNo = idx + 1;
+    const line = raw.replace(/\t/g,'    ');
+    const t = line.trim();
+    if(!t || t[0]==='!' || t[0]==='#') return;
+    const indented = /^\s/.test(line);
+
+    if(!indented){
+      cur=null; ctx=null;
+    }
+
+    let m;
+    if((m=t.match(/^hostname\s+(\S+)/i))){ dev.name=m[1]; return; }
+    if((m=t.match(/^switchname\s+(\S+)/i))){ dev.name=m[1]; return; }
+
+    if((m=t.match(/^interface\s+(.+?)\s*$/i))){
+      cur = { name:m[1], desc:'', vrf:'default', addrs:[], shutdown:false, ospf:false, zone:null, line:lineNo };
+      dev.interfaces.push(cur);
+      return;
+    }
+
+    if(cur){
+      if((m=t.match(/^description\s+(.+)/i))){ cur.desc=m[1]; return; }
+      if(/^shutdown\b/i.test(t)){ cur.shutdown=true; return; }
+      if(/^no shutdown\b/i.test(t)){ cur.shutdown=false; return; }
+      if((m=t.match(/^(?:ip\s+)?vrf\s+forwarding\s+(\S+)/i))){ cur.vrf=m[1]; return; }
+      if((m=t.match(/^vrf\s+member\s+(\S+)/i))){ cur.vrf=m[1]; return; }
+      if((m=t.match(/^nameif\s+(\S+)/i))){ cur.zone=m[1]; if(!cur.desc) cur.desc=m[1]; return; }
+
+      // --- layer 2 switchport configuration ---
+      if(/^switchport\s+mode\s+access\b/i.test(t)){ cur.l2=true; cur.mode='access'; dev.isSwitch=true; return; }
+      if(/^switchport\s+mode\s+trunk\b/i.test(t)){ cur.l2=true; cur.mode='trunk'; dev.isSwitch=true; return; }
+      if((m=t.match(/^switchport\s+access\s+vlan\s+(\d+)/i))){
+        cur.l2=true; cur.accessVlan=parseInt(m[1],10); if(!cur.mode) cur.mode='access';
+        cur.accessLine=lineNo; dev.isSwitch=true; return;
+      }
+      if((m=t.match(/^switchport\s+trunk\s+allowed\s+vlan\s+(?:(add|remove|none)\s+)?(\S+)/i))){
+        cur.l2=true; if(!cur.mode) cur.mode='trunk'; dev.isSwitch=true;
+        const op=(m[1]||'').toLowerCase(), list=expandVlanList(m[2]);
+        if(op==='none'){ cur.allowed=[]; }
+        else if(op==='add'){ cur.allowed=(cur.allowed||[]).concat(list); }
+        else if(op==='remove'){ cur.allowed=(cur.allowed||[]).filter(v=>list.indexOf(v)<0); }
+        else { cur.allowed=list; }
+        cur.allowedLine=lineNo;
+        return;
+      }
+      if((m=t.match(/^switchport\s+trunk\s+native\s+vlan\s+(\d+)/i))){
+        cur.l2=true; cur.native=parseInt(m[1],10); dev.isSwitch=true; return;
+      }
+      if(/^switchport\s*$/i.test(t)){ cur.l2=true; dev.isSwitch=true; return; }
+
+      if((m=t.match(/^ip(?:v4)?\s+address\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+)/i))){
+        const len=mask2len(m[2]); const ip=ip2int(m[1]);
+        if(ip!==null && len!==null) cur.addrs.push({ip,len,line:lineNo});
+        return;
+      }
+      if((m=t.match(/^ip(?:v4)?\s+address\s+(\d+\.\d+\.\d+\.\d+)\/(\d{1,2})/i))){
+        cur.addrs.push({ip:ip2int(m[1]), len:parseInt(m[2],10), line:lineNo});
+        return;
+      }
+      if((m=t.match(/^ip\s+ospf\s+\d+\s+area\s+\S+/i))){ cur.ospf=true; dev.dynamic=true; return; }
+    }
+
+    // --- top-level VLAN database ---
+    if((m=t.match(/^vlan\s+([\d,\-\s]+)$/i))){
+      ctx='vlan'; lastVlans=expandVlanList(m[1]);
+      for(const v of lastVlans) if(!dev.vlans[v]) dev.vlans[v]={id:v, name:null, line:lineNo};
+      return;
+    }
+    if(ctx==='vlan' && (m=t.match(/^name\s+(\S+)/i))){
+      for(const v of lastVlans) if(dev.vlans[v]) dev.vlans[v].name=m[1];
+      return;
+    }
+
+    if((m=t.match(/^router\s+ospf\b/i))){ ctx='ospf'; dev.dynamic=true; return; }
+    if((m=t.match(/^router\s+bgp\s+(\d+)/i))){ ctx='bgp'; dev.dynamic=true; dev.asn=m[1]; return; }
+    if((m=t.match(/^router\s+eigrp\b/i))){ ctx='eigrp'; dev.dynamic=true; return; }
+
+    if(ctx==='ospf' && (m=t.match(/^network\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+)\s+area\s+(\S+)/i))){
+      const len=wild2len(m[2]); const ip=ip2int(m[1]);
+      if(ip!==null && len!==null) dev.ospfNets.push({net:netOf(ip,len), len});
+      return;
+    }
+    if(ctx==='bgp' && (m=t.match(/^neighbor\s+(\d+\.\d+\.\d+\.\d+)\s+remote-as\s+(\d+)/i))){
+      dev.bgpPeers.push({ip:ip2int(m[1]), asn:m[2]});
+      return;
+    }
+
+    // Static routes — IOS, NX-OS and ASA forms
+    if((m=t.match(/^ip\s+route\s+(?:vrf\s+(\S+)\s+)?(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+)\s+(.+)$/i))){
+      addCiscoStatic(dev, m[1]||'default', ip2int(m[2]), mask2len(m[3]), m[4], lineNo);
+      return;
+    }
+    if((m=t.match(/^ip\s+route\s+(?:vrf\s+(\S+)\s+)?(\d+\.\d+\.\d+\.\d+)\/(\d{1,2})\s+(.+)$/i))){
+      addCiscoStatic(dev, m[1]||'default', ip2int(m[2]), parseInt(m[3],10), m[4], lineNo);
+      return;
+    }
+    if((m=t.match(/^route\s+(\S+)\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+)/i))){
+      dev.statics.push({vrf:'default', net:netOf(ip2int(m[2]),mask2len(m[3])), len:mask2len(m[3]),
+                        nextHop:ip2int(m[4]), iface:null, ad:1, name:'via '+m[1], line:lineNo});
+      return;
+    }
+  });
+
+  let usedFallbackName=false;
+  if(!dev.name){ dev.name = fname.replace(/\.[^.]+$/,'') || ('device-'+(++devSeq)); usedFallbackName=true; }
+  dev.usedFallbackName = usedFallbackName;
+  return dev;
+}
+
+function addCiscoStatic(dev, vrf, ip, len, rest, lineNo){
+  if(ip===null||len===null) return;
+  const toks = rest.trim().split(/\s+/);
+  let iface=null, nh=null, ad=1;
+  for(const tk of toks){
+    if(/^\d+\.\d+\.\d+\.\d+$/.test(tk)){ nh = ip2int(tk); }
+    else if(/^\d+$/.test(tk)){ ad = parseInt(tk,10); }
+    else if(/^(name|tag|track|permanent)$/i.test(tk)){ break; }
+    else if(/^[A-Za-z]/.test(tk) && !iface){ iface = tk; }
+  }
+  dev.statics.push({vrf, net:netOf(ip,len), len, nextHop:nh, iface, ad, name:null, line:lineNo});
+}
+
+/* ============================================================
+   Palo Alto — set format
+   ============================================================ */
+function tokenizeSet(line){
+  const out=[]; let i=0;
+  while(i<line.length){
+    const c=line[i];
+    if(/\s/.test(c)){ i++; continue; }
+    if(c==='['){
+      i++; const grp=[]; let buf='';
+      while(i<line.length && line[i]!==']'){
+        if(/\s/.test(line[i])){ if(buf){grp.push(buf);buf='';} }
+        else if(line[i]==='"'){ i++; while(i<line.length&&line[i]!=='"'){buf+=line[i++];} }
+        else buf+=line[i];
+        i++;
+      }
+      if(buf) grp.push(buf);
+      i++;
+      out.push(grp);
+      continue;
+    }
+    if(c==='"'){ i++; let buf=''; while(i<line.length&&line[i]!=='"'){buf+=line[i++];} i++; out.push(buf); continue; }
+    let buf=''; while(i<line.length && !/\s/.test(line[i])){ buf+=line[i++]; }
+    out.push(buf);
+  }
+  return out;
+}
+function flat(v){ return Array.isArray(v)?v:[v]; }
+
+const PAN_RULE_KEYS = new Set(['from','to','source','destination','action','disabled','application',
+  'service','category','source-user','source-hip','destination-hip','hip-profiles','tag','description',
+  'rule-type','log-setting','log-start','log-end','profile-setting','negate-source','negate-destination',
+  'schedule','group-tag','icmp-unreachable']);
+
+function parsePanSet(text, fname){
+  const dev = newDevice('palo-alto', fname);
+  const ifIndex = {};   // name -> iface object
+  const routes = {};    // vr|name -> partial route
+  const rules = {};     // rule name -> rule
+
+  function iface(name){
+    if(!ifIndex[name]){
+      ifIndex[name] = {name, desc:'', vrf:'default', addrs:[], shutdown:false, ospf:false, zone:null};
+      dev.interfaces.push(ifIndex[name]);
+    }
+    return ifIndex[name];
+  }
+  function addIp(name, val, lineNo){
+    const c = parseCidr(val);
+    if(c) iface(name).addrs.push({ip:c.ip, len:c.len, line:lineNo});
+    else if(ip2int(val)!==null) iface(name).addrs.push({ip:ip2int(val), len:32, line:lineNo});
+  }
+
+  const rawLines = text.split(/\r?\n/);
+  for(let lineIdx=0; lineIdx<rawLines.length; lineIdx++){
+    const lineNo = lineIdx+1;
+    const raw = rawLines[lineIdx];
+    const line = raw.trim();
+    if(!line || line[0]==='#') continue;
+    if(!/^set\s/i.test(line)) continue;
+    let tk = tokenizeSet(line).slice(1);
+    // strip container prefixes
+    while(tk.length>1 && /^(devices|vsys|template|template-stack|config|device-group|shared)$/i.test(tk[0])){
+      if(/^shared$/i.test(tk[0])) tk = tk.slice(1); else tk = tk.slice(2);
+    }
+    if(!tk.length) continue;
+    const k = tk.map(x=>Array.isArray(x)?x:String(x));
+
+    // hostname
+    if(k[0]==='deviceconfig' && k[2]==='hostname'){ dev.name=String(k[3]); continue; }
+
+    // interfaces
+    if(k[0]==='network' && k[1]==='interface'){
+      const type=String(k[2]);
+      if(type==='ethernet' || type==='aggregate-ethernet'){
+        const base=String(k[3]);
+        const li = k.indexOf('layer3');
+        if(li>-1){
+          const rest = k.slice(li+1);
+          if(rest[0]==='units'){
+            const sub=String(rest[1]);
+            if(rest[2]==='ip') addIp(sub, String(rest[3]), lineNo);
+            if(rest[2]==='comment') iface(sub).desc=String(rest[3]);
+          } else if(rest[0]==='ip'){
+            addIp(base, String(rest[1]), lineNo);
+          } else if(rest[0]==='comment'){ iface(base).desc=String(rest[1]); }
+        }
+        continue;
+      }
+      if(type==='vlan' || type==='loopback' || type==='tunnel'){
+        if(k[3]==='units'){
+          const sub=String(k[4]);
+          if(k[5]==='ip') addIp(sub, String(k[6]), lineNo);
+          if(k[5]==='comment') iface(sub).desc=String(k[6]);
+        } else if(k[3]==='ip'){ addIp(type, String(k[4]), lineNo); }
+        continue;
+      }
+      continue;
+    }
+
+    // zones
+    if(k[0]==='zone' && k[2]==='network'){
+      const zname=String(k[1]);
+      const members = flat(k[4]!==undefined && Array.isArray(k[4]) ? k[4] : k.slice(4));
+      for(const mname of members){ if(mname) iface(String(mname)).zone=zname; }
+      dev.zones.add(zname);
+      continue;
+    }
+
+    // virtual routers
+    if(k[0]==='network' && k[1]==='virtual-router'){
+      const vr=String(k[2]);
+      dev.vrs.add(vr);
+      if(k[3]==='interface'){
+        const members = Array.isArray(k[4]) ? k[4] : k.slice(4);
+        for(const mname of flat(members)){ if(mname) iface(String(mname)).vrf=vr; }
+        continue;
+      }
+      if(k[3]==='protocol'){ dev.dynamic=true; continue; }
+      // static-route, with or without routing-table ip
+      let si = k.indexOf('static-route');
+      if(si>-1){
+        const rname=String(k[si+1]);
+        const key=vr+'|'+rname;
+        routes[key] = routes[key] || {vrf:vr, net:null, len:null, nextHop:null, iface:null, ad:10, name:rname};
+        const r=routes[key];
+        const attr=String(k[si+2]||'');
+        if(attr==='destination'){ const c=parseCidr(String(k[si+3])); if(c){ r.net=c.net; r.len=c.len; r.destLine=lineNo; } }
+        else if(attr==='nexthop'){
+          if(k[si+3]==='ip-address'){ r.nextHop=ip2int(String(k[si+4])); r.nhLine=lineNo; }
+          if(k[si+3]==='next-vr') r.nextVr=String(k[si+4]);
+        }
+        else if(attr==='interface'){ r.iface=String(k[si+3]); r.ifaceLine=lineNo; }
+        else if(attr==='metric'){ r.ad=parseInt(String(k[si+3]),10)||10; }
+        continue;
+      }
+      continue;
+    }
+
+    // address objects
+    if(k[0]==='address' && k[2]==='ip-netmask'){
+      dev.addrObjects[String(k[1])] = String(k[3]);
+      continue;
+    }
+    if(k[0]==='address' && k[2]==='ip-range'){
+      dev.addrObjects[String(k[1])] = String(k[3]);
+      continue;
+    }
+
+    // security rules — attributes may be one per line or several on one line
+    const ri = k.indexOf('rules');
+    if(ri>-1 && String(k[ri-1])==='security'){
+      const rname=String(k[ri+1]);
+      if(!rules[rname]) rules[rname]={name:rname, from:['any'], to:['any'], source:['any'],
+                                      destination:['any'], action:'allow', disabled:false,
+                                      order:Object.keys(rules).length, firstLine:lineNo, actionLine:null};
+      const r=rules[rname];
+      if(r.firstLine==null) r.firstLine=lineNo;
+      let p=ri+2;
+      while(p<k.length){
+        const attr = Array.isArray(k[p]) ? null : String(k[p]);
+        if(!attr || !PAN_RULE_KEYS.has(attr)){ p++; continue; }
+        p++;
+        let vals=[];
+        if(Array.isArray(k[p])){ vals=k[p].map(String); p++; }
+        else{
+          while(p<k.length && !Array.isArray(k[p]) && !PAN_RULE_KEYS.has(String(k[p]))){ vals.push(String(k[p])); p++; }
+        }
+        if(!vals.length) continue;
+        if(attr==='from'||attr==='to'||attr==='source'||attr==='destination') r[attr]=vals;
+        else if(attr==='action'){ r.action=vals[0]; r.actionLine=lineNo; }
+        else if(attr==='disabled') r.disabled=/^yes|true$/i.test(vals[0]);
+      }
+      continue;
+    }
+  }
+
+  for(const key in routes){
+    const r=routes[key];
+    if(r.net!==null){ r.line = r.nhLine || r.destLine || r.ifaceLine || null; dev.statics.push(r); }
+  }
+  dev.rules = Object.values(rules).sort((a,b)=>a.order-b.order);
+  let usedFallbackName=false;
+  if(!dev.name){ dev.name = fname.replace(/\.[^.]+$/,'') || ('firewall-'+(++devSeq)); usedFallbackName=true; }
+  dev.usedFallbackName = usedFallbackName;
+  return dev;
+}
+
+/* ============================================================
+   Palo Alto — XML export
+   ============================================================ */
+function parsePanXml(text, fname){
+  const dev = newDevice('palo-alto', fname);
+  let doc;
+  try{ doc = new DOMParser().parseFromString(text,'text/xml'); }
+  catch(e){ dev.warnings.push('Could not parse XML'); return dev; }
+  if(doc.querySelector('parsererror')){ dev.warnings.push('XML is malformed — parsed nothing'); return dev; }
+
+  const ifIndex={};
+  function iface(name){
+    if(!ifIndex[name]){ ifIndex[name]={name, desc:'', vrf:'default', addrs:[], shutdown:false, ospf:false, zone:null}; dev.interfaces.push(ifIndex[name]); }
+    return ifIndex[name];
+  }
+  function addIp(name, val){
+    const c=parseCidr(val);
+    if(c) iface(name).addrs.push({ip:c.ip,len:c.len});
+    else if(ip2int(val)!==null) iface(name).addrs.push({ip:ip2int(val),len:32});
+  }
+  const hn = doc.querySelector('deviceconfig > system > hostname');
+  if(hn) dev.name = hn.textContent.trim();
+
+  // layer3 IPs anywhere under an interface entry
+  doc.querySelectorAll('interface entry').forEach(en=>{
+    const name = en.getAttribute('name'); if(!name) return;
+    const l3 = en.querySelector(':scope > layer3') || en;
+    l3.querySelectorAll(':scope > ip > entry').forEach(e=>addIp(name, e.getAttribute('name')||''));
+    en.querySelectorAll(':scope > ip > entry').forEach(e=>addIp(name, e.getAttribute('name')||''));
+  });
+
+  // zones
+  doc.querySelectorAll('zone > entry').forEach(z=>{
+    const zn=z.getAttribute('name'); if(!zn) return;
+    dev.zones.add(zn);
+    z.querySelectorAll('network > layer3 > member').forEach(m=>{
+      const n=m.textContent.trim(); if(n) iface(n).zone=zn;
+    });
+  });
+
+  // virtual routers
+  doc.querySelectorAll('virtual-router > entry').forEach(vr=>{
+    const vn=vr.getAttribute('name')||'default';
+    dev.vrs.add(vn);
+    vr.querySelectorAll(':scope > interface > member').forEach(m=>{
+      const n=m.textContent.trim(); if(n) iface(n).vrf=vn;
+    });
+    if(vr.querySelector('protocol > ospf, protocol > bgp')) dev.dynamic=true;
+    vr.querySelectorAll('static-route > entry').forEach(sr=>{
+      const dst = sr.querySelector('destination');
+      const c = dst ? parseCidr(dst.textContent.trim()) : null;
+      if(!c) return;
+      const nh = sr.querySelector('nexthop > ip-address');
+      const eg = sr.querySelector('interface');
+      const mt = sr.querySelector('metric');
+      dev.statics.push({
+        vrf:vn, net:c.net, len:c.len,
+        nextHop: nh ? ip2int(nh.textContent.trim()) : null,
+        iface: eg ? eg.textContent.trim() : null,
+        ad: mt ? (parseInt(mt.textContent,10)||10) : 10,
+        name: sr.getAttribute('name')
+      });
+    });
+  });
+
+  // address objects
+  doc.querySelectorAll('address > entry').forEach(a=>{
+    const n=a.getAttribute('name'); const v=a.querySelector('ip-netmask, ip-range');
+    if(n&&v) dev.addrObjects[n]=v.textContent.trim();
+  });
+
+  // security rules
+  let order=0;
+  doc.querySelectorAll('rulebase > security > rules > entry').forEach(r=>{
+    const g=(sel)=>Array.from(r.querySelectorAll(sel+' > member')).map(m=>m.textContent.trim());
+    const act=r.querySelector('action');
+    dev.rules.push({
+      name:r.getAttribute('name')||('rule'+order),
+      from:g('from').length?g('from'):['any'],
+      to:g('to').length?g('to'):['any'],
+      source:g('source').length?g('source'):['any'],
+      destination:g('destination').length?g('destination'):['any'],
+      action:act?act.textContent.trim():'allow',
+      order:order++
+    });
+  });
+
+  let usedFallbackName=false;
+  if(!dev.name){ dev.name = fname.replace(/\.[^.]+$/,'') || ('firewall-'+(++devSeq)); usedFallbackName=true; }
+  dev.usedFallbackName = usedFallbackName;
+  if(!dev.interfaces.length) dev.warnings.push('No layer-3 interfaces found in this XML');
+  return dev;
+}
+
+function newDevice(vendor, fname){
+  return {
+    id:'d'+(++devSeq), vendor, file:fname||'pasted', name:null, rawText:'', originalText:null,
+    interfaces:[], statics:[], ospfNets:[], bgpPeers:[],
+    zones:new Set(), vrs:new Set(), addrObjects:{}, rules:[],
+    manualRoutes:[], tableAuthoritative:false, usedFallbackName:false,
+    vlans:{}, neighbors:[], isSwitch:false,
+    dynamic:false, warnings:[], fib:[]
+  };
+}
+
+function parseConfig(text, fname){
+  const v = detectVendor(text);
+  const d = v==='pan-xml' ? parsePanXml(text, fname)
+          : v==='pan-set' ? parsePanSet(text, fname)
+          : parseCisco(text, fname);
+  d.rawText = text;
+  return d;
+}
+
+/* Re-parse new text into an existing device, preserving its identity, baseline
+   text, and anything the user added by hand (routing table, promotion state). */
+function reparseInto(existing, text){
+  const fresh = parseConfig(text, existing.file);
+  // A name the user typed wins over anything in the config; otherwise the
+  // config's own hostname wins, falling back to the previous name.
+  const keepName = existing.customName ? existing.name
+                 : (fresh.usedFallbackName ? existing.name : fresh.name);
+  const id = existing.id, file = existing.file, originalText = existing.originalText;
+  const manualRoutes = existing.manualRoutes, tableAuthoritative = existing.tableAuthoritative;
+  const customName = !!existing.customName;
+  const neighbors = existing.neighbors || [];
+  Object.assign(existing, fresh);
+  existing.id = id; existing.file = file; existing.originalText = originalText;
+  existing.manualRoutes = manualRoutes; existing.tableAuthoritative = tableAuthoritative;
+  existing.customName = customName;
+  existing.neighbors = neighbors;
+  existing.name = keepName;
+  return existing;
+}
+
+/* Renaming has to carry the saved layout position across with it, since
+   positions are keyed by device name so they survive a reload. */
+function renameDevice(d, raw){
+  const newName = String(raw||'').trim();
+  if(!newName || newName===d.name) return false;
+  const oldKey='dev:'+d.name, newKey='dev:'+newName;
+  if(STATE.positions && STATE.positions[oldKey]){
+    STATE.positions[newKey]=STATE.positions[oldKey];
+    delete STATE.positions[oldKey];
+  }
+  d.name=newName;
+  d.customName=true;
+  return true;
+}
+
+/* Clearing the config leaves the device in place with its hand-added routing
+   table intact, so a device you only have a route table for still works. */
+function deleteConfig(d){ reparseInto(d, ''); }
+
+function deleteDevice(d){
+  if(STATE.positions) delete STATE.positions['dev:'+d.name];
+  STATE.devices=STATE.devices.filter(x=>x!==d);
+  if(STATE.selected===d.id) STATE.selected=null;
+  STATE.lastTrace=null;
+}
+
+/* ============================================================
+   Routing table import — show ip route / show routing route
+   ============================================================ */
+function classfulLen(ip){
+  const b=(ip>>>24)&255;
+  if(b<128) return 8; if(b<192) return 16; if(b<224) return 24; return 32;
+}
+function parseIosRoutes(text){
+  const out=[]; let majorLen=null, last=null;
+  for(const raw of text.split(/\r?\n/)){
+    const line=raw.trim();
+    if(!line) continue;
+    if(/^(Gateway of last resort|Codes:|Routing (Table|entry))/i.test(line)) continue;
+    if(/^\S{1,4}\s+-\s+\S/.test(line) && !/via|connected/i.test(line)) continue; // legend
+    if(/is (?:variably )?subnetted/i.test(line)){
+      const mm=line.match(/(\d+\.\d+\.\d+\.\d+)\/(\d{1,2})/);
+      majorLen = mm ? parseInt(mm[2],10) : null;
+      continue;
+    }
+    let net=null, len=null;
+    const isCont = /^(\[\d+\/\d+\]\s*)?via\s/i.test(line);
+    if(isCont && last){ net=last.net; len=last.len; }
+    else{
+      const pm=line.match(/(\d+\.\d+\.\d+\.\d+)(?:\/(\d{1,2}))?/);
+      if(!pm) continue;
+      const ip=ip2int(pm[1]); if(ip===null) continue;
+      len = pm[2]!=null ? parseInt(pm[2],10)
+          : (majorLen!=null && netOf(ip,Math.min(majorLen,32))!==null ? majorLen : classfulLen(ip));
+      if(len>32) continue;
+      net=netOf(ip,len); last={net,len};
+    }
+    const vm=line.match(/via\s+(\d+\.\d+\.\d+\.\d+)/i);
+    const cm=line.match(/directly connected,\s*([^\s,]+)/i);
+    const am=line.match(/\[(\d+)\/(\d+)\]/);
+    let iface = cm ? cm[1] : null;
+    if(!iface){
+      const im=line.match(/,\s*([A-Za-z][\w./:-]*)\s*$/);
+      if(im) iface=im[1];
+    }
+    if(!vm && !cm && !iface) continue;      // not a route line
+    out.push({net, len, nextHop: vm?ip2int(vm[1]):null, iface,
+              ad: am?parseInt(am[1],10):(cm?0:1), vrf:'default'});
+  }
+  return out;
+}
+function parsePanRoutes(text){
+  const out=[]; let vr='default';
+  for(const raw of text.split(/\r?\n/)){
+    const line=raw.trim(); if(!line) continue;
+    let m;
+    if((m=line.match(/^VIRTUAL ROUTER:\s*(\S+)/i))){ vr=m[1]; continue; }
+    if(/^(destination\s+nexthop|flags:|total\b)/i.test(line)) continue;
+    const tk=line.split(/\s+/);
+    const c=parseCidr(tk[0]); if(!c) continue;
+    const nh=ip2int(tk[1]||'');
+    let iface=null;
+    for(let i=tk.length-1;i>=1;i--){
+      if(/^(ethernet|ae\d|vlan|loopback|tunnel|sdwan)/i.test(tk[i])){ iface=tk[i]; break; }
+    }
+    let ad=10;
+    for(let i=2;i<tk.length;i++){ if(/^\d+$/.test(tk[i])){ ad=parseInt(tk[i],10); break; } }
+    out.push({net:c.net, len:c.len, nextHop:(nh && nh!==0)?nh:null, iface, ad, vrf:vr});
+  }
+  return out;
+}
+function importRouteTable(text){
+  const a=parseIosRoutes(text), b=parsePanRoutes(text);
+  return b.length>a.length ? b : a;
+}
+
+/* ============================================================
+   Model: subnets, adjacency, FIB
+   ============================================================ */
+function buildModel(devices, opts){
+  const warnings=[];
+  const warn=(msg, deviceId, line)=>warnings.push({msg, deviceId:deviceId||null, line:line!=null?line:null});
+  const subnets={};   // "net/len" -> {net,len,members:[{dev,iface,addr}]}
+  const byName={};
+
+  for(const d of devices){
+    d._vlans=null;
+    if(byName[d.name]) warn('Two devices are both called '+d.name+' — check you did not add the same config twice.');
+    byName[d.name]=d;
+    for(const i of d.interfaces){
+      i.dev = d;
+      for(const a of i.addrs){
+        if(a.ip===null||a.len===null) continue;
+        if(a.len>=31 && a.len===32) continue;      // loopback / host address: no shared segment
+        const key = cidr(netOf(a.ip,a.len), a.len);
+        (subnets[key] = subnets[key] || {net:netOf(a.ip,a.len), len:a.len, key, members:[]})
+          .members.push({dev:d, iface:i, addr:a});
+      }
+    }
+  }
+
+  // duplicate addresses on a segment
+  for(const k in subnets){
+    const seen={};
+    for(const m of subnets[k].members){
+      const s=int2ip(m.addr.ip);
+      if(seen[s] && seen[s].name!==m.dev.name)
+        warn(s+' is configured on both '+seen[s].name+' and '+m.dev.name+'.', m.dev.id, m.addr.line);
+      seen[s]=m.dev;
+    }
+  }
+
+  // ---- FIB: connected + static
+  for(const d of devices){
+    d.fib=[];
+    for(const i of d.interfaces){
+      if(i.shutdown) continue;
+      for(const a of i.addrs){
+        if(a.ip===null) continue;
+        d.fib.push({net:netOf(a.ip,a.len), len:a.len, type:'connected', ad:0, iface:i.name, nextHop:null, vrf:i.vrf, line:a.line||null});
+      }
+    }
+    for(const s of d.statics){
+      d.fib.push({net:s.net, len:s.len, type:'static', ad:s.ad!=null?s.ad:1,
+                  iface:s.iface, nextHop:s.nextHop, vrf:s.vrf||'default', name:s.name, line:s.line||null});
+    }
+    for(const mr of d.manualRoutes){
+      const dupConnected = d.fib.some(f=>f.type==='connected' && f.net===mr.net && f.len===mr.len && f.vrf===mr.vrf);
+      if(dupConnected) continue;
+      d.fib.push({net:mr.net, len:mr.len, type:'table', ad:mr.ad!=null?mr.ad:1,
+                  iface:mr.iface, nextHop:mr.nextHop, vrf:mr.vrf||'default', line:null});
+    }
+    // OSPF network statements just flag interfaces
+    for(const i of d.interfaces){
+      for(const a of i.addrs){
+        for(const on of d.ospfNets){ if(inNet(a.ip,on.net,on.len)) i.ospf=true; }
+      }
+    }
+
+    /* Index the FIB by prefix. Without this, every duplicate check below is a
+       linear scan of a table that is itself growing, which turns route
+       inference quadratic in the number of routes. */
+    d._keys = new Set();
+    d._conn = [];
+    for(const r of d.fib){
+      d._keys.add(r.net+'/'+r.len+'|'+r.vrf);
+      if(r.type==='connected') d._conn.push(r);
+    }
+    d._nets = d._conn.map(r=>({net:r.net, len:r.len}));
+  }
+
+  // ---- adjacency from shared subnets
+  const adj={}; // devId -> [{to, viaIface, nextHopIp, subnetKey}]
+  for(const k in subnets){
+    const sn=subnets[k];
+    for(const a of sn.members){
+      for(const b of sn.members){
+        if(a.dev===b.dev) continue;
+        (adj[a.dev.id]=adj[a.dev.id]||[]).push({
+          to:b.dev, viaIface:a.iface, nextHopIp:b.addr.ip, subnetKey:k, peerIface:b.iface
+        });
+      }
+    }
+  }
+
+  // ---- inferred IGP: BFS shortest path, only fills gaps
+  if(opts.igp){
+    for(const d of devices){
+      if(d.tableAuthoritative) continue;   // a real table was imported; do not invent routes
+      const first={}; const seen={[d.id]:true}; let frontier=[{dev:d, via:null}];
+      let guard=0;
+      while(frontier.length && guard++<64){
+        const next=[];
+        for(const f of frontier){
+          for(const e of (adj[f.dev.id]||[])){
+            if(seen[e.to.id]) continue;
+            seen[e.to.id]=true;
+            const via = f.via || {iface:e.viaIface.name, nextHop:e.nextHopIp, vrf:e.viaIface.vrf};
+            first[e.to.id]=via;
+            next.push({dev:e.to, via});
+          }
+        }
+        frontier=next;
+      }
+      for(const other of devices){
+        if(other===d || !first[other.id]) continue;
+        const via=first[other.id];
+        const suffix='|'+via.vrf;
+        for(const n of other._nets){
+          const key=n.net+'/'+n.len+suffix;
+          if(d._keys.has(key)) continue;
+          d._keys.add(key);
+          d.fib.push({net:n.net, len:n.len, type:'igp', ad:200, iface:via.iface, nextHop:via.nextHop, vrf:via.vrf});
+        }
+      }
+    }
+  }
+
+  // dangling next hops
+  for(const d of devices){
+    for(const r of d.fib){
+      if((r.type==='static'||r.type==='table') && r.nextHop!=null){
+        let reach=false;
+        for(const c of d._conn){ if(c.vrf===r.vrf && inNet(r.nextHop,c.net,c.len)){ reach=true; break; } }
+        if(!reach) warn(d.name+': next hop '+int2ip(r.nextHop)+' for '+cidr(r.net,r.len)+
+          ' is not on any connected subnet'+(r.type==='table'?' (from the pasted routing table).':'.'), d.id, r.line);
+      }
+    }
+    if(!d.interfaces.length) warn(d.name+': no interfaces with addresses were found — check the config format.', d.id, null);
+  }
+
+  const l2links = buildL2(devices, warn);
+  const vlanReport = auditVlans(devices, l2links, warn);
+
+  /* A WAN cloud stands in for a provider network you cannot see — MPLS, SD-WAN,
+     a carrier L2 service. It is not a router and invents no next hops: it just
+     records which edge devices sit on it, so a trace that leaves one site can
+     be handed to whichever member has the best route to the destination. */
+  const clouds=[];
+  const declared = (opts.clouds||[]).slice();
+  if(opts.autoDetect!==false)
+    declared.push(...autoClouds(devices, subnets, opts.providers||DEFAULT_PROVIDERS, opts.clouds||[]));
+
+  const cloudOpts = opts.cloudOpts||{};
+  for(const c of declared){
+    const members=[];
+    for(const m of (c.members||[])){
+      const dev=devices.find(d=>d.id===m.devId);
+      if(!dev) continue;
+      const iface=dev.interfaces.find(i=>i.name===m.iface) || null;
+      members.push({dev, iface, ifaceName:m.iface});
+    }
+    if(!members.length) continue;
+    // Internet is a sink by default: two sites both having internet uplinks
+    // does not mean traffic passes between them.
+    const dflt = c.name!=='Internet';
+    const transit = cloudOpts[c.name] && cloudOpts[c.name].transit!=null
+      ? !!cloudOpts[c.name].transit : dflt;
+    clouds.push({id:c.id, name:c.name, members, auto:!!c.auto, transit});
+    if(members.length===1 && transit)
+      warn('WAN cloud "'+c.name+'" has only one device attached, so nothing can be reached across it.', members[0].dev.id, null);
+  }
+
+  return {devices, subnets, adj, warnings, l2links, vlanReport, clouds};
+}
+
+/* Carrier names as they actually appear in interface descriptions. Word
+   boundaries matter — "att" must not match "attached". */
+const DEFAULT_PROVIDERS = [
+  {name:'AT&T',      patterns:['at&t','att','at-t','attgns','sbc']},
+  {name:'T-Mobile',  patterns:['t-mobile','tmobile','t mobile','tmus']},
+  {name:'Vodafone',  patterns:['vodafone','vodaphone','vfl']},
+  {name:'Colt',      patterns:['colt']}
+];
+STATE.providers = DEFAULT_PROVIDERS.map(p=>({name:p.name, patterns:p.patterns.slice()}));
+STATE.cloudOpts = {};
+
+function providerRegex(p){  if(p._re) return p._re;
+  const alts=(p.patterns&&p.patterns.length?p.patterns:[p.name])
+    .map(s=>String(s).trim()).filter(Boolean)
+    .map(s=>s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&').replace(/\s+/g,'[\\s_-]+'));
+  p._re = new RegExp('(^|[^A-Za-z0-9])(' + alts.join('|') + ')([^A-Za-z0-9]|$)', 'i');
+  return p._re;
+}
+function providerFor(desc, providers){
+  if(!desc) return null;
+  for(const p of providers||[]) if(providerRegex(p).test(desc)) return p.name;
+  return null;
+}
+
+/* Detect provider-facing interfaces without being told. An interface joins a
+   carrier cloud if its description names a carrier. Anything else that is a
+   stub link carrying the device's default route is treated as Internet — a
+   sink, not a path between sites. */
+function autoClouds(devices, subnets, providers, manual){
+  const taken=new Set();
+  for(const c of manual||[])
+    for(const m of (c.members||[])) taken.add(m.devId+'::'+m.iface);
+
+  const found={};
+  const add=(name,d,i)=>{
+    const key=d.id+'::'+i.name;
+    if(taken.has(key)) return;
+    taken.add(key);
+    (found[name]=found[name]||{id:'auto_'+name.replace(/[^\w]/g,'_'), name, auto:true, members:[]})
+      .members.push({devId:d.id, iface:i.name});
+  };
+
+  for(const d of devices){
+    for(const i of d.interfaces){
+      if(!i.addrs.length) continue;
+      const name=providerFor(i.desc, providers);
+      if(name) add(name, d, i);
+    }
+  }
+  // unmatched default-route uplinks on a link nobody else is on
+  for(const d of devices){
+    const def=d.fib.filter(r=>r.len===0);
+    for(const r of def){
+      let ifc=null;
+      if(r.iface) ifc=d.interfaces.find(x=>x.name.toLowerCase()===String(r.iface).toLowerCase());
+      if(!ifc && r.nextHop!=null)
+        ifc=d.interfaces.find(x=>x.addrs.some(a=>a.len<32 && inNet(r.nextHop,netOf(a.ip,a.len),a.len)));
+      if(!ifc) continue;
+      const a=ifc.addrs.find(x=>x.len<32);
+      if(!a) continue;
+      const sn=subnets[cidr(netOf(a.ip,a.len),a.len)];
+      if(sn && sn.members.length>1) continue;      // someone else is on this link
+      add('Internet', d, ifc);
+    }
+  }
+  return Object.values(found);
+}
+function cloudOn(model, dev, iface){
+  if(!model.clouds || !iface) return null;
+  for(const c of model.clouds)
+    for(const m of c.members)
+      if(m.dev===dev && m.ifaceName===iface.name) return c;
+  return null;
+}
+/* Pick the far-side edge device whose own routing table best covers the
+   destination. No guessing — each member votes with its real longest match. */
+function cloudExit(model, cloud, from, dst){
+  let best=null;
+  for(const m of cloud.members){
+    if(m.dev===from) continue;
+    const vrf = m.iface ? m.iface.vrf : 'default';
+    const r = lookup(m.dev, dst, vrf);
+    if(!r) continue;
+    if(m.iface && r.iface && String(r.iface).toLowerCase()===m.iface.name.toLowerCase()) continue; // points back into the cloud
+    if(!best || r.len>best.route.len || (r.len===best.route.len && r.ad<best.route.ad))
+      best={member:m, route:r};
+  }
+  return best;
+}
+
+function ownerOf(model, ipInt){
+  for(const d of model.devices)
+    for(const i of d.interfaces)
+      for(const a of i.addrs)
+        if(a.ip===ipInt) return {dev:d, iface:i};
+  return null;
+}
+function deviceForAddress(model, ipInt){
+  // device with a connected subnet containing this address
+  for(const d of model.devices)
+    for(const i of d.interfaces){
+      if(i.shutdown) continue;
+      for(const a of i.addrs)
+        if(a.len<32 && inNet(ipInt,netOf(a.ip,a.len),a.len)) return {dev:d, iface:i};
+    }
+  return null;
+}
+function lookup(dev, dstInt, vrf){
+  let best=null;
+  for(const r of dev.fib){
+    if(vrf && r.vrf!==vrf) continue;
+    if(!inNet(dstInt, r.net, r.len)) continue;
+    if(!best || r.len>best.len || (r.len===best.len && r.ad<best.ad)) best=r;
+  }
+  return best;
+}
+
+/* ============================================================
+   Security policy evaluation (Palo Alto)
+   ============================================================ */
+function addrMatches(dev, list, ipInt){
+  for(const item of list){
+    if(item==='any') return true;
+    const c=parseCidr(item);
+    if(c && inNet(ipInt,c.net,c.len)) return true;
+    if(ip2int(item)===ipInt) return true;
+    const obj=dev.addrObjects[item];
+    if(obj){
+      const oc=parseCidr(obj);
+      if(oc && inNet(ipInt,oc.net,oc.len)) return true;
+      if(ip2int(obj)===ipInt) return true;
+    }
+  }
+  return false;
+}
+function evalPolicy(dev, inZone, outZone, src, dst){
+  if(!dev.rules.length) return null;
+  for(const r of dev.rules){
+    const zf = r.from.includes('any') || (inZone && r.from.includes(inZone));
+    const zt = r.to.includes('any') || (outZone && r.to.includes(outZone));
+    if(!zf || !zt) continue;
+    if(!addrMatches(dev, r.source, src)) continue;
+    if(!addrMatches(dev, r.destination, dst)) continue;
+    return {rule:r.name, action:r.action, line: r.actionLine || r.firstLine || null};
+  }
+  if(inZone && outZone && inZone===outZone) return {rule:'intrazone-default', action:'allow', line:null};
+  return {rule:'interzone-default', action:'deny', line:null};
+}
+
+/* ============================================================
+   Trace
+   ============================================================ */
+function trace(model, srcStr, dstStr, startId){
+  const src=ip2int(srcStr), dst=ip2int(dstStr);
+  if(src===null) return {error:'Source is not a valid IPv4 address.'};
+  if(dst===null) return {error:'Destination is not a valid IPv4 address.'};
+
+  let start=null, ingress=null;
+  if(startId){
+    start = model.devices.find(d=>d.id===startId) || null;
+    if(start){
+      const hit = start.interfaces.find(i=>i.addrs.some(a=>a.len<32 && inNet(src,netOf(a.ip,a.len),a.len)));
+      ingress = hit || null;
+    }
+  } else {
+    const found = deviceForAddress(model, src);
+    if(found){ start=found.dev; ingress=found.iface; }
+  }
+  if(!start) return {error:'No device has a subnet containing '+srcStr+'. Pick a starting device, or check the source address.'};
+
+  const hops=[]; const seen={};
+  let cur=start, inIf=ingress, vrf=(ingress?ingress.vrf:'default');
+  let verdict=null, exits=false, exitVia=null, pin=null;
+
+  for(let n=0;n<32;n++){
+    const key=cur.id+'|'+vrf;
+    if(seen[key]){
+      verdict={ok:false, title:'Routing loop', detail:'Returned to '+cur.name+' in VRF '+vrf+'.'};
+      pin={deviceId:cur.id, deviceName:cur.name, line:null,
+           detail:'Check the route to '+dstStr+' on '+cur.name+' — it sends traffic back to a device already on this path instead of toward the destination.'};
+      break;
+    }
+    seen[key]=true;
+
+    const route = lookup(cur, dst, vrf);
+    if(!route){
+      hops.push({dev:cur, inIf, route:null});
+      verdict={ok:false, title:'No route', detail:cur.name+' has no route to '+dstStr+' in '+vrf+'.'};
+      pin={deviceId:cur.id, deviceName:cur.name, line:null,
+           detail:'Nothing in '+cur.name+'\u2019s config or routing table covers '+dstStr+' in VRF '+vrf+'. Add a route, or check the routing table you imported for this device.'};
+      break;
+    }
+
+    // egress interface
+    let outIf=null;
+    if(route.iface) outIf = cur.interfaces.find(i=>i.name.toLowerCase()===String(route.iface).toLowerCase()) || null;
+    if(!outIf && route.nextHop!=null){
+      outIf = cur.interfaces.find(i=>i.addrs.some(a=>a.len<32 && inNet(route.nextHop,netOf(a.ip,a.len),a.len))) || null;
+    }
+    if(!outIf && route.type==='connected'){
+      outIf = cur.interfaces.find(i=>i.addrs.some(a=>netOf(a.ip,a.len)===route.net && a.len===route.len)) || null;
+    }
+
+    const pol = cur.vendor==='palo-alto'
+      ? evalPolicy(cur, inIf?inIf.zone:null, outIf?outIf.zone:null, src, dst) : null;
+
+    const hop={dev:cur, inIf, outIf, route, pol, nextHop:route.nextHop};
+    hops.push(hop);
+
+    if(pol && pol.action && /deny|drop|reset/i.test(pol.action)){
+      verdict={ok:false, title:'Blocked by policy',
+               detail:cur.name+' matches rule "'+pol.rule+'" — action '+pol.action+'.'};
+      pin={deviceId:cur.id, deviceName:cur.name, line:pol.line,
+           detail:'Security rule "'+pol.rule+'" on '+cur.name+' matches this flow and its action is '+pol.action+'.'};
+      break;
+    }
+
+    // delivered?
+    if(route.type==='connected'){
+      const own = ownerOf(model, dst);
+      if(own && own.dev===cur){
+        verdict={ok:true, title:'Delivered', detail:dstStr+' is '+cur.name+' itself, on '+own.iface.name+'.'};
+      } else if(own){
+        hop.next=own.dev;
+        verdict={ok:true, title:'Delivered', detail:dstStr+' is '+own.dev.name+' on '+own.iface.name+'.'};
+        hops.push({dev:own.dev, inIf:own.iface, outIf:null, route:null, final:true});
+      } else {
+        verdict={ok:true, title:'Delivered to the local segment',
+                 detail:cur.name+' has '+cidr(route.net,route.len)+' connected on '+(outIf?outIf.name:'?')+'. The host itself is not in these configs.'};
+      }
+      break;
+    }
+
+    // resolve the next device
+    let nextDev=null;
+    if(route.nextHop!=null){
+      const own = ownerOf(model, route.nextHop);
+      if(own) nextDev=own.dev;
+      else{
+        const onLink = cur._conn.some(c=>c.vrf===vrf && inNet(route.nextHop,c.net,c.len));
+        const cloud = cloudOn(model, cur, outIf);
+        if(cloud && cloud.transit!==false){
+          const exit = cloudExit(model, cloud, cur, dst);
+          if(exit){
+            hop.viaCloud = cloud.name;
+            hop.next = exit.member.dev;
+            cur = exit.member.dev;
+            inIf = exit.member.iface;
+            vrf = exit.member.iface ? exit.member.iface.vrf : 'default';
+            continue;
+          }
+          verdict={ok:false, title:'No site advertises this destination',
+            detail:'None of the devices on '+cloud.name+' has a route to '+dstStr+
+                   '. Paste the routing table on the far-side edge routers if the provider learns it dynamically.'};
+          break;
+        }
+        if(onLink){
+          exits=true; exitVia=int2ip(route.nextHop);
+          verdict={ok:true, title:'Forwarded off-network',
+            detail:cur.name+' sends it out '+(outIf?outIf.name:'?')+' to '+int2ip(route.nextHop)+
+                   ', which is not one of the loaded configs — an upstream or ISP device.'};
+        }
+        else verdict={ok:false, title:'Unreachable next hop',
+          detail:int2ip(route.nextHop)+' is not on any connected subnet of '+cur.name+'. This route black-holes.'};
+        if(!onLink) pin={deviceId:cur.id, deviceName:cur.name, line:route.line,
+          detail:'The route to '+cidr(route.net,route.len)+' on '+cur.name+' points at '+int2ip(route.nextHop)+
+                 ', which isn\u2019t reachable from any of its interfaces'+(route.type==='table'?' (this came from the pasted routing table, not the saved config).':'.')};
+        break;
+      }
+    } else if(outIf){
+      const a = outIf.addrs.find(x=>x.len<32);
+      if(a){
+        const sn = model.subnets[cidr(netOf(a.ip,a.len), a.len)];
+        const others = sn ? sn.members.filter(m=>m.dev!==cur) : [];
+        if(others.length===1) nextDev=others[0].dev;
+        else{
+          verdict={ok:false, title:'Ambiguous next hop',
+                   detail:'The route out of '+outIf.name+' names no next hop, and that segment has '+others.length+' other devices.'};
+          pin={deviceId:cur.id, deviceName:cur.name, line:route.line,
+               detail:'The route to '+cidr(route.net,route.len)+' on '+cur.name+' names an exit interface but no next hop, and '+outIf.name+
+                      '\u2019s segment has '+others.length+' other devices — add an explicit next hop.'};
+          break;
+        }
+      }
+    }
+    if(!nextDev){
+      verdict={ok:false, title:'Path stops here', detail:'Could not work out what is beyond '+cur.name+'.'};
+      pin={deviceId:cur.id, deviceName:cur.name, line:route.line,
+           detail:'The route to '+cidr(route.net,route.len)+' on '+cur.name+' doesn\u2019t resolve to a next hop this tool can follow.'};
+      break;
+    }
+
+    // ingress interface on the next device
+    let nextIn=null;
+    if(route.nextHop!=null){
+      const own=ownerOf(model, route.nextHop); nextIn = own?own.iface:null;
+    } else if(outIf){
+      const a=outIf.addrs.find(x=>x.len<32);
+      if(a) nextIn = nextDev.interfaces.find(i=>i.addrs.some(b=>b.len<32 && netOf(b.ip,b.len)===netOf(a.ip,a.len)))||null;
+    }
+    hop.next=nextDev;
+    cur=nextDev; inIf=nextIn; vrf = nextIn?nextIn.vrf:'default';
+  }
+
+  if(!verdict) verdict={ok:false, title:'Hop limit reached', detail:'Stopped after 32 hops.'};
+  return {hops, verdict, src, dst, exitsNetwork:exits, exitVia, pin: verdict.ok ? null : pin};
+}
+
+/* ============================================================
+   Graph
+   ============================================================ */
+function graphStyle(){
+  return [
+      {selector:'node[kind="device"]', style:{
+        'shape':'round-rectangle','width':'label','height':46,'padding':'14px',
+        'background-color':'#1c2c3e','border-width':1,'border-color':'#3a5273',
+        'label':'data(label)','color':'#d3dfec','font-family':'IBM Plex Mono, monospace',
+        'font-size':13,'font-weight':600,'text-valign':'center','text-halign':'center',
+        'text-wrap':'wrap'
+      }},
+      {selector:'node[vendor="palo-alto"]', style:{'border-color':'#8a6a2e','background-color':'#2a2416'}},
+      {selector:'node[role="switch"]', style:{'border-color':'#3f7a63','background-color':'#16241e','shape':'round-rectangle'}},
+      {selector:'edge[kind="vlanmap"]', style:{
+        'line-color':'#4a6b5e','line-style':'dotted','width':1.2,
+        'color':'#4a6b5e','font-size':8.5,'z-index':1,'opacity':0.85}},
+      {selector:'edge[kind="l2"]', style:{
+        'line-color':'#3f7a63','line-style':'dashed','line-dash-pattern':[3,3],'width':1.6,
+        'color':'#5d9c81','font-size':8.5,'z-index':1}},
+      {selector:'node[kind="subnet"]', style:{
+        'shape':'round-rectangle','width':'label','height':24,'padding':'8px',
+        'background-color':'#122b33','border-width':1,'border-color':'#2c6b7a',
+        'label':'data(label)','color':'#4fc3d9','font-family':'IBM Plex Mono, monospace',
+        'font-size':11,'text-valign':'center','text-halign':'center'
+      }},
+      {selector:'edge', style:{
+        'width':1.4,'line-color':'#33485f','curve-style':'bezier',
+        'label':'data(label)','color':'#61799a','font-size':9
+      }},
+      {selector:'edge', style:{'color':'#61799a','font-family':'IBM Plex Mono, monospace',
+        'text-background-color':'#0e1621','text-background-opacity':0.85,'text-background-padding':2}},
+      {selector:'.hot', style:{'line-color':'#e8a13a','width':3,'color':'#e8a13a','z-index':20,
+        'line-style':'dashed','line-dash-pattern':[7,6]}},
+      {selector:'edge.fwd', style:{'mid-target-arrow-shape':'triangle','mid-target-arrow-color':'#e8a13a','arrow-scale':0.85}},
+      {selector:'edge.rev', style:{'mid-source-arrow-shape':'triangle','mid-source-arrow-color':'#e8a13a','arrow-scale':0.85}},
+      {selector:'node[kind="wan"]', style:{
+        'shape':'round-rectangle','width':'label','height':44,'padding':'16px',
+        'background-color':'#241c33','border-width':1.5,'border-color':'#6f5c9e','border-style':'dashed',
+        'label':'data(label)','color':'#b9a6e0','font-family':'IBM Plex Mono, monospace',
+        'font-size':12,'font-weight':600,'text-valign':'center','text-halign':'center'}},
+      {selector:'edge[kind="wanlink"]', style:{
+        'line-color':'#6f5c9e','line-style':'dashed','line-dash-pattern':[5,4],'width':1.8,
+        'color':'#9d8ac9','font-size':9}},
+      {selector:'node[kind="cloud"]', style:{
+        'shape':'ellipse','width':94,'height':60,'background-color':'#1b2430',
+        'border-width':1.5,'border-color':'#5c7288','border-style':'dashed',
+        'label':'data(label)','color':'#9db0c6','font-family':'IBM Plex Mono, monospace','font-size':11,
+        'text-valign':'center','text-halign':'center'}},
+      {selector:'node.pkt', style:{
+        'width':11,'height':11,'shape':'ellipse','background-color':'#ffc766',
+        'border-width':3,'border-color':'rgba(232,161,58,.28)','z-index':40,'events':'no','label':''}},
+      {selector:'node.hot', style:{'border-color':'#e8a13a','border-width':2,'color':'#f0b256'}},
+      {selector:'node.drop', style:{'border-color':'#e0625f','border-width':2,'color':'#e0625f'}},
+      {selector:'node.pick', style:{'border-color':'#4fc3d9','border-width':2}}
+  ];
+}
+
+function render(){
+  if(typeof stopFx==='function') stopFx();
+  const model = STATE.model;
+  const el = document.getElementById('stage-empty');
+  if(!el.dataset.def) el.dataset.def = el.innerHTML;
+  if(!model || !model.devices.length){ el.style.display='flex'; if(STATE.cy){STATE.cy.destroy(); STATE.cy=null;} return; }
+  el.style.display='none';
+
+  const view = (document.getElementById('opt-view')||{}).value || 'simple';
+  const vis = d => d.show!==false;
+
+  /* Traced path only: rebuild the scene from the trace itself rather than the
+     full model, so you get just the devices on the path with the interfaces
+     and subnets they actually used. */
+  if(view==='path'){
+    const res=STATE.lastTrace;
+    if(!res || res.error || !res.hops || !res.hops.length){
+      el.style.display='flex';
+      el.innerHTML='<strong>No path to show</strong><span>Run a trace and this view will show only the devices it passed through.</span>';
+      if(STATE.cy){ STATE.cy.destroy(); STATE.cy=null; }
+      return;
+    }
+    const els=[]; const edgeFor={}; const made={};
+    let e=0;
+    const addDev=(d)=>{
+      if(made[d.id]) return;
+      made[d.id]=true;
+      els.push({data:{id:d.id, label:d.name, kind:'device', vendor:d.vendor,
+                      role:d.isSwitch?'switch':'router'}});
+    };
+    const netOfIface=(ifc)=>{
+      if(!ifc || !ifc.addrs) return null;
+      const a=ifc.addrs.find(x=>x.len<32);
+      return a ? cidr(netOf(a.ip,a.len), a.len) : null;
+    };
+    const netLabel=(key, ifc)=>{
+      const v=vlanOfIface(ifc);
+      const parts=[key];
+      if(v) parts.push('vlan '+v);
+      if(ifc && ifc.vrf && ifc.vrf!=='default') parts.push('vrf '+ifc.vrf);
+      return parts.join('\n');
+    };
+    const ifLabel=(ifc)=>{
+      if(!ifc) return '';
+      return ifc.name + (ifc.zone?' · '+ifc.zone:'');
+    };
+    const addCloud=(name)=>{
+      const id='cl_'+name.replace(/[^\w]/g,'_');
+      if(!made[id]){ made[id]=true; els.push({data:{id, label:name, kind:'wan'}}); }
+      return id;
+    };
+    const link=(src,tgt,label,mapKey)=>{
+      const id='e'+(++e);
+      els.push({data:{id, source:src, target:tgt, kind:'link', label:label||''}});
+      if(mapKey) edgeFor[mapKey]=id;
+      return id;
+    };
+
+    for(let i=0;i<res.hops.length;i++){
+      const h=res.hops[i], n=res.hops[i+1];
+      addDev(h.dev);
+      if(i===0 && h.inIf){
+        const k=netOfIface(h.inIf);
+        if(k){
+          const sid='s_'+k.replace(/[^\w]/g,'_');
+          if(!made[sid]){ made[sid]=true; els.push({data:{id:sid, label:netLabel(k,h.inIf), kind:'subnet'}}); }
+          link(sid, h.dev.id, ifLabel(h.inIf), h.dev.id+'::'+h.inIf.name);
+        }
+      }
+      if(!h.outIf) continue;
+
+      // handed across a provider network we cannot see inside
+      if(h.viaCloud && n){
+        const cid=addCloud(h.viaCloud);
+        link(h.dev.id, cid, ifLabel(h.outIf), h.dev.id+'::'+h.outIf.name);
+        addDev(n.dev);
+        link(cid, n.dev.id, ifLabel(n.inIf), n.inIf?(n.dev.id+'::'+n.inIf.name):null);
+        continue;
+      }
+
+      let k=netOfIface(h.outIf);
+      if(!k && h.route && h.route.len<32) k=cidr(h.route.net, h.route.len);
+      if(!k) continue;
+      const sid='s_'+k.replace(/[^\w]/g,'_');
+      if(!made[sid]){ made[sid]=true; els.push({data:{id:sid, label:netLabel(k,h.outIf), kind:'subnet'}}); }
+      link(h.dev.id, sid, ifLabel(h.outIf), h.dev.id+'::'+h.outIf.name);
+      if(n){
+        addDev(n.dev);
+        link(sid, n.dev.id, ifLabel(n.inIf), n.inIf?(n.dev.id+'::'+n.inIf.name):null);
+      } else if(h.route && h.route.type==='connected'){
+        const dk=cidr(h.route.net, h.route.len);
+        if(dk!==k){
+          const did='s_'+dk.replace(/[^\w]/g,'_');
+          if(!made[did]){ made[did]=true; els.push({data:{id:did, label:dk, kind:'subnet'}}); }
+          link(h.dev.id, did, ifLabel(h.outIf), null);
+        }
+      }
+    }
+
+    if(STATE.cy) STATE.cy.destroy();
+    const cyp = cytoscape({
+      container: document.getElementById('cy'),
+      elements: els, wheelSensitivity:0.2, motionBlur:false,
+      style: graphStyle(),
+      layout:{name:'breadthfirst', directed:true, animate:false, padding:44,
+              spacingFactor:1.15, nodeDimensionsIncludeLabels:true}
+    });
+    cyp.on('tap','node[kind="device"]', evt=>{
+      const d=STATE.model.devices.find(x=>x.id===evt.target.id());
+      if(d) showDevice(d);
+    });
+    STATE.cy=cyp; STATE.edgeFor=edgeFor; STATE.edgePair={};
+    paintTrace(res);
+    return;
+  }
+
+  const hideStubs = view!=='all';
+  el.innerHTML = el.dataset.def;
+  const els=[]; const edgeFor={}; const edgePair={}; const pairEdge={};
+
+  /* An endpoint subnet has exactly one device on it — a user VLAN, a server
+     segment, a loopback range. It carries no topology, so on a large network
+     it is pure clutter. Hidden by default, but anything on the current traced
+     path stays visible so the trace never points at nothing. */
+  const keepNets=new Set();
+  if(STATE.lastTrace && STATE.lastTrace.hops){
+    for(const h of STATE.lastTrace.hops){
+      for(const ifc of [h.inIf, h.outIf]){
+        if(!ifc || !ifc.addrs) continue;
+        for(const a of ifc.addrs) if(a.len<32) keepNets.add(cidr(netOf(a.ip,a.len), a.len));
+      }
+    }
+  }
+  const isStub = (k, sn)=> hideStubs && sn.members.filter(m=>vis(m.dev)).length<2 && !keepNets.has(k);
+  const stubCount={};
+  for(const k in model.subnets){
+    const sn=model.subnets[k];
+    const mem=sn.members.filter(m=>vis(m.dev));
+    if(mem.length && isStub(k,sn)){
+      const id=mem[0].dev.id;
+      stubCount[id]=(stubCount[id]||0)+1;
+    }
+  }
+
+  for(const d of model.devices){
+    if(!vis(d)) continue;
+    const lo = d.interfaces.filter(i=>i.addrs.some(a=>a.len===32)).length;
+    const routes = d.fib.some(f=>f.type!=='connected');
+    const role = (d.isSwitch && !routes && !d.interfaces.some(i=>i.addrs.length && !/^vlan/i.test(i.name)))
+                 ? 'switch' : 'router';
+    const vc = Object.keys(d.vlans||{}).length;
+    els.push({data:{id:d.id, label:d.name, kind:'device', vendor:d.vendor, role,
+                    sub:(d.vendor==='palo-alto'?'firewall':(role==='switch'?'switch':'router'))+
+                        (lo?' · '+lo+' lo':'')+(vc?' · '+vc+' vlan':'')+
+                        (stubCount[d.id]?' · '+stubCount[d.id]+' local nets':'')}});
+  }
+
+  let e=0;
+  const drawnSubnets=new Set();
+  for(const k in model.subnets){
+    const sn=model.subnets[k];
+    const members=sn.members.filter(m=>vis(m.dev));
+    if(!members.length) continue;
+    if(isStub(k,sn)) continue;
+    const devSet=new Set(members.map(m=>m.dev));
+
+    // Devices-only: replace the segment with direct links between the devices
+    // on it. Two members give one link; a shared segment gives a small mesh so
+    // every adjacency is still visible without a node in the middle.
+    // "transit" keeps that behaviour only for true point-to-point links.
+    const asEdges = devSet.size>=2 && members.length<=8 &&
+      (view==='devices' || view==='simple' || (members.length===2 && devSet.size===2));
+
+    if(asEdges){
+      for(let i=0;i<members.length;i++){
+        for(let j=i+1;j<members.length;j++){
+          const a=members[i], b=members[j];
+          if(a.dev===b.dev) continue;
+          let id;
+          if(view==='simple'){
+            // one bare link per device pair, however many subnets join them
+            const pk=[a.dev.id,b.dev.id].sort().join('|');
+            id=pairEdge[pk];
+            if(!id){
+              id='e'+(++e); pairEdge[pk]=id;
+              els.push({data:{id, source:a.dev.id, target:b.dev.id, kind:'p2p', label:''}});
+            }
+          } else {
+            id='e'+(++e);
+            els.push({data:{id, source:a.dev.id, target:b.dev.id, kind:'p2p',
+              label: members.length===2 ? a.iface.name+'  ·  '+k+'  ·  '+b.iface.name : k}});
+          }
+          edgePair[a.dev.id+'::'+a.iface.name+'::'+b.dev.id]=id;
+          edgePair[b.dev.id+'::'+b.iface.name+'::'+a.dev.id]=id;
+          if(!edgeFor[a.dev.id+'::'+a.iface.name]) edgeFor[a.dev.id+'::'+a.iface.name]=id;
+          if(!edgeFor[b.dev.id+'::'+b.iface.name]) edgeFor[b.dev.id+'::'+b.iface.name]=id;
+        }
+      }
+      continue;
+    }
+
+    const sid='s_'+k.replace(/[^\w]/g,'_');
+    drawnSubnets.add(sid);
+    els.push({data:{id:sid, label:k, kind:'subnet'}});
+    for(const m of members){
+      const id='e'+(++e);
+      els.push({data:{id, source:m.dev.id, target:sid, kind:'link', label:m.iface.name}});
+      edgeFor[m.dev.id+'::'+m.iface.name]=id;
+    }
+  }
+
+  // WAN clouds joining sites we cannot see inside
+  if(model.clouds){
+    for(const c of model.clouds){
+      const mem=c.members.filter(m=>vis(m.dev));
+      if(!mem.length) continue;
+      const cid='cl_'+c.id;
+      els.push({data:{id:cid, label:c.name, kind:'wan'}});
+      for(const m of mem){
+        const id='e'+(++e);
+        els.push({data:{id, source:m.dev.id, target:cid, kind:'wanlink',
+                        label: view==='simple' ? '' : m.ifaceName}});
+        if(!edgeFor[m.dev.id+'::'+m.ifaceName]) edgeFor[m.dev.id+'::'+m.ifaceName]=id;
+      }
+    }
+  }
+
+  const saved = STATE.positions || {};
+  const keyOf = e => (e.data.kind==='subnet'?'net:':'dev:')+e.data.label;
+  const nodes = els.filter(e=>!e.data.source);
+  const allKnown = nodes.length>0 && nodes.every(n=>saved[keyOf(n)]);
+  if(allKnown) for(const n of nodes) n.position = {x:saved[keyOf(n)].x, y:saved[keyOf(n)].y};
+
+  // layer 2 links from CDP/LLDP neighbor data
+  if(model.l2links){
+    for(const k in model.l2links){
+      const L=model.l2links[k];
+      if(!vis(L.a.dev) || !vis(L.b.dev)) continue;
+      if(view==='simple'){
+        const pk=[L.a.dev.id,L.b.dev.id].sort().join('|');
+        if(pairEdge[pk]) continue;                 // already joined by an L3 link
+        const id='e'+(++e); pairEdge[pk]=id;
+        els.push({data:{id, source:L.a.dev.id, target:L.b.dev.id, kind:'l2', label:''}});
+        continue;
+      }
+      const id='e'+(++e);
+      els.push({data:{id, source:L.a.dev.id, target:L.b.dev.id, kind:'l2',
+                      label:L.a.port.replace(/^([A-Za-z]{2})[A-Za-z]*/,'$1')+' · '+
+                            L.b.port.replace(/^([A-Za-z]{2})[A-Za-z]*/,'$1')}});
+    }
+  }
+
+  // VLAN correlation: a switch with no CDP/LLDP data still gets placed against
+  // the L3 segments its VLANs belong to. Marked inferred — it shows membership,
+  // not cabling.
+  if(model.vlanReport && view!=='simple'){
+    const linked={};
+    if(model.l2links) for(const k in model.l2links){
+      linked[model.l2links[k].a.dev.id]=true; linked[model.l2links[k].b.dev.id]=true;
+    }
+    for(const d of model.devices){
+      if(linked[d.id] || !d.isSwitch || !vis(d)) continue;
+      const done={};
+      for(const v of vlansOf(d)){
+        const r=model.vlanReport[v];
+        if(!r || !r.svi || r.svi.dev===d) continue;
+        const a=r.svi.iface.addrs.find(x=>x.len<32);
+        if(!a) continue;
+        const sid='s_'+cidr(netOf(a.ip,a.len), a.len).replace(/[^\w]/g,'_');
+        const target = drawnSubnets.has(sid) ? sid : r.svi.dev.id;
+        if(done[target]) continue;
+        done[target]=true;
+        els.push({data:{id:'e'+(++e), source:d.id, target, kind:'vlanmap', label:'vlan '+v}});
+      }
+    }
+  }
+
+  const bigGraph = nodes.length>120;
+  if(STATE.cy) STATE.cy.destroy();
+  const cy = cytoscape({
+    container: document.getElementById('cy'),
+    elements: els,
+    wheelSensitivity:0.2,
+    motionBlur:false,
+    textureOnViewport:bigGraph,
+    hideEdgesOnViewport:bigGraph,
+    pixelRatio:bigGraph?1:'auto',
+    style: graphStyle(),
+    layout: allKnown ? {name:'preset', padding:40}
+      : bigGraph
+        ? {name:'concentric', animate:false, padding:40, minNodeSpacing:34,
+           concentric:n=>n.degree(), levelWidth:()=>2, nodeDimensionsIncludeLabels:true}
+        : {name:'cose', animate:false, nodeRepulsion:12000, idealEdgeLength:110,
+           padding:40, numIter:400, nodeDimensionsIncludeLabels:true}
+  });
+
+  cy.on('tap','node[kind="device"]', evt=>{
+    const d = STATE.model.devices.find(x=>x.id===evt.target.id());
+    if(d) showDevice(d);
+  });
+  cy.on('dragfree','node', ()=>{ capturePositions(); autosave(); });
+
+  STATE.cy=cy; STATE.edgeFor=edgeFor; STATE.edgePair=edgePair;
+  if(STATE.lastTrace) paintTrace(STATE.lastTrace);
+}
+
+/* ---- animated path ---- */
+STATE.timers=[]; STATE.raf=null;
+
+function stopFx(){
+  if(STATE.raf){ cancelAnimationFrame(STATE.raf); STATE.raf=null; }
+  (STATE.timers||[]).forEach(clearTimeout); STATE.timers=[];
+  const cy=STATE.cy; if(!cy) return;
+  cy.$('.tmp').remove();
+  cy.elements().removeClass('hot drop fwd rev');
+  cy.edges().removeStyle('line-dash-offset');
+}
+
+/* Walk the hops and work out which edges are crossed, and which way round.
+   Each edge is stored with the direction the packet takes across it, because
+   the graph itself has no notion of which end is upstream. */
+function buildPath(res){
+  const cy=STATE.cy; const steps=[]; const seq=[];
+  if(!cy || !res.hops || !res.hops.length) return {steps,seq};
+  seq.push(res.hops[0].dev.id);
+  let lastEid=null;
+
+  const add=(devId, ifName, incoming, peerId)=>{
+    const pairs=STATE.edgePair||{};
+    const eid = (peerId && pairs[devId+'::'+ifName+'::'+peerId]) || STATE.edgeFor[devId+'::'+ifName];
+    if(!eid || eid===lastEid) return;
+    const e=cy.getElementById(eid); if(!e.length) return;
+    const s=e.data('source'), t=e.data('target');
+    const other = (s===devId) ? t : s;
+    const from = incoming ? other : devId;
+    const to   = incoming ? devId : other;
+    steps.push({eid, forward:(s===from)});
+    if(seq[seq.length-1]!==to) seq.push(to);
+    lastEid=eid;
+  };
+
+  for(let i=0;i<res.hops.length;i++){
+    const h=res.hops[i];
+    const n=res.hops[i+1];
+    if(h.outIf) add(h.dev.id, h.outIf.name, false, n?n.dev.id:null);
+    if(n && n.inIf) add(n.dev.id, n.inIf.name, true, h.dev.id);
+  }
+  return {steps,seq};
+}
+
+function launchPacket(cy, ids){
+  const pts=ids.map(id=>{ const n=cy.getElementById(id); return n.length?{x:n.position().x, y:n.position().y}:null; })
+               .filter(Boolean);
+  if(pts.length<2) return;
+  cy.add({group:'nodes', data:{id:'__pkt'}, position:{x:pts[0].x,y:pts[0].y},
+          classes:'tmp pkt', grabbable:false, selectable:false});
+  let i=0;
+  const step=()=>{
+    const pkt=cy.getElementById('__pkt');
+    if(!pkt.length) return;
+    i++;
+    if(i>=pts.length){
+      i=0; pkt.position({x:pts[0].x,y:pts[0].y}); pkt.style('opacity',0);
+      STATE.timers.push(setTimeout(()=>{ const p=cy.getElementById('__pkt'); if(p.length){ p.style('opacity',1); step(); } }, 550));
+      return;
+    }
+    pkt.animate({position:{x:pts[i].x,y:pts[i].y}}, {duration:480, easing:'ease-in-out-cubic', complete:step});
+  };
+  step();
+}
+
+function paintTrace(res){
+  stopFx();
+  const cy=STATE.cy; if(!cy || !res || !res.hops) return;
+  const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const {steps, seq} = buildPath(res);
+
+  // the packet leaves the network: draw where it goes
+  if(res.exitsNetwork && seq.length){
+    const anchor=cy.getElementById(seq[seq.length-1]);
+    if(anchor.length){
+      const p=anchor.position();
+      cy.add([
+        {group:'nodes', data:{id:'__net', label:'Internet', kind:'cloud'},
+         position:{x:p.x+195, y:p.y}, classes:'tmp', grabbable:true, selectable:false},
+        {group:'edges', data:{id:'__nete', source:seq[seq.length-1], target:'__net', kind:'exit',
+         label: res.exitVia ? 'via '+res.exitVia : 'default route'}, classes:'tmp'}
+      ]);
+      steps.push({eid:'__nete', forward:true});
+      seq.push('__net');
+    }
+  }
+
+  for(const h of res.hops) cy.getElementById(h.dev.id).addClass('hot');
+  for(const id of seq) cy.getElementById(id).addClass('hot');
+
+  // light each link in the order the packet crosses it
+  steps.forEach((st,i)=>{
+    const light=()=>{
+      const e=cy.getElementById(st.eid);
+      if(e.length) e.addClass('hot').addClass(st.forward?'fwd':'rev');
+    };
+    if(reduce) light(); else STATE.timers.push(setTimeout(light, i*150));
+  });
+
+  if(res.verdict && !res.verdict.ok && res.hops.length)
+    cy.getElementById(res.hops[res.hops.length-1].dev.id).addClass('drop');
+
+  if(reduce) return;
+
+  // dashes march the way the packet travels
+  let off=0;
+  const tick=()=>{
+    off=(off+0.55)%13;
+    for(const st of steps){
+      const e=cy.getElementById(st.eid);
+      if(e.length && e.hasClass('hot')) e.style('line-dash-offset', st.forward ? -off : off);
+    }
+    STATE.raf=requestAnimationFrame(tick);
+  };
+  STATE.raf=requestAnimationFrame(tick);
+
+  if(seq.length>1) STATE.timers.push(setTimeout(()=>launchPacket(cy, seq), steps.length*150));
+}
+
+/* ============================================================
+   CDP / LLDP neighbor import
+   Configs cannot tell you what is cabled to what, so adjacency has to
+   come from the devices themselves. Handles the detail forms and the
+   brief table forms of both protocols.
+   ============================================================ */
+function parseNeighborsDetail(lines){
+  const out=[];
+  // CDP prints the peer name first; LLDP prints it last. Collect the three
+  // fields in any order and emit as soon as the set is complete.
+  let p={peer:null, local:null, port:null};
+  const flush=()=>{
+    if(p.peer && p.local && p.port) out.push({localPort:p.local, peerName:p.peer, peerPort:p.port});
+    p={peer:null, local:null, port:null};
+  };
+  for(const raw of lines){
+    const t=raw.trim(); if(!t) continue;
+    let m;
+    if(/^-{3,}/.test(t)){ flush(); continue; }
+    if((m=t.match(/^Device ID:\s*(\S+)/i))){ if(p.peer) flush(); p.peer=baseName(m[1]); }
+    else if((m=t.match(/^System Name:\s*(\S+)/i))){ p.peer=baseName(m[1]); }
+    else if((m=t.match(/^Interface:\s*([^,]+),\s*Port ID\s*\(outgoing port\):\s*(.+)$/i))){
+      p.local=normPort(m[1]); p.port=normPort(m[2]);
+    }
+    else if((m=t.match(/^Local Intf:\s*(\S+)/i))){ p.local=normPort(m[1]); }
+    else if((m=t.match(/^Port id:\s*(\S+)/i))){ p.port=normPort(m[1]); }
+    else continue;
+    if(p.peer && p.local && p.port) flush();
+  }
+  flush();
+  return out;
+}
+function parseNeighborsTable(lines){
+  const out=[];
+  for(const raw of lines){
+    const t=raw.trim();
+    if(!t) continue;
+    if(/^(Device[- ]ID|Capability codes?|Total (entries|cdp)|Device ID\s+Local|--|\s*$)/i.test(t)) continue;
+    if(/^[A-Z]\s+-\s+/.test(t)) continue;                       // capability legend
+    const tk=t.split(/\s+/);
+    if(tk.length<3) continue;
+    // Collect tokens that look like interface names, joined or split ("Gi 1/0/1")
+    const ports=[];
+    for(let i=1;i<tk.length;i++){
+      if(/^[A-Za-z]{2,8}\d+(\/[\d.]+)*$/.test(tk[i])){ ports.push(tk[i]); }
+      else if(/^[A-Za-z]{2,8}$/.test(tk[i]) && i+1<tk.length && /^\d+(\/[\d.]+)*$/.test(tk[i+1])){
+        ports.push(tk[i]+tk[i+1]); i++;
+      }
+    }
+    if(ports.length<2) continue;
+    out.push({localPort:normPort(ports[0]), peerName:baseName(tk[0]), peerPort:normPort(ports[ports.length-1])});
+  }
+  return out;
+}
+function parseNeighbors(text){
+  const lines=String(text||'').split(/\r?\n/);
+  const detail=parseNeighborsDetail(lines);
+  if(detail.length) return detail;
+  return parseNeighborsTable(lines);
+}
+
+/* ============================================================
+   Layer 2 links and VLAN reachability
+   ============================================================ */
+function findPort(dev, portName){
+  if(!portName) return null;
+  const want=normPort(portName).toLowerCase();
+  return dev.interfaces.find(i=>normPort(i.name).toLowerCase()===want) || null;
+}
+/* Does this port carry the VLAN? Unknown ports are assumed permissive so a
+   missing config never invents a failure. */
+function portCarries(dev, portName, vlan){
+  const p=findPort(dev, portName);
+  if(!p || !p.l2) return true;
+  if(p.mode==='access') return (p.accessVlan||1)===vlan;
+  if(p.allowed===null || p.allowed===undefined) return true;   // "all", or never restricted
+  if(p.native===vlan) return true;
+  return p.allowed.indexOf(vlan)>=0;
+}
+function vlansOf(dev){
+  if(dev._vlans) return dev._vlans;
+  const set=new Set();
+  for(const id in dev.vlans) set.add(parseInt(id,10));
+  for(const i of dev.interfaces){
+    if(i.l2 && i.mode==='access' && i.accessVlan) set.add(i.accessVlan);
+    if(i.l2 && Array.isArray(i.allowed)) for(const v of i.allowed) set.add(v);
+    const m=/^vlan(\d+)$/i.exec(i.name||'');
+    if(m && i.addrs.length) set.add(parseInt(m[1],10));
+  }
+  dev._vlans=set;
+  return set;
+}
+function sviFor(devices, vlan){
+  for(const d of devices)
+    for(const i of d.interfaces){
+      const m=/^vlan(\d+)$/i.exec(i.name||'');
+      if(m && parseInt(m[1],10)===vlan && i.addrs.length) return {dev:d, iface:i};
+    }
+  return null;
+}
+
+function buildL2(devices, warn){
+  const links={};
+  const byName={};
+  for(const d of devices) byName[d.name.toLowerCase()]=d;
+
+  for(const d of devices){
+    for(const nb of (d.neighbors||[])){
+      const peer=byName[String(nb.peerName||'').toLowerCase()];
+      if(!peer){
+        warn(d.name+': neighbor '+nb.peerName+' seen on '+nb.localPort+' is not one of the loaded devices.', d.id, null);
+        continue;
+      }
+      if(peer===d) continue;
+      const aKey=d.id+'|'+nb.localPort, bKey=peer.id+'|'+nb.peerPort;
+      const key=[aKey,bKey].sort().join('::');
+      if(!links[key]) links[key]={key, a:{dev:d, port:nb.localPort}, b:{dev:peer, port:nb.peerPort}};
+    }
+  }
+  return links;
+}
+
+/* For every VLAN, check the switches carrying it actually form one connected
+   L2 domain. A trunk that drops the VLAN mid-path is the classic migration
+   break that routing analysis alone will never surface. */
+function auditVlans(devices, l2links, warn){
+  const report={};
+  const linkList=Object.values(l2links);
+  const allVlans=new Set();
+  for(const d of devices) for(const v of vlansOf(d)) allVlans.add(v);
+
+  for(const vlan of allVlans){
+    const members=devices.filter(d=>vlansOf(d).has(vlan));
+    if(members.length<2) continue;
+    const svi=sviFor(devices, vlan);
+
+    const blocked=[];
+    const adj={};
+    for(const L of linkList){
+      const aHas=vlansOf(L.a.dev).has(vlan), bHas=vlansOf(L.b.dev).has(vlan);
+      if(!aHas && !bHas) continue;
+      const aOk=portCarries(L.a.dev, L.a.port, vlan), bOk=portCarries(L.b.dev, L.b.port, vlan);
+      if(aOk && bOk){
+        (adj[L.a.dev.id]=adj[L.a.dev.id]||[]).push(L.b.dev);
+        (adj[L.b.dev.id]=adj[L.b.dev.id]||[]).push(L.a.dev);
+      } else if(aHas && bHas){
+        const side = !aOk ? L.a : L.b;
+        const port = findPort(side.dev, side.port);
+        blocked.push({dev:side.dev, port:side.port, line:port?(port.allowedLine||port.accessLine||null):null});
+      }
+    }
+
+    const root = svi ? svi.dev : members[0];
+    const seen={[root.id]:true};
+    let frontier=[root], guard=0;
+    while(frontier.length && guard++<512){
+      const next=[];
+      for(const f of frontier) for(const n of (adj[f.id]||[])) if(!seen[n.id]){ seen[n.id]=true; next.push(n); }
+      frontier=next;
+    }
+    const isolated=members.filter(d=>!seen[d.id]);
+    report[vlan]={vlan, members, svi, blocked, isolated, hasLinks:linkList.length>0};
+
+    if(linkList.length){
+      for(const b of blocked)
+        warn('VLAN '+vlan+' is not allowed on '+b.dev.name+' '+b.port+', which breaks the L2 path for that VLAN.', b.dev.id, b.line);
+      for(const d of isolated)
+        warn('VLAN '+vlan+' on '+d.name+' cannot reach '+(svi?('its gateway on '+svi.dev.name):'the rest of the VLAN')+' over the known L2 links.', d.id, null);
+    }
+  }
+  return report;
+}
+
+/* ============================================================
+   Before / after comparison
+   ============================================================ */
+
+/* Parse every device from its ORIGINAL baseline text and build a second model.
+   Device ids are carried over so graph painting and pins resolve identically.
+   Hand-added routing tables apply to both sides — they describe the device,
+   not the config text, and we have no record of when they were captured. */
+function baselineDevices(){
+  return STATE.devices.map(d=>{
+    const text = d.originalText!=null ? d.originalText : (d.rawText||'');
+    const b = parseConfig(text, d.file);
+    b.id = d.id;
+    if(b.usedFallbackName) b.name = d.name;
+    b.manualRoutes = d.manualRoutes;
+    b.tableAuthoritative = d.tableAuthoritative;
+    return b;
+  });
+}
+function baselineModel(){
+  return buildModel(baselineDevices(), {
+    igp: document.getElementById('opt-igp').checked,
+    clouds: STATE.clouds||[],
+    providers: STATE.providers||DEFAULT_PROVIDERS,
+    autoDetect: document.getElementById('opt-autowan').checked,
+    cloudOpts: STATE.cloudOpts||{}
+  });
+}
+function anyModified(){ return STATE.devices.some(isModified); }
+
+function routeKey(h){
+  if(!h || !h.route) return 'none';
+  return cidr(h.route.net,h.route.len)+'|'+
+         (h.route.nextHop!=null?int2ip(h.route.nextHop):(h.route.iface||'-'))+'|'+
+         h.route.type+'|'+(h.outIf?h.outIf.name:'-');
+}
+function describeRoute(h){
+  if(!h || !h.route) return 'no route';
+  return cidr(h.route.net,h.route.len)+' via '+
+    (h.route.nextHop!=null?int2ip(h.route.nextHop):(h.route.iface||'connected'));
+}
+
+/* First hop at which the two traces stop agreeing — on device or on decision. */
+function comparePaths(b,a){
+  const bh=b.hops||[], ah=a.hops||[];
+  let i=0;
+  while(i<bh.length && i<ah.length){
+    if(bh[i].dev.name!==ah[i].dev.name) break;
+    if(routeKey(bh[i])!==routeKey(ah[i])) break;
+    i++;
+  }
+  return {index:i, same: i>=bh.length && i>=ah.length};
+}
+
+function compareVerdict(b,a,cmp){
+  if(b.error||a.error) return {cls:'bad', title:'Could not compare', detail:b.error||a.error};
+  const bo=!!(b.verdict&&b.verdict.ok), ao=!!(a.verdict&&a.verdict.ok);
+  if(bo&&ao&&cmp.same)  return {cls:'ok',  title:'Unchanged', detail:'Same path and same result on both the original and the candidate configs.'};
+  if(bo&&ao)            return {cls:'ok',  title:'Still works, but the path changed', detail:'Both succeed. The route starts differing at hop '+(cmp.index+1)+'.'};
+  if(bo&&!ao)           return {cls:'bad', title:'Regression — your changes broke this', detail:'This worked on the original configs and fails on the candidate.'};
+  if(!bo&&ao)           return {cls:'ok',  title:'Fixed by your changes', detail:'This failed on the original configs and works on the candidate.'};
+  if(b.verdict.title===a.verdict.title && cmp.same)
+                        return {cls:'bad', title:'Pre-existing failure', detail:'This was already failing before your changes — same failure, same path. Not caused by the migration.'};
+  return {cls:'bad', title:'Still failing, but differently', detail:'It failed before your changes too, and the failure itself has changed.'};
+}
+
+/* Where the two paths part company — usually closer to the mistake than the
+   point at which the packet finally dies. */
+function divergence(b,a,cmp){
+  if(cmp.same) return null;
+  const bh=b.hops||[], ah=a.hops||[];
+  const i=cmp.index;
+  if(i<bh.length && i<ah.length){
+    if(bh[i].dev.name===ah[i].dev.name)
+      return {devId:ah[i].dev.id, devName:ah[i].dev.name,
+        text:'Both reach '+ah[i].dev.name+' at hop '+(i+1)+', but it forwards differently now — was '+
+             describeRoute(bh[i])+', now '+describeRoute(ah[i])+'.'};
+    const prev = i>0 ? ah[i-1] : null;
+    return {devId:(prev||ah[i]).dev.id, devName:(prev||ah[i]).dev.name,
+      text:'The path splits at hop '+(i+1)+': it used to go to '+bh[i].dev.name+
+           ', now it goes to '+ah[i].dev.name+'.'};
+  }
+  if(i<bh.length){
+    const prev = i>0 ? ah[i-1] : null;
+    return {devId:(prev||bh[i]).dev.id, devName:(prev||bh[i]).dev.name,
+      text:'The path used to continue to '+bh[i].dev.name+', but now it stops after hop '+i+'.'};
+  }
+  const prev = i>0 ? bh[i-1] : null;
+  return {devId:(prev||ah[i]).dev.id, devName:(prev||ah[i]).dev.name,
+    text:'The path now continues to '+ah[i].dev.name+', which it did not do before.'};
+}
+
+/* ============================================================
+   UI
+   ============================================================ */
+function rebuild(){
+  STATE.model = buildModel(STATE.devices, {
+    igp: document.getElementById('opt-igp').checked,
+    clouds: STATE.clouds||[],
+    providers: STATE.providers||DEFAULT_PROVIDERS,
+    autoDetect: document.getElementById('opt-autowan').checked,
+    cloudOpts: STATE.cloudOpts||{}
+  });
+  renderDevList();
+  renderProviders();
+  renderClouds();
+  render();
+  renderWarnings();
+  const sel=document.getElementById('startdev');
+  sel.innerHTML='<option value="">Auto — device owning the source subnet</option>';
+  for(const d of STATE.devices){
+    const o=document.createElement('option'); o.value=d.id; o.textContent=d.name; sel.appendChild(o);
+  }
+  autosave();
+}
+
+function isModified(d){ return (d.rawText||'') !== (d.originalText==null ? d.rawText : d.originalText); }
+
+function renderDevList(){
+  const ul=document.getElementById('devlist'); ul.innerHTML='';
+  document.getElementById('dev-empty').style.display = STATE.devices.length?'none':'block';
+  for(const d of STATE.devices){
+    const li=document.createElement('li');
+    li.className = (STATE.selected===d.id?'sel':'')+(d.show===false?' off':'');
+    const box=document.createElement('input');
+    box.type='checkbox'; box.className='devbox'; box.checked = d.show!==false;
+    box.title='Show on the diagram';
+    box.onclick=(ev)=>{
+      ev.stopPropagation();
+      d.show = box.checked;
+      render(); autosave();
+    };
+    const chip=document.createElement('span');
+    chip.className='chip '+(d.vendor==='palo-alto'?'pan':'cisco');
+    chip.textContent = d.vendor==='palo-alto'?'PAN':'IOS';
+    const nm=document.createElement('span'); nm.className='dev-name'; nm.textContent=d.name;
+    const x=document.createElement('button'); x.className='dev-x'; x.textContent='×'; x.title='Remove';
+    x.onclick=(ev)=>{
+      ev.stopPropagation();
+      if(!confirm('Remove '+d.name+' from the project?')) return;
+      deleteDevice(d);
+      if(!STATE.devices.length) document.getElementById('result').innerHTML='<p class="note">All devices removed.</p><div id="warnbox"></div>';
+      rebuild();
+    };
+    li.append(box,chip,nm);
+    if(isModified(d)){ const dot=document.createElement('span'); dot.className='devlist-dot'; dot.title='Changed from original'; li.appendChild(dot); }
+    li.appendChild(x);
+    li.onclick=()=>{ showDevice(d); };
+    ul.appendChild(li);
+  }
+}
+
+function openDeviceAt(deviceId, line){
+  const d=STATE.devices.find(x=>x.id===deviceId);
+  if(d) showDevice(d, {tab:'config', line});
+}
+
+function renderProviders(){
+  const ul=document.getElementById('provlist');
+  if(!ul) return;
+  ul.innerHTML='';
+  for(const p of (STATE.providers||[])){
+    const li=document.createElement('li');
+    const nm=document.createElement('span'); nm.className='dev-name'; nm.textContent=p.name;
+    const x=document.createElement('button'); x.className='dev-x'; x.textContent='×'; x.title='Remove';
+    x.onclick=()=>{ STATE.providers=STATE.providers.filter(v=>v!==p); rebuild(); };
+    li.append(nm,x);
+    ul.appendChild(li);
+  }
+}
+
+function renderClouds(){
+  const box=document.getElementById('cloudlist');
+  if(!box) return;
+  const cs=(STATE.model && STATE.model.clouds)||[];
+  if(!cs.length){
+    box.innerHTML='<p class="note" style="margin-top:0">None yet. Carrier names in interface descriptions are picked up automatically.</p>';
+    return;
+  }
+  box.innerHTML=cs.map((c,i)=>
+    '<div class="warn" style="border-left-color:#6f5c9e; cursor:default">'+
+      '<div style="color:var(--ink)">'+esc(c.name)+
+        (c.auto?' <span class="tag igp">auto</span>':' <span class="tag table">manual</span>')+'</div>'+
+      '<div style="margin-top:3px">'+c.members.map(m=>esc(m.dev.name)+' '+esc(m.ifaceName)).join('<br>')+'</div>'+
+      '<label class="auth" style="margin-top:6px"><input type="checkbox" data-cl="'+i+'"'+(c.transit?' checked':'')+'>'+
+      '<span>Carries traffic between these sites</span></label>'+
+    '</div>').join('');
+  box.querySelectorAll('[data-cl]').forEach(cb=>cb.onchange=()=>{
+    const c=cs[parseInt(cb.dataset.cl,10)];
+    STATE.cloudOpts=STATE.cloudOpts||{};
+    STATE.cloudOpts[c.name]={transit:cb.checked};
+    rebuild();
+  });
+}
+
+function renderWarnings(){
+  const box=document.getElementById('warnbox'); if(!box) return;
+  const w = STATE.model ? STATE.model.warnings : [];
+  box.innerHTML = w.length ? '<h2 class="sec">Worth checking</h2>'+w.map((x,i)=>
+    '<div class="warn'+(x.deviceId?' clickable':'')+'" data-widx="'+i+'">'+esc(x.msg)+'</div>').join('') : '';
+  box.querySelectorAll('[data-widx]').forEach(el=>{
+    const x=w[parseInt(el.dataset.widx,10)];
+    if(x.deviceId) el.onclick=()=>openDeviceAt(x.deviceId, x.line);
+  });
+}
+
+function esc(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+/* ============================================================
+   Config diff — original baseline vs candidate (current) text
+   ============================================================ */
+function diffLines(a,b){
+  const n=a.length, m=b.length;
+  if(n*m>800000) return null;   // too large to diff cheaply — caller falls back to plain listing
+  const dp=new Array(n+1);
+  for(let i=0;i<=n;i++) dp[i]=new Int32Array(m+1);
+  for(let i=n-1;i>=0;i--)
+    for(let j=m-1;j>=0;j--)
+      dp[i][j] = a[i]===b[j] ? dp[i+1][j+1]+1 : Math.max(dp[i+1][j], dp[i][j+1]);
+  const ops=[]; let i=0,j=0;
+  while(i<n && j<m){
+    if(a[i]===b[j]){ ops.push({type:'same', text:a[i], o:i+1, c:j+1}); i++; j++; }
+    else if(dp[i+1][j] >= dp[i][j+1]){ ops.push({type:'del', text:a[i], o:i+1}); i++; }
+    else { ops.push({type:'add', text:b[j], c:j+1}); j++; }
+  }
+  while(i<n){ ops.push({type:'del', text:a[i], o:i+1}); i++; }
+  while(j<m){ ops.push({type:'add', text:b[j], c:j+1}); j++; }
+  return ops;
+}
+function buildDiffPanes(origText, candText){
+  const a=(origText||'').split(/\r?\n/), b=(candText||'').split(/\r?\n/);
+  const ops=diffLines(a,b);
+  return {ops, aLines:a, bLines:b, tooLarge: ops===null};
+}
+function lineDiv(n, text, cls, pinned){
+  return '<div class="cline'+(cls?' '+cls:'')+(pinned?' pinned':'')+'" data-line="'+n+'">'+
+    '<span class="ln">'+n+'</span><span class="tx">'+esc(text)+'</span></div>';
+}
+function configTabHtml(d, editing, focusLine){
+  const modified = isModified(d);
+  const hasConfig = !!(d.rawText||'').trim();
+  if(editing){
+    return '<div class="modstate"><span class="moddot'+(modified?' on':'')+'"></span>'+
+        (modified?'Modified from original':'Matches original')+'</div>'+
+      '<p class="cfg-note">Editing the candidate config. Original stays untouched until you promote.</p>'+
+      '<textarea class="cfg-edit" id="cfg-editbox" spellcheck="false">'+esc(d.rawText||'')+'</textarea>'+
+      '<div class="btn-row" style="margin-top:8px">'+
+        '<button class="btn btn-go" id="cfg-save">Save changes</button>'+
+        '<button class="btn" id="cfg-cancel">Cancel</button>'+
+      '</div>';
+  }
+  const dp = buildDiffPanes(d.originalText, d.rawText);
+  let origHtml, candHtml;
+  if(dp.tooLarge){
+    origHtml = dp.aLines.map((t,i)=>lineDiv(i+1,t,'')).join('');
+    candHtml = dp.bLines.map((t,i)=>lineDiv(i+1,t,'', (i+1)===focusLine)).join('');
+  } else {
+    origHtml = dp.ops.filter(o=>o.type!=='add').map(o=>lineDiv(o.o,o.text, o.type==='del'?'diff-del':'')).join('');
+    candHtml = dp.ops.filter(o=>o.type!=='del').map(o=>lineDiv(o.c,o.text, o.type==='add'?'diff-add':'', o.c===focusLine)).join('');
+  }
+  return '<div class="modstate"><span class="moddot'+(modified?' on':'')+'"></span>'+
+      (modified?'Modified from original':'Matches original')+
+      (dp.tooLarge?' · too large to diff line-by-line':'')+'</div>'+
+    (!hasConfig ? '<div class="noconfig">This device has no config. It is kept in the project for its routing '+
+      'table — restore the original, or paste a new config with Edit candidate.</div>' : '')+
+    '<div class="btn-row" style="margin-bottom:14px">'+
+      '<button class="btn" id="cfg-edit-btn">Edit candidate</button>'+
+      (hasConfig?'<button class="btn danger" id="cfg-delete">Delete config</button>':'')+
+      (modified?'<button class="btn" id="cfg-revert">Revert to original</button>':'')+
+      (modified?'<button class="btn btn-go" id="cfg-promote">Make this the original</button>':'')+
+    '</div>'+
+    '<div class="cfgpane-label"><span>Original — baseline</span><span>'+dp.aLines.length+' lines</span></div>'+
+    '<div class="codeblock" id="cfg-orig">'+origHtml+'</div>'+
+    '<div class="cfgpane-label"><span>Candidate — used for tracing</span><span>'+dp.bLines.length+' lines</span></div>'+
+    '<div class="codeblock" id="cfg-cand">'+candHtml+'</div>';
+}
+
+function showDevice(d, opts){
+  opts = opts || {};
+  if(STATE.selected !== d.id){ STATE.devTab='overview'; STATE.editingConfig=false; STATE.renaming=false; }
+  if(opts.tab) STATE.devTab=opts.tab;
+  STATE.selected=d.id;
+  STATE.pinFocusLine = opts.line!=null ? opts.line : null;
+  renderDevList();
+  const r=document.getElementById('result');
+
+  const ROW_CAP=250;
+  const fibSorted = d.fib.slice().sort((a,b)=>a.net-b.net||a.len-b.len);
+  const fibShown = fibSorted.slice(0, ROW_CAP);
+  const rows = fibShown.map(f=>
+    '<tr><td>'+cidr(f.net,f.len)+'</td><td>'+(f.nextHop!=null?int2ip(f.nextHop):(f.iface||'—'))+'</td>'+
+    '<td><span class="tag '+f.type+'">'+f.type+'</span></td><td>'+esc(f.vrf)+'</td></tr>').join('');
+  const rowsMore = fibSorted.length>ROW_CAP
+    ? '<p class="note">Showing the first '+ROW_CAP+' of '+fibSorted.length+' routes.</p>' : '';
+  const ifs = d.interfaces.map(i=>
+    '<tr><td>'+esc(i.name)+'</td><td>'+(i.addrs.map(a=>int2ip(a.ip)+'/'+a.len).join(', ')||'—')+'</td>'+
+    '<td>'+esc(i.zone||i.vrf)+'</td></tr>').join('');
+  const mrows = d.manualRoutes.length ? d.manualRoutes.map((mr,idx)=>
+    '<tr><td>'+cidr(mr.net,mr.len)+'</td><td>'+(mr.nextHop!=null?int2ip(mr.nextHop):(mr.iface||'—'))+'</td>'+
+    '<td>'+mr.ad+'</td><td>'+esc(mr.vrf)+'</td>'+
+    '<td style="text-align:right"><button class="dev-x" data-del="'+idx+'" title="Remove">×</button></td></tr>').join('') : '';
+
+  const stubs=[];
+  if(STATE.model && STATE.model.subnets){
+    for(const k in STATE.model.subnets){
+      const sn=STATE.model.subnets[k];
+      if(sn.members.length<2 && sn.members[0].dev===d)
+        stubs.push({key:k, iface:sn.members[0].iface.name});
+    }
+    stubs.sort((a,b)=>a.key.localeCompare(b.key));
+  }
+  const stubHtml = stubs.length
+    ? '<h2 class="sec">Endpoint subnets ('+stubs.length+')</h2>'+
+      '<p class="note" style="margin-top:0">Only this device sits on these, so they are hidden from the map to keep it readable.</p>'+
+      '<table class="fib"><tr><th>Subnet</th><th>Interface</th></tr>'+
+      stubs.map(s=>'<tr><td>'+esc(s.key)+'</td><td>'+esc(s.iface)+'</td></tr>').join('')+'</table>'
+    : '';
+
+  const clouds = STATE.clouds||[];
+  const myAttach=[];
+  for(const c of clouds)
+    for(const m of (c.members||[]))
+      if(m.devId===d.id) myAttach.push({cloud:c, iface:m.iface});
+  const l3ifaces = d.interfaces.filter(i=>i.addrs.length);
+  const wanHtml =
+    '<h2 class="sec">WAN / provider cloud</h2>'+
+    (myAttach.length
+      ? '<table class="fib"><tr><th>Cloud</th><th>Interface</th><th></th></tr>'+
+        myAttach.map((a,idx)=>'<tr><td>'+esc(a.cloud.name)+'</td><td>'+esc(a.iface)+'</td>'+
+          '<td style="text-align:right"><button class="dev-x" data-wandel="'+idx+'" title="Detach">×</button></td></tr>').join('')+
+        '</table>'
+      : '<p class="note" style="margin-top:0">Attach this device\'s WAN interface to a named cloud — MPLS, SD-WAN, a carrier service — '+
+        'and traces will cross it to whichever site has the route.</p>')+
+    '<div class="rt-form">'+
+      '<input id="wan-name" placeholder="cloud name, e.g. MPLS" spellcheck="false" list="wan-names">'+
+      '<select id="wan-if">'+l3ifaces.map(i=>'<option value="'+esc(i.name)+'">'+esc(i.name)+'</option>').join('')+'</select>'+
+      '<div class="wide"><button class="btn" id="wan-add" style="width:100%">Attach to cloud</button></div>'+
+    '</div>'+
+    '<datalist id="wan-names">'+clouds.map(c=>'<option value="'+esc(c.name)+'">').join('')+'</datalist>';
+
+  const l2ports = d.interfaces.filter(i=>i.l2);
+  const vlanIds = Object.keys(d.vlans||{}).map(Number).sort((a,b)=>a-b);
+  const rep = (STATE.model && STATE.model.vlanReport) || {};
+  const vrows = vlanIds.map(v=>{
+    const r=rep[v]||{};
+    const bad = (r.blocked||[]).some(b=>b.dev===d) || (r.isolated||[]).some(x=>x===d);
+    return '<tr><td>'+v+'</td><td>'+esc((d.vlans[v]&&d.vlans[v].name)||'—')+'</td>'+
+      '<td>'+(r.svi?esc(r.svi.dev.name):'no SVI')+'</td>'+
+      '<td>'+(bad?'<span class="tag deny">blocked</span>':(r.hasLinks?'<span class="tag allow">ok</span>':'—'))+'</td></tr>';
+  }).join('');
+  const prows = l2ports.map(i=>
+    '<tr><td>'+esc(i.name)+'</td><td>'+esc(i.mode||'—')+'</td>'+
+    '<td>'+(i.mode==='access' ? (i.accessVlan||'—')
+          : (i.allowed===null||i.allowed===undefined ? 'all' : (i.allowed.length?i.allowed.join(','):'none')))+'</td></tr>').join('');
+  const nrows = (d.neighbors||[]).map((n,idx)=>
+    '<tr><td>'+esc(n.localPort)+'</td><td>'+esc(n.peerName)+'</td><td>'+esc(n.peerPort)+'</td>'+
+    '<td style="text-align:right"><button class="dev-x" data-nbdel="'+idx+'" title="Remove">×</button></td></tr>').join('');
+
+  const l2Html =
+    (vlanIds.length ? '<h2 class="sec">VLANs</h2><table class="fib">'+
+       '<tr><th>VLAN</th><th>Name</th><th>Gateway</th><th>L2 path</th></tr>'+vrows+'</table>' : '')+
+    (l2ports.length ? '<h2 class="sec">Switch ports</h2><table class="fib">'+
+       '<tr><th>Port</th><th>Mode</th><th>VLANs</th></tr>'+prows+'</table>' : '')+
+    '<h2 class="sec">Layer 2 neighbors</h2>'+
+    (nrows ? '<table class="fib"><tr><th>Local port</th><th>Neighbor</th><th>Their port</th><th></th></tr>'+nrows+'</table>'
+           : '<p class="note" style="margin-top:0">Configs cannot show cabling. Paste this device\'s CDP or LLDP output to draw its layer 2 links.</p>')+
+    '<textarea class="rt-paste" id="nb-paste" placeholder="Paste show cdp neighbors, show cdp neighbors detail, or show lldp neighbors"></textarea>'+
+    '<div class="btn-row" style="margin-top:8px">'+
+      '<button class="btn" id="nb-import">Import neighbors</button>'+
+      (nrows?'<button class="btn danger" id="nb-clear">Delete neighbors</button>':'')+
+    '</div>';
+
+  const overviewHtml =
+    '<h2 class="sec">Routing table you added</h2>'+
+    (mrows ? '<table class="fib"><tr><th>Prefix</th><th>Via</th><th>Metric</th><th>VRF</th><th></th></tr>'+mrows+'</table>'
+           : '<p class="note" style="margin-top:0">Nothing added yet. Paste the device\'s real table below, or enter one route at a time.</p>')+
+    '<div class="rt-form">'+
+      '<input id="mr-prefix" placeholder="10.20.0.0/16" spellcheck="false">'+
+      '<input id="mr-via" placeholder="next hop or interface" spellcheck="false">'+
+      '<input id="mr-vrf" placeholder="VRF (default)" spellcheck="false">'+
+      '<input id="mr-ad" placeholder="metric (1)" spellcheck="false">'+
+      '<div class="wide"><button class="btn" id="mr-add" style="width:100%">Add route</button></div>'+
+    '</div>'+
+    '<textarea class="rt-paste" id="mr-paste" placeholder="Paste show ip route, or show routing route from PAN-OS"></textarea>'+
+    '<div class="btn-row" style="margin-top:8px">'+
+      '<button class="btn" id="mr-import">Import table</button>'+
+      (d.manualRoutes.length?'<button class="btn danger" id="mr-clear">Delete table</button>':'')+
+    '</div>'+
+    '<label class="auth"><input type="checkbox" id="mr-auth"'+(d.tableAuthoritative?' checked':'')+'>'+
+      '<span>This table is complete — do not infer any routes for '+esc(d.name)+'.</span></label>'+
+    '<h2 class="sec">Interfaces</h2><table class="fib"><tr><th>Interface</th><th>Address</th><th>Zone / VRF</th></tr>'+ifs+'</table>'+
+    '<h2 class="sec">Routes in use</h2><table class="fib"><tr><th>Prefix</th><th>Via</th><th>Source</th><th>VRF</th></tr>'+rows+'</table>'+
+    rowsMore+
+    stubHtml+
+    wanHtml+
+    l2Html;
+
+  const modified = isModified(d);
+  const headHtml = STATE.renaming
+    ? '<div class="rename-row"><input id="rn-input" value="'+esc(d.name)+'" spellcheck="false">'+
+      '<button class="btn btn-go tiny" id="rn-save">Save</button>'+
+      '<button class="btn tiny" id="rn-cancel">Cancel</button></div>'
+    : '<div class="dev-head"><h2 class="sec">'+esc(d.name)+'</h2>'+
+      '<button class="btn tiny" id="rn-start">Rename</button>'+
+      '<button class="btn tiny danger" id="dev-delete">Delete</button></div>';
+
+  r.innerHTML =
+    headHtml+
+    '<p class="note" style="margin-top:0">From '+esc(d.file)+' · '+d.interfaces.length+' interfaces · '+d.fib.length+' routes'+
+      (d.rules.length?' · '+d.rules.length+' security rules':'')+
+      (d.customName?' · renamed':'')+'</p>'+
+    '<div class="tabs">'+
+      '<button class="tabbtn'+(STATE.devTab==='overview'?' on':'')+'" id="tab-overview">Overview</button>'+
+      '<button class="tabbtn'+(STATE.devTab==='config'?' on':'')+'" id="tab-config">Config'+(modified?' •':'')+'</button>'+
+    '</div>'+
+    (STATE.devTab==='config' ? configTabHtml(d, STATE.editingConfig, STATE.pinFocusLine) : overviewHtml)+
+    '<div id="warnbox"></div>';
+  renderWarnings();
+
+  const rnStart=document.getElementById('rn-start');
+  if(rnStart) rnStart.onclick=()=>{ STATE.renaming=true; showDevice(d); setTimeout(()=>{
+    const el=document.getElementById('rn-input'); if(el){ el.focus(); el.select(); } },0); };
+  const rnCancel=document.getElementById('rn-cancel');
+  if(rnCancel) rnCancel.onclick=()=>{ STATE.renaming=false; showDevice(d); };
+  const rnSave=document.getElementById('rn-save');
+  if(rnSave) rnSave.onclick=()=>{
+    renameDevice(d, document.getElementById('rn-input').value);
+    STATE.renaming=false; rebuild(); showDevice(d);
+  };
+  const rnInput=document.getElementById('rn-input');
+  if(rnInput) rnInput.onkeydown=(e)=>{
+    if(e.key==='Enter') rnSave.click();
+    if(e.key==='Escape') rnCancel.click();
+  };
+  const devDel=document.getElementById('dev-delete');
+  if(devDel) devDel.onclick=()=>{
+    if(!confirm('Remove '+d.name+' from the project? Its config and routing table go with it.')) return;
+    deleteDevice(d);
+    document.getElementById('result').innerHTML='<p class="note">Device removed.</p><div id="warnbox"></div>';
+    rebuild();
+  };
+
+  document.getElementById('tab-overview').onclick=()=>{ STATE.editingConfig=false; showDevice(d,{tab:'overview'}); };
+  document.getElementById('tab-config').onclick=()=>{ showDevice(d,{tab:'config'}); };
+
+  if(STATE.devTab==='config' && !STATE.editingConfig && STATE.pinFocusLine){
+    const el=r.querySelector('#cfg-cand .cline[data-line="'+STATE.pinFocusLine+'"]');
+    if(el) el.scrollIntoView({block:'center'});
+  }
+
+  const editBtn=document.getElementById('cfg-edit-btn');
+  if(editBtn) editBtn.onclick=()=>{ STATE.editingConfig=true; showDevice(d,{tab:'config'}); };
+  const saveBtn=document.getElementById('cfg-save');
+  if(saveBtn) saveBtn.onclick=()=>{
+    reparseInto(d, document.getElementById('cfg-editbox').value);
+    STATE.editingConfig=false;
+    rebuild(); showDevice(d,{tab:'config'});
+  };
+  const cancelBtn=document.getElementById('cfg-cancel');
+  if(cancelBtn) cancelBtn.onclick=()=>{ STATE.editingConfig=false; showDevice(d,{tab:'config'}); };
+  const revertBtn=document.getElementById('cfg-revert');
+  if(revertBtn) revertBtn.onclick=()=>{
+    if(!confirm('Revert '+d.name+' to its original config? Any changes since then will be lost.')) return;
+    reparseInto(d, d.originalText);
+    rebuild(); showDevice(d,{tab:'config'});
+  };
+  const promoteBtn=document.getElementById('cfg-promote');
+  if(promoteBtn) promoteBtn.onclick=()=>{
+    if(!confirm('Make the current candidate config the new original baseline for '+d.name+'? This can\u2019t be undone.')) return;
+    d.originalText = d.rawText;
+    rebuild(); showDevice(d,{tab:'config'});
+  };
+  const cfgDel=document.getElementById('cfg-delete');
+  if(cfgDel) cfgDel.onclick=()=>{
+    if(!confirm('Delete the candidate config for '+d.name+'? The device and its routing table stay; the original baseline is kept so you can revert.')) return;
+    deleteConfig(d);
+    rebuild(); showDevice(d,{tab:'config'});
+  };
+
+  const refresh=()=>{ rebuild(); showDevice(d); };
+  r.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>{
+    d.manualRoutes.splice(parseInt(b.dataset.del,10),1); refresh();
+  });
+  const add=document.getElementById('mr-add');
+  if(add) add.onclick=()=>{
+    const c=parseCidr(document.getElementById('mr-prefix').value);
+    if(!c){ document.getElementById('mr-prefix').style.borderColor='var(--red)'; return; }
+    const via=document.getElementById('mr-via').value.trim();
+    const nh=ip2int(via);
+    d.manualRoutes.push({net:c.net, len:c.len, nextHop:nh, iface:nh===null&&via?via:null,
+      ad:parseInt(document.getElementById('mr-ad').value,10)||1,
+      vrf:document.getElementById('mr-vrf').value.trim()||'default'});
+    refresh();
+  };
+  const imp=document.getElementById('mr-import');
+  if(imp) imp.onclick=()=>{
+    const txt=document.getElementById('mr-paste').value;
+    const got=importRouteTable(txt);
+    if(!got.length){
+      document.getElementById('mr-paste').style.borderColor='var(--red)';
+      return;
+    }
+    d.manualRoutes.push(...got);
+    d.tableAuthoritative=true;
+    refresh();
+  };
+  const clr=document.getElementById('mr-clear');
+  if(clr) clr.onclick=()=>{
+    if(!confirm('Delete the routing table you added for '+d.name+'? Inferred routes will be used again.')) return;
+    d.manualRoutes=[]; d.tableAuthoritative=false; refresh();
+  };
+  const auth=document.getElementById('mr-auth');
+  if(auth) auth.onchange=()=>{ d.tableAuthoritative=auth.checked; rebuild(); };
+
+  r.querySelectorAll('[data-nbdel]').forEach(b=>b.onclick=()=>{
+    d.neighbors.splice(parseInt(b.dataset.nbdel,10),1); refresh();
+  });
+  const nbImp=document.getElementById('nb-import');
+  if(nbImp) nbImp.onclick=()=>{
+    const box=document.getElementById('nb-paste');
+    const got=parseNeighbors(box.value);
+    if(!got.length){ box.style.borderColor='var(--red)'; return; }
+    const seen=new Set((d.neighbors||[]).map(n=>n.localPort+'|'+n.peerName+'|'+n.peerPort));
+    for(const n of got){
+      const k=n.localPort+'|'+n.peerName+'|'+n.peerPort;
+      if(!seen.has(k)){ d.neighbors.push(n); seen.add(k); }
+    }
+    refresh();
+  };
+  const nbClr=document.getElementById('nb-clear');
+  if(nbClr) nbClr.onclick=()=>{
+    if(!confirm('Delete the layer 2 neighbors for '+d.name+'? Its L2 links will disappear from the map.')) return;
+    d.neighbors=[]; refresh();
+  };
+
+  const wanAdd=document.getElementById('wan-add');
+  if(wanAdd) wanAdd.onclick=()=>{
+    const nameEl=document.getElementById('wan-name');
+    const name=nameEl.value.trim();
+    const iface=document.getElementById('wan-if').value;
+    if(!name || !iface){ nameEl.style.borderColor='var(--red)'; return; }
+    STATE.clouds = STATE.clouds || [];
+    let c=STATE.clouds.find(x=>x.name.toLowerCase()===name.toLowerCase());
+    if(!c){ c={id:'c'+(++cloudSeq), name, members:[]}; STATE.clouds.push(c); }
+    if(!c.members.some(m=>m.devId===d.id && m.iface===iface)) c.members.push({devId:d.id, iface});
+    refresh();
+  };
+  r.querySelectorAll('[data-wandel]').forEach(b=>b.onclick=()=>{
+    const a=myAttach[parseInt(b.dataset.wandel,10)];
+    a.cloud.members = a.cloud.members.filter(m=>!(m.devId===d.id && m.iface===a.iface));
+    STATE.clouds = (STATE.clouds||[]).filter(c=>c.members.length);
+    refresh();
+  });
+}
+
+function vlanOfIface(ifc){
+  if(!ifc) return null;
+  const m=/^vlan(\d+)$/i.exec(ifc.name||'');
+  return m?m[1]:null;
+}
+function ifDesc(ifc){
+  if(!ifc) return '—';
+  const bits=[];
+  const v=vlanOfIface(ifc);
+  if(v) bits.push('vlan '+v);
+  if(ifc.zone) bits.push(ifc.zone);
+  if(ifc.vrf && ifc.vrf!=='default') bits.push('vrf '+ifc.vrf);
+  return esc(ifc.name)+(bits.length?' <span>('+esc(bits.join(' · '))+')</span>':'');
+}
+function hopsHtml(res){
+  let html='<ol class="hops">';
+  for(const h of res.hops){
+    html+='<li><div class="hop-dev">'+esc(h.dev.name)+'</div>';
+    html+='<div class="hop-line">in <span>'+ifDesc(h.inIf)+'</span>'+
+          ' → out <span>'+ifDesc(h.outIf)+'</span></div>';
+    if(h.route){
+      html+='<div class="hop-line">'+cidr(h.route.net,h.route.len)+
+            ' via <span>'+(h.route.nextHop!=null?int2ip(h.route.nextHop):(h.route.iface||'connected'))+'</span>'+
+            '<span class="tag '+h.route.type+'">'+h.route.type+'</span>'+
+            (h.route.vrf && h.route.vrf!=='default' ? '<span class="tag igp">vrf '+esc(h.route.vrf)+'</span>':'')+
+            '</div>';
+    }
+    if(h.viaCloud){
+      html+='<div class="hop-line">crosses <span>'+esc(h.viaCloud)+'</span>'+
+            '<span class="tag table">wan</span></div>';
+    }
+    if(h.pol){
+      const bad=/deny|drop|reset/i.test(h.pol.action);
+      html+='<div class="hop-line">policy <span>'+esc(h.pol.rule)+'</span>'+
+            '<span class="tag '+(bad?'deny':'allow')+'">'+esc(h.pol.action)+'</span></div>';
+    }
+    html+='</li>';
+  }
+  return html+'</ol>';
+}
+function traceNotes(list){
+  let html='';
+  if(list.some(res=>res.hops && res.hops.some(h=>h.route && h.route.type==='igp')))
+    html+='<p class="note">Hops marked <span class="tag igp">igp</span> are inferred: '+
+      'the config says OSPF or BGP is running, so the path is the shortest one through connected links. '+
+      'It is not a real SPF calculation — costs, filters and route-maps are not read.</p>';
+  if(list.some(res=>res.hops && res.hops.some(h=>h.pol)))
+    html+='<p class="note">Policy check uses zone, source and destination only. '+
+      'Application, service, user and URL conditions are not evaluated.</p>';
+  return html;
+}
+function pinHtml(pin, idAttr){
+  if(!pin) return '';
+  return '<div class="pin-card"><b>Likely cause</b><p>'+esc(pin.detail)+'</p>'+
+    '<button class="btn" id="'+idAttr+'">'+(pin.line?'Open '+esc(pin.deviceName)+' config at line '+pin.line
+                                                    :'Open '+esc(pin.deviceName)+' config')+'</button></div>';
+}
+
+function showCompare(b, a){
+  const r=document.getElementById('result');
+  if(b.error||a.error){
+    r.innerHTML='<div class="verdict bad"><b>Cannot trace</b><p>'+esc(b.error||a.error)+'</p></div><div id="warnbox"></div>';
+    renderWarnings(); return;
+  }
+  const cmp=comparePaths(b,a);
+  const cv=compareVerdict(b,a,cmp);
+  const dv=divergence(b,a,cmp);
+
+  let html='<div class="verdict '+cv.cls+'"><b>'+esc(cv.title)+'</b><p>'+esc(cv.detail)+'</p></div>';
+  if(!anyModified())
+    html+='<div class="nochange">No device has been changed yet, so before and after are the same configs.</div>';
+  if(dv)
+    html+='<div class="diverge"><b>Paths diverge</b><p>'+esc(dv.text)+'</p>'+
+          '<button class="btn" id="dv-open">Open '+esc(dv.devName)+' config</button></div>';
+  if(!a.verdict.ok) html+=pinHtml(a.pin,'pin-open');
+
+  html+='<div class="cmp-head before">Before — original configs<span class="vr">'+esc(b.verdict.title)+'</span></div>'+hopsHtml(b);
+  html+='<div class="cmp-head after">After — candidate configs<span class="vr">'+esc(a.verdict.title)+'</span></div>'+hopsHtml(a);
+  html+=traceNotes([b,a]);
+  html+='<p class="note">The map shows the candidate topology and the After path.</p>';
+  html+='<div id="warnbox"></div>';
+  r.innerHTML=html;
+  renderWarnings();
+
+  const dvBtn=document.getElementById('dv-open');
+  if(dvBtn) dvBtn.onclick=()=>openDeviceAt(dv.devId, null);
+  const pinBtn=document.getElementById('pin-open');
+  if(pinBtn) pinBtn.onclick=()=>openDeviceAt(a.pin.deviceId, a.pin.line);
+}
+
+function showTrace(res, opts){
+  opts = opts || {};
+  const r=document.getElementById('result');
+  if(res.error){
+    r.innerHTML='<div class="verdict bad"><b>Cannot trace</b><p>'+esc(res.error)+'</p></div><div id="warnbox"></div>';
+    renderWarnings(); return;
+  }
+  const v=res.verdict;
+  let html='<div class="verdict '+(v.ok?'ok':'bad')+'"><b>'+esc(v.title)+
+    (opts.label?' <span style="font-weight:400;color:var(--ink-faint)">— '+esc(opts.label)+'</span>':'')+
+    '</b><p>'+esc(v.detail)+'</p></div>';
+  html+=pinHtml(res.pin,'pin-open');
+  html+=hopsHtml(res);
+  html+=traceNotes([res]);
+  if(opts.label==='original configs')
+    html+='<p class="note">This traced the original baseline configs. The map still shows the candidate topology.</p>';
+  html+='<div id="warnbox"></div>';
+  r.innerHTML=html;
+  renderWarnings();
+  const pinBtn=document.getElementById('pin-open');
+  if(pinBtn) pinBtn.onclick=()=>openDeviceAt(res.pin.deviceId, res.pin.line);
+}
+
+/* ---- events ---- */
+function addText(text, name){
+  if(!text.trim()) return;
+  const d=parseConfig(text, name||'pasted');
+  d.originalText = text;
+  STATE.devices.push(d);
+  STATE.lastTrace=null;
+  rebuild();
+}
+const drop=document.getElementById('drop'), fileIn=document.getElementById('file');
+drop.onclick=()=>fileIn.click();
+drop.ondragover=e=>{e.preventDefault(); drop.classList.add('over');};
+drop.ondragleave=()=>drop.classList.remove('over');
+drop.ondrop=e=>{
+  e.preventDefault(); drop.classList.remove('over');
+  for(const f of e.dataTransfer.files){
+    const rd=new FileReader(); rd.onload=()=>addText(rd.result, f.name); rd.readAsText(f);
+  }
+};
+fileIn.onchange=()=>{
+  for(const f of fileIn.files){ const rd=new FileReader(); rd.onload=()=>addText(rd.result,f.name); rd.readAsText(f); }
+  fileIn.value='';
+};
+document.getElementById('add-paste').onclick=()=>{
+  const ta=document.getElementById('paste');
+  addText(ta.value, 'pasted-'+(STATE.devices.length+1)); ta.value='';
+};
+document.getElementById('opt-view').onchange=()=>{ render(); autosave(); };
+document.getElementById('opt-autowan').onchange=()=>{ rebuild(); };
+document.getElementById('prov-add').onclick=()=>{
+  const el=document.getElementById('prov-name');
+  const name=el.value.trim();
+  if(!name){ el.style.borderColor='var(--red)'; return; }
+  STATE.providers=STATE.providers||[];
+  if(!STATE.providers.some(p=>p.name.toLowerCase()===name.toLowerCase()))
+    STATE.providers.push({name, patterns:[name]});
+  el.value=''; el.style.borderColor='';
+  rebuild();
+};
+document.getElementById('prov-name').addEventListener('keydown',e=>{
+  if(e.key==='Enter') document.getElementById('prov-add').click();
+});
+document.getElementById('opt-igp').onchange=()=>{ STATE.lastTrace=null; rebuild(); };
+document.getElementById('relayout').onclick=()=>{
+  if(!STATE.cy) return;
+  const big=STATE.cy.nodes().length>120;
+  STATE.cy.layout(big
+    ? {name:'concentric', animate:false, padding:40, minNodeSpacing:34,
+       concentric:n=>n.degree(), levelWidth:()=>2, nodeDimensionsIncludeLabels:true}
+    : {name:'cose', animate:false, nodeRepulsion:12000, idealEdgeLength:110,
+       padding:40, numIter:400, nodeDimensionsIncludeLabels:true}).run();
+};
+document.getElementById('fit').onclick=()=>{ if(STATE.cy) STATE.cy.fit(undefined,40); };
+document.getElementById('modeseg').onclick=(e)=>{
+  const b=e.target.closest('button[data-mode]'); if(!b) return;
+  STATE.traceMode=b.dataset.mode;
+  document.querySelectorAll('#modeseg button').forEach(x=>x.classList.toggle('on', x===b));
+};
+document.getElementById('run').onclick=()=>{
+  if(!STATE.model||!STATE.devices.length){
+    document.getElementById('result').innerHTML='<div class="verdict bad"><b>No configs loaded</b><p>Add at least one device first.</p></div>';
+    return;
+  }
+  const src=document.getElementById('src').value, dst=document.getElementById('dst').value;
+  const startId=document.getElementById('startdev').value;
+  const mode=STATE.traceMode||'after';
+
+  const focus = document.getElementById('opt-focus').checked;
+  const finish = (res)=>{
+    STATE.lastTrace=res;
+    if(focus && !res.error && res.hops && res.hops.length){
+      document.getElementById('opt-view').value='path';
+      render();            // render paints the trace itself
+    } else {
+      render(); paintTrace(res);
+    }
+  };
+
+  if(mode==='after'){
+    const res=trace(STATE.model, src, dst, startId);
+    showTrace(res); finish(res);
+  } else if(mode==='before'){
+    const res=trace(baselineModel(), src, dst, startId);
+    showTrace(res,{label:'original configs'}); finish(res);
+  } else {
+    const before=trace(baselineModel(), src, dst, startId);
+    const after=trace(STATE.model, src, dst, startId);
+    showCompare(before, after); finish(after);
+  }
+};
+['src','dst'].forEach(id=>document.getElementById(id).addEventListener('keydown',e=>{
+  if(e.key==='Enter') document.getElementById('run').click();
+}));
+
+/* ============================================================
+   Save, restore, layout memory
+   ============================================================ */
+const LS_KEY='netpath.session.v1';
+STATE.positions={};
+
+function capturePositions(){
+  if(!STATE.cy) return;
+  STATE.cy.nodes().forEach(n=>{
+    if(n.hasClass('tmp')) return;
+    const d=n.data();
+    if(!d.label) return;
+    STATE.positions[(d.kind==='subnet'?'net:':'dev:')+d.label] = n.position();
+  });
+}
+function projectObject(){
+  capturePositions();
+  return {
+    v:1, saved:new Date().toISOString(),
+    opts:{view:document.getElementById('opt-view').value,
+          igp:document.getElementById('opt-igp').checked},
+    trace:{src:document.getElementById('src').value, dst:document.getElementById('dst').value},
+    positions:STATE.positions,
+    clouds:STATE.clouds||[],
+    providers:(STATE.providers||[]).map(p=>({name:p.name, patterns:p.patterns})),
+    cloudOpts:STATE.cloudOpts||{},
+    autowan:document.getElementById('opt-autowan').checked,
+    devices:STATE.devices.map(d=>({
+      name:d.name, file:d.file, text:d.rawText,
+      otext: d.originalText!=null ? d.originalText : d.rawText,
+      cname: !!d.customName,
+      show: d.show!==false,
+      nbrs: d.neighbors||[],
+      auth:d.tableAuthoritative,
+      routes:d.manualRoutes.map(r=>({p:cidr(r.net,r.len),
+        nh:r.nextHop!=null?int2ip(r.nextHop):null, i:r.iface||null, ad:r.ad, vrf:r.vrf}))
+    }))
+  };
+}
+function loadProject(obj){
+  if(!obj || !Array.isArray(obj.devices)) return false;
+  STATE.devices=[]; devSeq=0; STATE.lastTrace=null;
+  STATE.positions = obj.positions || {};
+  STATE.clouds = Array.isArray(obj.clouds) ? obj.clouds : [];
+  STATE.providers = Array.isArray(obj.providers) && obj.providers.length
+    ? obj.providers.map(p=>({name:p.name, patterns:p.patterns||[p.name]}))
+    : DEFAULT_PROVIDERS.map(p=>({name:p.name, patterns:p.patterns.slice()}));
+  STATE.cloudOpts = obj.cloudOpts || {};
+  if(obj.autowan!=null) document.getElementById('opt-autowan').checked = !!obj.autowan;
+  for(const c of STATE.clouds){ const n=parseInt(String(c.id).replace(/\D/g,''),10); if(n>cloudSeq) cloudSeq=n; }
+  for(const pd of obj.devices){
+    const d=parseConfig(pd.text||'', pd.file||'saved');
+    if(pd.name) d.name=pd.name;
+    d.customName = !!pd.cname;
+    d.show = pd.show!==false;
+    d.neighbors = Array.isArray(pd.nbrs) ? pd.nbrs : [];
+    d.originalText = pd.otext!=null ? pd.otext : (pd.text||'');
+    d.tableAuthoritative=!!pd.auth;
+    d.manualRoutes=(pd.routes||[]).map(x=>{
+      const c=parseCidr(x.p); if(!c) return null;
+      return {net:c.net, len:c.len, nextHop:x.nh?ip2int(x.nh):null,
+              iface:x.i||null, ad:x.ad!=null?x.ad:1, vrf:x.vrf||'default'};
+    }).filter(Boolean);
+    STATE.devices.push(d);
+  }
+  if(obj.opts){
+    // older projects stored two booleans instead of a view mode
+    const v = obj.opts.view || (obj.opts.stubs===false ? 'all' : 'simple');
+    document.getElementById('opt-view').value = v;
+    document.getElementById('opt-igp').checked = obj.opts.igp!==false;
+  }
+  if(obj.trace){
+    document.getElementById('src').value=obj.trace.src||'';
+    document.getElementById('dst').value=obj.trace.dst||'';
+  }
+  rebuild();
+  return true;
+}
+let saveTimer=null;
+function doAutosave(){
+  try{ localStorage.setItem(LS_KEY, JSON.stringify(projectObject())); }
+  catch(e){ document.getElementById('autosave-note').textContent =
+    'This browser is not storing your work. Use Save project to keep it.'; }
+}
+/* Serializing every config is expensive, and this fires on each rebuild and
+   each node drag. Coalesce the bursts. */
+function autosave(){
+  if(saveTimer) clearTimeout(saveTimer);
+  saveTimer=setTimeout(()=>{ saveTimer=null; doAutosave(); }, 600);
+}
+function restore(){
+  try{
+    const raw=localStorage.getItem(LS_KEY);
+    if(!raw) return false;
+    return loadProject(JSON.parse(raw));
+  }catch(e){ return false; }
+}
+document.getElementById('save-proj').onclick=()=>{
+  if(saveTimer){ clearTimeout(saveTimer); saveTimer=null; doAutosave(); }
+  const blob=new Blob([JSON.stringify(projectObject(),null,2)],{type:'application/json'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='netpath-'+new Date().toISOString().slice(0,10)+'.json';
+  a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+};
+document.getElementById('open-proj').onclick=()=>document.getElementById('projfile').click();
+document.getElementById('projfile').onchange=function(){
+  const f=this.files[0]; if(!f) return;
+  const rd=new FileReader();
+  rd.onload=()=>{
+    try{
+      if(!loadProject(JSON.parse(rd.result)))
+        document.getElementById('autosave-note').textContent='That file is not a NetPath project.';
+    }catch(e){ document.getElementById('autosave-note').textContent='That file could not be read.'; }
+  };
+  rd.readAsText(f);
+  this.value='';
+};
+document.getElementById('clear-all').onclick=()=>{
+  if(!STATE.devices.length) return;
+  STATE.devices=[]; STATE.positions={}; STATE.lastTrace=null; STATE.selected=null; STATE.clouds=[];
+  document.getElementById('result').innerHTML='<p class="note">Cleared. Add a config to start again.</p><div id="warnbox"></div>';
+  rebuild();
+};
+
+/* ---- example lab ---- */
+const SAMPLE_CORE = `hostname CORE-SW
+!
+interface Vlan10
+ description Users
+ ip address 10.10.10.1 255.255.255.0
+!
+interface Vlan20
+ description Servers
+ ip address 10.10.20.1 255.255.255.0
+!
+interface GigabitEthernet0/1
+ description to EDGE-RTR
+ ip address 172.16.0.1 255.255.255.252
+!
+interface Loopback0
+ ip address 10.255.255.1 255.255.255.255
+!
+router ospf 1
+ network 10.10.0.0 0.0.255.255 area 0
+ network 172.16.0.0 0.0.0.3 area 0
+!
+ip route 0.0.0.0 0.0.0.0 172.16.0.2
+`;
+const SAMPLE_EDGE = `hostname EDGE-RTR
+!
+interface GigabitEthernet0/0
+ description to CORE-SW
+ ip address 172.16.0.2 255.255.255.252
+!
+interface GigabitEthernet0/1
+ description to FW inside
+ ip address 172.16.1.1 255.255.255.252
+!
+interface Loopback0
+ ip address 10.255.255.2 255.255.255.255
+!
+router ospf 1
+ network 172.16.0.0 0.0.0.255 area 0
+!
+ip route 10.10.10.0 255.255.255.0 172.16.0.1
+ip route 10.10.20.0 255.255.255.0 172.16.0.1
+ip route 0.0.0.0 0.0.0.0 172.16.1.2
+`;
+const SAMPLE_FW = `set deviceconfig system hostname PA-FW1
+set network interface ethernet ethernet1/1 layer3 ip 172.16.1.2/30
+set network interface ethernet ethernet1/2 layer3 ip 203.0.113.2/30
+set network interface ethernet ethernet1/3 layer3 ip 192.168.50.1/24
+set zone INSIDE network layer3 [ ethernet1/1 ]
+set zone OUTSIDE network layer3 [ ethernet1/2 ]
+set zone DMZ network layer3 [ ethernet1/3 ]
+set network virtual-router default interface [ ethernet1/1 ethernet1/2 ethernet1/3 ]
+set network virtual-router default routing-table ip static-route DEFAULT destination 0.0.0.0/0
+set network virtual-router default routing-table ip static-route DEFAULT nexthop ip-address 203.0.113.1
+set network virtual-router default routing-table ip static-route CAMPUS destination 10.10.0.0/16
+set network virtual-router default routing-table ip static-route CAMPUS nexthop ip-address 172.16.1.1
+set address SERVERS ip-netmask 10.10.20.0/24
+set rulebase security rules Users-to-DMZ from [ INSIDE ] to [ DMZ ] source any destination any action allow
+set rulebase security rules Block-Servers-Out from [ INSIDE ] to [ OUTSIDE ] source [ SERVERS ] destination any action deny
+set rulebase security rules Outbound from [ INSIDE ] to [ OUTSIDE ] source any destination any action allow
+`;
+document.getElementById('load-sample').onclick=()=>{
+  STATE.devices=[]; STATE.lastTrace=null;
+  addText(SAMPLE_CORE,'core-sw.cfg');
+  addText(SAMPLE_EDGE,'edge-rtr.cfg');
+  addText(SAMPLE_FW,'pa-fw1.set');
+  document.getElementById('src').value='10.10.10.50';
+  document.getElementById('dst').value='192.168.50.20';
+};
+
+/* cytoscape offline guard */
+if(typeof cytoscape==='undefined'){
+  document.getElementById('stage-empty').innerHTML=
+    '<strong>The drawing library did not load</strong><span>NetPath pulls Cytoscape.js from a CDN. '+
+    'Connect to the internet once, or download cytoscape.min.js next to this file and point the script tag at it.</span>';
+}
+if(!restore()) rebuild();
+</script>
+</body>
+</html>
