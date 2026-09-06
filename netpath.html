@@ -1691,7 +1691,7 @@ function render(){
       const d=STATE.model.devices.find(x=>x.id===evt.target.id());
       if(d) showDevice(d);
     });
-    STATE.cy=cyp; STATE.edgeFor=edgeFor; STATE.edgePair={};
+    STATE.cy=cyp; STATE.edgeFor=edgeFor; STATE.edgePair={}; STATE.viewIsPath=true;
     paintTrace(res);
     return;
   }
@@ -1808,10 +1808,36 @@ function render(){
   }
 
   const saved = STATE.positions || {};
-  const keyOf = e => (e.data.kind==='subnet'?'net:':'dev:')+e.data.label;
+  const keyOf = e => posKey(e.data.kind, e.data.label);
   const nodes = els.filter(e=>!e.data.source);
-  const allKnown = nodes.length>0 && nodes.every(n=>saved[keyOf(n)]);
-  if(allKnown) for(const n of nodes) n.position = {x:saved[keyOf(n)].x, y:saved[keyOf(n)].y};
+
+  /* Keep every node the user has already placed exactly where it is, and drop
+     only the new ones into free space beside them. Re-running the layout
+     because one device was added would scramble a map someone had arranged
+     by hand. */
+  let placed=0;
+  let minX=Infinity, maxX=-Infinity, minY=Infinity, maxY=-Infinity;
+  for(const n of nodes){
+    const p=saved[keyOf(n)];
+    if(!p) continue;
+    placed++;
+    if(p.x<minX) minX=p.x;
+    if(p.x>maxX) maxX=p.x;
+    if(p.y<minY) minY=p.y;
+    if(p.y>maxY) maxY=p.y;
+  }
+  const usePreset = placed>0;
+  if(usePreset){
+    if(!isFinite(minX)){ minX=maxX=minY=maxY=0; }
+    const colX=maxX+240, rowH=Math.max(90,(maxY-minY)/8||90);
+    let col=0, row=0;
+    for(const n of nodes){
+      const p=saved[keyOf(n)];
+      if(p){ n.position={x:p.x, y:p.y}; continue; }
+      n.position={x:colX+col*210, y:minY+row*rowH};
+      if(++row>7){ row=0; col++; }
+    }
+  }
 
   // layer 2 links from CDP/LLDP neighbor data
   if(model.l2links){
@@ -1858,6 +1884,8 @@ function render(){
   }
 
   const bigGraph = nodes.length>120;
+  const vp = (STATE.cy && !STATE.viewIsPath)
+    ? {zoom:STATE.cy.zoom(), pan:Object.assign({}, STATE.cy.pan())} : null;
   if(STATE.cy) STATE.cy.destroy();
   const cy = cytoscape({
     container: document.getElementById('cy'),
@@ -1868,7 +1896,7 @@ function render(){
     hideEdgesOnViewport:bigGraph,
     pixelRatio:bigGraph?1:'auto',
     style: graphStyle(),
-    layout: allKnown ? {name:'preset', padding:40}
+    layout: usePreset ? {name:'preset', padding:40, fit:false}
       : bigGraph
         ? {name:'concentric', animate:false, padding:40, minNodeSpacing:34,
            concentric:n=>n.degree(), levelWidth:()=>2, nodeDimensionsIncludeLabels:true}
@@ -1882,7 +1910,10 @@ function render(){
   });
   cy.on('dragfree','node', ()=>{ capturePositions(); autosave(); });
 
-  STATE.cy=cy; STATE.edgeFor=edgeFor; STATE.edgePair=edgePair;
+  STATE.cy=cy; STATE.edgeFor=edgeFor; STATE.edgePair=edgePair; STATE.viewIsPath=false;
+  if(usePreset && vp){ cy.zoom(vp.zoom); cy.pan(vp.pan); }
+  // remember where the new nodes landed so they stay put next time
+  capturePositions();
   if(STATE.lastTrace) paintTrace(STATE.lastTrace);
 }
 
@@ -2946,13 +2977,16 @@ document.getElementById('run').onclick=()=>{
 const LS_KEY='netpath.session.v1';
 STATE.positions={};
 
+function posKey(kind, label){
+  return (kind==='subnet'?'net:':kind==='wan'?'wan:':'dev:')+label;
+}
 function capturePositions(){
-  if(!STATE.cy) return;
+  if(!STATE.cy || STATE.viewIsPath) return;   // path view is transient — never let it overwrite the map
   STATE.cy.nodes().forEach(n=>{
     if(n.hasClass('tmp')) return;
     const d=n.data();
     if(!d.label) return;
-    STATE.positions[(d.kind==='subnet'?'net:':'dev:')+d.label] = n.position();
+    STATE.positions[posKey(d.kind, d.label)] = n.position();
   });
 }
 function projectObject(){
