@@ -72,6 +72,8 @@ h2.sec:not(:first-child){margin-top:22px}
 .btn:focus-visible{outline:2px solid var(--cyan); outline-offset:1px}
 .btn-go{background:var(--amber); border-color:var(--amber); color:#1a1206; font-weight:600}
 .btn-go:hover{background:#f2ae48; border-color:#f2ae48}
+.btn-stop{background:transparent; border-color:var(--red); color:var(--red); font-weight:600}
+.btn-stop:hover{background:rgba(224,98,95,.12); border-color:#e87b78; color:#e87b78}
 .btn-row{display:flex; gap:8px; flex-wrap:wrap; margin-top:12px}
 
 textarea.paste{
@@ -1731,9 +1733,16 @@ function render(){
       c.members.some(x=>x.dev===a) && c.members.some(x=>x.dev===b));
 
     const mid=[];   // things that sit in the middle column
-    for(const s of shared) mid.push({type:'net', s});
-    for(const c of clouds) mid.push({type:'cloud', c});
-    const rows=Math.max(mid.length,1), step=140, top=-((rows-1)*step)/2;
+    for(const s of shared) mid.push({type:'net', key:'net:'+s.key, s});
+    for(const c of clouds) mid.push({type:'cloud', key:'cloud:'+c.name, c});
+    l2.forEach((L,i)=>mid.push({type:'l2', key:'l2:'+i, L}));
+
+    // clicking one connection isolates it; "Show all links" brings them back
+    const only=STATE.linkOnly;
+    const shownMid = only ? mid.filter(x=>x.key===only) : mid;
+    const cols=shownMid.filter(x=>x.type!=='l2');
+    const cables=shownMid.filter(x=>x.type==='l2');
+    const rows=Math.max(cols.length,1), step=140, top=-((rows-1)*step)/2;
 
     els.push({data:{id:a.id, label:a.name, kind:'device', vendor:a.vendor,
                     role:a.isSwitch?'switch':'router'}, position:{x:0, y:0}});
@@ -1749,7 +1758,7 @@ function render(){
               meta: bits.length?1:0};
     };
 
-    mid.forEach((item,idx)=>{
+    cols.forEach((item,idx)=>{
       const y=top+idx*step;
       if(item.type==='net'){
         const s=item.s;
@@ -1757,12 +1766,12 @@ function render(){
         els.push({data:{id:sid, label:s.key, net:s.key, kind:'subnet'}, position:{x:310, y}});
         for(const m of s.a){
           const id='e'+(++e), p=port(m);
-          els.push({data:{id, source:a.id, target:sid, kind:'link', label:p.label, meta:p.meta}});
+          els.push({data:{id, source:a.id, target:sid, kind:'link', label:p.label, meta:p.meta, item:item.key}});
           edgeFor[a.id+'::'+m.iface.name]=id;
         }
         for(const m of s.b){
           const id='e'+(++e), p=port(m);
-          els.push({data:{id, source:sid, target:b.id, kind:'link', label:p.label, meta:p.meta}});
+          els.push({data:{id, source:sid, target:b.id, kind:'link', label:p.label, meta:p.meta, item:item.key}});
           edgeFor[b.id+'::'+m.iface.name]=id;
         }
       } else {
@@ -1772,23 +1781,24 @@ function render(){
           const mem=c.members.find(x=>x.dev===dev);
           const id='e'+(++e);
           els.push({data:{id, source:dev===a?a.id:cid, target:dev===a?cid:b.id,
-                          kind:'wanlink', label:mem?mem.ifaceName:''}});
+                          kind:'wanlink', label:mem?mem.ifaceName:'', item:item.key}});
           if(mem) edgeFor[dev.id+'::'+mem.ifaceName]=id;
         }
       }
     });
 
     // L2 cables run straight across, below the L3 detail
-    for(const L of l2){
+    for(const item of cables){
+      const L=item.L;
       const first = L.a.dev===a ? L.a : L.b, second = L.a.dev===a ? L.b : L.a;
       const pa=findPort(a,first.port), pb=findPort(b,second.port);
       const vl=(p)=>!p?'':(p.mode==='access'?('access '+(p.accessVlan||'?'))
             :(Array.isArray(p.allowed)?('trunk '+(p.allowed.length?p.allowed.join(','):'none')):'trunk all'));
-      els.push({data:{id:'e'+(++e), source:a.id, target:b.id, kind:'l2',
+      els.push({data:{id:'e'+(++e), source:a.id, target:b.id, kind:'l2', item:item.key,
         label:first.port+(vl(pa)?'\n'+vl(pa):'')+'\n↔\n'+second.port+(vl(pb)?'\n'+vl(pb):'')}});
     }
 
-    if(!mid.length && !l2.length){
+    if(!shownMid.length){
       el.style.display='flex';
       el.innerHTML='<strong>Nothing joins these two</strong><span>'+esc(a.name)+' and '+esc(b.name)+
         ' share no subnet, L2 link or cloud in the current model.</span>';
@@ -1808,6 +1818,12 @@ function render(){
       if(d) showDevice(d);
     });
     cyl.on('tap','node[kind="subnet"]', evt=>showSegment(evt.target.data('net')||evt.target.data('label')));
+    cyl.on('tap','edge', evt=>{
+      const it=evt.target.data('item');
+      if(!it) return;
+      STATE.linkOnly = (STATE.linkOnly===it) ? null : it;   // tap again to bring the rest back
+      render(); showLink(a,b);
+    });
     STATE.cy=cyl; STATE.edgeFor=edgeFor; STATE.edgePair={}; STATE.viewIsPath=true;
     return;
   }
@@ -2038,6 +2054,29 @@ function render(){
 /* ---- animated path ---- */
 STATE.timers=[]; STATE.raf=null;
 
+/* Stop the motion, drop the highlighted path, and put the map back to normal. */
+function clearTrace(){
+  stopFx();
+  STATE.lastTrace=null;
+  const sel=document.getElementById('opt-view');
+  if(sel.value==='path') sel.value = STATE.prevView || 'simple';
+  render();
+  const r=document.getElementById('result');
+  r.innerHTML='<p class="note">Enter two addresses and trace. Each hop shows the route that matched, '+
+    'the interface it leaves by, and — on firewalls — which security rule the traffic hits.</p>'+
+    '<div id="warnbox"></div>';
+  renderWarnings();
+  updateFxBtn();
+}
+function updateFxBtn(){
+  const b=document.getElementById('run');
+  if(!b) return;
+  const has=!!(STATE.lastTrace && STATE.lastTrace.hops && STATE.lastTrace.hops.length);
+  b.textContent = has ? 'Stop trace' : 'Trace the path';
+  b.classList.toggle('btn-go', !has);
+  b.classList.toggle('btn-stop', has);
+}
+
 function stopFx(){
   if(STATE.raf){ cancelAnimationFrame(STATE.raf); STATE.raf=null; }
   (STATE.timers||[]).forEach(clearTimeout); STATE.timers=[];
@@ -2045,6 +2084,7 @@ function stopFx(){
   cy.$('.tmp').remove();
   cy.elements().removeClass('hot drop fwd rev');
   cy.edges().removeStyle('line-dash-offset');
+  updateFxBtn();
 }
 
 /* Walk the hops and work out which edges are crossed, and which way round.
@@ -2137,7 +2177,9 @@ function paintTrace(res){
   if(res.verdict && !res.verdict.ok && res.hops.length)
     cy.getElementById(res.hops[res.hops.length-1].dev.id).addClass('drop');
 
-  if(reduce) return;
+  if(reduce){ updateFxBtn(); return; }
+
+  updateFxBtn();
 
   // dashes march the way the packet travels
   let off=0;
@@ -2658,8 +2700,10 @@ function showLink(a,b){
     '<div class="btn-row" style="margin-bottom:14px">'+
       '<button class="btn" id="lk-a">Open '+esc(a.name)+'</button>'+
       '<button class="btn" id="lk-b">Open '+esc(b.name)+'</button>'+
+      (STATE.linkOnly?'<button class="btn btn-go" id="lk-all">Show all links</button>':'')+
       '<button class="btn" id="lk-back">Back to map</button>'+
-    '</div>';
+    '</div>'+
+    (STATE.linkOnly?'<div class="nochange">Showing one connection only. Tap it again, or use Show all links.</div>':'');
 
   if(shared.length){
     html+='<h2 class="sec">Layer 3 links</h2>';
@@ -2711,8 +2755,11 @@ function showLink(a,b){
   const back=document.getElementById('lk-back');
   if(back) back.onclick=()=>{
     document.getElementById('opt-view').value = STATE.prevView || 'simple';
+    STATE.linkOnly=null;
     render();
   };
+  const all=document.getElementById('lk-all');
+  if(all) all.onclick=()=>{ STATE.linkOnly=null; render(); showLink(a,b); };
 }
 
 function showSegment(key){
@@ -2754,6 +2801,7 @@ function onEdgeTap(cy, edge){
 function openLink(a,b){
   const sel=document.getElementById('opt-view');
   if(sel.value!=='link' && sel.value!=='path') STATE.prevView=sel.value;
+  if(!STATE.linkFocus || STATE.linkFocus.a!==a.id || STATE.linkFocus.b!==b.id) STATE.linkOnly=null;
   STATE.linkFocus={a:a.id, b:b.id};
   sel.value='link';
   render();
@@ -3209,7 +3257,7 @@ document.getElementById('modeseg').onclick=(e)=>{
   STATE.traceMode=b.dataset.mode;
   document.querySelectorAll('#modeseg button').forEach(x=>x.classList.toggle('on', x===b));
 };
-document.getElementById('run').onclick=()=>{
+function runTrace(){
   if(!STATE.model||!STATE.devices.length){
     document.getElementById('result').innerHTML='<div class="verdict bad"><b>No configs loaded</b><p>Add at least one device first.</p></div>';
     return;
@@ -3221,12 +3269,15 @@ document.getElementById('run').onclick=()=>{
   const focus = document.getElementById('opt-focus').checked;
   const finish = (res)=>{
     STATE.lastTrace=res;
+    const sel=document.getElementById('opt-view');
     if(focus && !res.error && res.hops && res.hops.length){
-      document.getElementById('opt-view').value='path';
+      if(sel.value!=='path' && sel.value!=='link') STATE.prevView=sel.value;
+      sel.value='path';
       render();            // render paints the trace itself
     } else {
       render(); paintTrace(res);
     }
+    updateFxBtn();
   };
 
   if(mode==='after'){
@@ -3240,9 +3291,15 @@ document.getElementById('run').onclick=()=>{
     const after=trace(STATE.model, src, dst, startId);
     showCompare(before, after); finish(after);
   }
+}
+
+/* One button: trace, then stop. */
+document.getElementById('run').onclick=()=>{
+  if(STATE.lastTrace && STATE.lastTrace.hops && STATE.lastTrace.hops.length) clearTrace();
+  else runTrace();
 };
 ['src','dst'].forEach(id=>document.getElementById(id).addEventListener('keydown',e=>{
-  if(e.key==='Enter') document.getElementById('run').click();
+  if(e.key==='Enter') runTrace();     // Enter always traces, never stops
 }));
 
 /* ============================================================
