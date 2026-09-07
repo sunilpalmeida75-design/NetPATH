@@ -308,6 +308,20 @@ table.fib td:first-child{color:var(--ink)}
       <ul class="devs" id="devlist"></ul>
       <p class="note" id="dev-empty">No devices yet.</p>
 
+      <h2 class="sec">Find</h2>
+      <div class="rt-form">
+        <input id="find-q" class="wide" placeholder="IP, subnet, vlan 30, vrf CUST-A" spellcheck="false">
+        <div class="wide"><button class="btn" id="find-go" style="width:100%">Search</button></div>
+      </div>
+
+      <h2 class="sec">Sites and zones</h2>
+      <ul class="devs" id="grouplist"></ul>
+      <div class="rt-form">
+        <input id="grp-name" placeholder="name" spellcheck="false">
+        <select id="grp-parent"><option value="">as a site</option></select>
+        <div class="wide"><button class="btn" id="grp-add" style="width:100%">Add site or zone</button></div>
+      </div>
+
       <h2 class="sec">Providers</h2>
       <label class="auth" style="margin-top:0"><input type="checkbox" id="opt-autowan" checked>
         <span>Detect carriers from interface descriptions. Unmatched default-route uplinks become Internet.</span></label>
@@ -344,12 +358,16 @@ table.fib td:first-child{color:var(--ink)}
           <option value="path">Traced path only</option>
           <option value="link">Link detail</option>
           <option value="sel">Selected devices</option>
+          <option value="find">Search results</option>
         </select>
       </label>
       <label class="toggle"><input type="checkbox" id="opt-focus"> Switch to path view after trace</label>
       <label class="toggle"><input type="checkbox" id="opt-igp" checked> Infer IGP reachability</label>
+      <label class="toggle"><input type="checkbox" id="opt-nolinks"> Hide links</label>
       <label class="toggle"><input type="checkbox" id="opt-select"> Select devices</label>
       <button class="btn" id="analyse" style="display:none">Analyse selected</button>
+      <button class="btn" id="rot-l" title="Rotate left">⟲</button>
+      <button class="btn" id="rot-r" title="Rotate right">⟳</button>
       <button class="btn" id="viewback" style="display:none">← Back</button>
       <button class="btn" id="fit">Fit</button>
     </div>
@@ -585,6 +603,30 @@ function parseCisco(text, fname){
         cur.addrs.push({ip:ip2int(m[1]), len:parseInt(m[2],10), line:lineNo});
         return;
       }
+      if((m=t.match(/^encapsulation\s+dot1q\s+(\d+)/i))){ cur.vlanTag=parseInt(m[1],10); return; }
+      // first-hop redundancy: the virtual IP is what other devices point at
+      if((m=t.match(/^standby\s+(?:(\d+)\s+)?ip\s+(\d+\.\d+\.\d+\.\d+)/i))){
+        cur.vips=cur.vips||[];
+        cur.vips.push({group:m[1]||'0', ip:ip2int(m[2]), proto:'HSRP', prio:100, line:lineNo});
+        dev.hasFhrp=true; return;
+      }
+      if((m=t.match(/^standby\s+(?:(\d+)\s+)?priority\s+(\d+)/i))){
+        const g=m[1]||'0', pr=parseInt(m[2],10);
+        cur.vipPrio=cur.vipPrio||{}; cur.vipPrio[g]=pr;
+        for(const v of (cur.vips||[])) if(v.group===g) v.prio=pr;
+        return;
+      }
+      if((m=t.match(/^vrrp\s+(\d+)\s+ip\s+(\d+\.\d+\.\d+\.\d+)/i))){
+        cur.vips=cur.vips||[];
+        cur.vips.push({group:m[1], ip:ip2int(m[2]), proto:'VRRP', prio:100, line:lineNo});
+        dev.hasFhrp=true; return;
+      }
+      if((m=t.match(/^vrrp\s+(\d+)\s+priority\s+(\d+)/i))){
+        const g=m[1], pr=parseInt(m[2],10);
+        cur.vipPrio=cur.vipPrio||{}; cur.vipPrio[g]=pr;
+        for(const v of (cur.vips||[])) if(v.group===g) v.prio=pr;
+        return;
+      }
       if((m=t.match(/^ip\s+ospf\s+\d+\s+area\s+\S+/i))){ cur.ospf=true; dev.dynamic=true; return; }
     }
 
@@ -628,6 +670,10 @@ function parseCisco(text, fname){
       return;
     }
   });
+
+  for(const i of dev.interfaces)
+    for(const v of (i.vips||[]))
+      if(i.vipPrio && i.vipPrio[v.group]!=null) v.prio=i.vipPrio[v.group];
 
   let usedFallbackName=false;
   if(!dev.name){ dev.name = fname.replace(/\.[^.]+$/,'') || ('device-'+(++devSeq)); usedFallbackName=true; }
@@ -730,6 +776,7 @@ function parsePanSet(text, fname){
           if(rest[0]==='units'){
             const sub=String(rest[1]);
             if(rest[2]==='ip') addIp(sub, String(rest[3]), lineNo);
+            if(rest[2]==='tag') iface(sub).vlanTag=parseInt(String(rest[3]),10);
             if(rest[2]==='comment') iface(sub).desc=String(rest[3]);
           } else if(rest[0]==='ip'){
             addIp(base, String(rest[1]), lineNo);
@@ -1207,6 +1254,26 @@ function buildModel(devices, opts){
   const l2links = buildL2(devices, warn);
   const vlanReport = auditVlans(devices, l2links, warn);
 
+  /* First-hop redundancy. Other devices point at the virtual IP, which no
+     interface owns, so it has to be resolved to whichever member is active. */
+  const vips={};
+  for(const d of devices)
+    for(const i of d.interfaces)
+      for(const v of (i.vips||[])){
+        if(v.ip==null) continue;
+        (vips[v.ip]=vips[v.ip]||[]).push({dev:d, iface:i, prio:v.prio||100, group:v.group, proto:v.proto});
+      }
+  const haPairs=[];
+  for(const ip in vips){
+    const mem=vips[ip];
+    mem.sort((x,y)=>y.prio-x.prio);
+    const devs=[...new Set(mem.map(x=>x.dev))];
+    if(devs.length>1) haPairs.push({vip:parseInt(ip,10), members:mem, devs,
+                                    proto:mem[0].proto, group:mem[0].group});
+    else warn(mem[0].proto+' group '+mem[0].group+' on '+mem[0].dev.name+' '+mem[0].iface.name+
+              ' has no peer in these configs — the standby device may be missing.', mem[0].dev.id, null);
+  }
+
   /* A WAN cloud stands in for a provider network you cannot see — MPLS, SD-WAN,
      a carrier L2 service. It is not a router and invents no next hops: it just
      records which edge devices sit on it, so a trace that leaves one site can
@@ -1236,7 +1303,14 @@ function buildModel(devices, opts){
       warn('WAN cloud "'+c.name+'" has only one device attached, so nothing can be reached across it.', members[0].dev.id, null);
   }
 
-  return {devices, subnets, adj, warnings, l2links, vlanReport, clouds};
+  return {devices, subnets, adj, warnings, l2links, vlanReport, clouds, vips, haPairs};
+}
+
+/* Which device answers for a virtual IP — the highest priority member. */
+function vipOwner(model, ipInt){
+  const mem=(model.vips||{})[ipInt];
+  if(!mem || !mem.length) return null;
+  return mem[0];
 }
 
 /* Carrier names as they actually appear in interface descriptions. Word
@@ -1475,7 +1549,14 @@ function trace(model, srcStr, dstStr, startId){
     // resolve the next device
     let nextDev=null;
     if(route.nextHop!=null){
-      const own = ownerOf(model, route.nextHop);
+      let own = ownerOf(model, route.nextHop);
+      if(!own){
+        const v=vipOwner(model, route.nextHop);
+        if(v){
+          own={dev:v.dev, iface:v.iface};
+          hop.viaVip=int2ip(route.nextHop)+' · '+v.proto+' '+v.group+' active on '+v.dev.name;
+        }
+      }
       if(own) nextDev=own.dev;
       else{
         const onLink = cur._conn.some(c=>c.vrf===vrf && inNet(route.nextHop,c.net,c.len));
@@ -1566,6 +1647,7 @@ function sizeNodes(els){
     if(el.data.source) continue;                 // edges
     if(el.data.w!=null) continue;
     const k=el.data.kind;
+    if(k==='group') continue;
     const s = k==='subnet' ? labelSize(el.data.label,11,8,6,24)
             : k==='wan'    ? labelSize(el.data.label,12,34,28,96)
             :                labelSize(el.data.label,13,30,26,96);
@@ -1594,11 +1676,81 @@ function updateBackBtn(){
   if(b) b.style.display = (STATE.viewHist && STATE.viewHist.length) ? '' : 'none';
 }
 
+/* ============================================================
+   Sites, zones, search and rotation
+   ============================================================ */
+let grpSeq=0;
+const DEFAULT_ZONES=['Internet','DMZ','Internal','Bastion'];
+
+function groups(){ return STATE.groups = STATE.groups || []; }
+function groupById(id){ return groups().find(g=>g.id===id) || null; }
+function zoneOf(dev){ return dev.groupId ? groupById(dev.groupId) : null; }
+
+/* Match a device against a search term: an address, a subnet, a VLAN or a VRF. */
+function findMatches(q){
+  const out=[];
+  const raw=String(q||'').trim();
+  if(!raw) return out;
+  const cidrQ=parseCidr(raw);
+  const ipQ=ip2int(raw);
+  const vlanQ=/^vlan\s*(\d+)$/i.exec(raw);
+  const vrfQ=/^vrf\s+(\S+)$/i.exec(raw);
+
+  for(const d of STATE.devices){
+    const why=[];
+    for(const i of d.interfaces){
+      for(const a of i.addrs){
+        if(ipQ!=null && a.ip===ipQ) why.push(i.name+' has '+raw);
+        else if(ipQ!=null && a.len<32 && inNet(ipQ,netOf(a.ip,a.len),a.len))
+          why.push(i.name+' covers '+raw+' ('+cidr(netOf(a.ip,a.len),a.len)+')');
+        if(cidrQ && netOf(a.ip,a.len)===cidrQ.net && a.len===cidrQ.len)
+          why.push(i.name+' on '+raw);
+      }
+      if(vlanQ){
+        const v=vlanOfIface(i);
+        if(v && v===vlanQ[1]) why.push(i.name+' is vlan '+vlanQ[1]);
+        if(i.l2 && i.mode==='access' && String(i.accessVlan)===vlanQ[1]) why.push(i.name+' access vlan '+vlanQ[1]);
+        if(i.l2 && Array.isArray(i.allowed) && i.allowed.indexOf(parseInt(vlanQ[1],10))>=0)
+          why.push(i.name+' trunk allows '+vlanQ[1]);
+      }
+      if(vrfQ && i.vrf && i.vrf.toLowerCase()===vrfQ[1].toLowerCase()) why.push(i.name+' in vrf '+i.vrf);
+    }
+    if(vlanQ && d.vlans && d.vlans[vlanQ[1]]) why.push('vlan '+vlanQ[1]+' defined');
+    if(cidrQ || ipQ!=null){
+      for(const r of d.fib){
+        if(cidrQ && r.net===cidrQ.net && r.len===cidrQ.len){ why.push('route '+raw+' ('+r.type+')'); break; }
+        if(ipQ!=null && r.len>0 && inNet(ipQ,r.net,r.len)){ why.push('route '+cidr(r.net,r.len)+' ('+r.type+')'); break; }
+      }
+    }
+    if(vrfQ){
+      for(const r of d.fib) if(r.vrf && r.vrf.toLowerCase()===vrfQ[1].toLowerCase()){ why.push('routes in vrf '+r.vrf); break; }
+    }
+    if(why.length) out.push({dev:d, why:[...new Set(why)].slice(0,6)});
+  }
+  return out;
+}
+
+/* Rotate the current view's saved layout about its centre. */
+function rotateView(deg){
+  const ns=STATE.posNS||'simple|';
+  const keys=Object.keys(STATE.positions||{}).filter(k=>k.indexOf(ns)===0);
+  if(!keys.length) return;
+  let cx=0, cy=0;
+  for(const k of keys){ cx+=STATE.positions[k].x; cy+=STATE.positions[k].y; }
+  cx/=keys.length; cy/=keys.length;
+  const r=deg*Math.PI/180, cos=Math.cos(r), sin=Math.sin(r);
+  for(const k of keys){
+    const p=STATE.positions[k], dx=p.x-cx, dy=p.y-cy;
+    STATE.positions[k]={x:cx+dx*cos-dy*sin, y:cy+dx*sin+dy*cos};
+  }
+  render(); autosave();
+}
+
 function graphStyle(){
   return [
       {selector:'node[kind="device"]', style:{
         'shape':'round-rectangle','width':'data(w)','height':'data(h)',
-        'background-color':'#1c2c3e','border-width':1,'border-color':'#3a5273',
+        'background-color':'#1c2c3e','border-width':2,'border-color':'#3a5273',
         'label':'data(label)','color':'#d3dfec','font-family':'IBM Plex Mono, monospace',
         'font-size':13,'font-weight':600,'text-valign':'center','text-halign':'center',
         'text-wrap':'wrap'
@@ -1631,7 +1783,7 @@ function graphStyle(){
       {selector:'edge.rev', style:{'mid-source-arrow-shape':'triangle','mid-source-arrow-color':'#e8a13a','arrow-scale':0.85}},
       {selector:'node[kind="wan"]', style:{
         'shape':'round-rectangle','width':'data(w)','height':'data(h)',
-        'background-color':'#241c33','border-width':1.5,'border-color':'#6f5c9e','border-style':'dashed',
+        'background-color':'#241c33','border-width':2,'border-color':'#6f5c9e','border-style':'dashed',
         'label':'data(label)','color':'#b9a6e0','font-family':'IBM Plex Mono, monospace',
         'font-size':12,'font-weight':600,'text-valign':'center','text-halign':'center'}},
       {selector:'edge[kind="wanlink"]', style:{
@@ -1645,11 +1797,25 @@ function graphStyle(){
       {selector:'node.pkt', style:{
         'width':11,'height':11,'shape':'ellipse','background-color':'#ffc766',
         'border-width':3,'border-color':'rgba(232,161,58,.28)','z-index':40,'events':'no','label':''}},
-      {selector:'node[picked = 1]', style:{'border-color':'#4fc3d9','border-width':2.5,'color':'#8fdcec'}},
-      {selector:'node.hot', style:{'border-color':'#e8a13a','border-width':2,'color':'#f0b256'}},
+      {selector:'node[kind="group"]', style:{
+        'shape':'round-rectangle','background-color':'#16202e','background-opacity':0.55,
+        'border-width':1,'border-color':'#33485f','border-style':'dashed','padding':'26px',
+        'label':'data(label)','color':'#7f93aa','font-family':'Inter, system-ui, sans-serif',
+        'font-size':12,'font-weight':600,'text-valign':'top','text-halign':'center',
+        'text-margin-y':-6,'z-index':0}},
+      {selector:'node[gkind="site"]', style:{'border-color':'#4a6b8a','background-opacity':0.35}},
+      {selector:'edge[kind="ha"]', style:{
+        'line-color':'#8a6a2e','line-style':'dotted','width':2,'curve-style':'bezier',
+        'color':'#c49a4e','font-size':9,'text-wrap':'wrap','z-index':2}},
+      {selector:'node[kind="group"].hot', style:{
+        'border-color':'#33485f','border-width':1,'color':'#7f93aa','background-opacity':0.55}},
+      {selector:'node[gkind="site"].hot', style:{'border-color':'#4a6b8a','background-opacity':0.35}},
+      {selector:'node[kind="group"].drop', style:{'border-color':'#33485f','color':'#7f93aa'}},
+      {selector:'node[picked = 1]', style:{'border-color':'#4fc3d9','color':'#8fdcec'}},
+      {selector:'node.hot', style:{'border-color':'#e8a13a','color':'#f0b256'}},
       {selector:'node[kind="subnet"].hot', style:{'border-width':0,'color':'#e8a13a'}},
       {selector:'node[kind="subnet"].drop', style:{'border-width':0,'color':'#e0625f'}},
-      {selector:'node.drop', style:{'border-color':'#e0625f','border-width':2,'color':'#e0625f'}},
+      {selector:'node.drop', style:{'border-color':'#e0625f','color':'#e0625f'}},
       {selector:'node.pick', style:{'border-color':'#4fc3d9','border-width':2}}
   ];
 }
@@ -1674,7 +1840,10 @@ function render(){
   const selMode = (document.getElementById('opt-select')||{}).checked;
   const sel = STATE.selectedDevs = STATE.selectedDevs || new Set();
   // "Selected devices" view narrows the whole map to the chosen devices
-  const vis = d => (view==='sel') ? sel.has(d.id) : d.show!==false;
+  const found = (view==='find') ? new Set((STATE.findResult||{devs:[]}).devs.map(x=>x.dev.id)) : null;
+  const vis = d => view==='sel' ? sel.has(d.id)
+                 : view==='find' ? found.has(d.id)
+                 : d.show!==false;
 
   /* Traced path only: rebuild the scene from the trace itself rather than the
      full model, so you get just the devices on the path with the interfaces
@@ -1765,14 +1934,50 @@ function render(){
     }
 
     if(STATE.cy) STATE.cy.destroy();
+    /* Keep the devices where they sit on the topology, so the path reads as
+       part of the same picture rather than a new arrangement. */
+    const devEls=els.filter(x=>!x.data.source && x.data.kind==='device');
+    const anchoredPath = devEls.length>0 && devEls.every(x=>savedPos('dev:'+x.data.label,'simple|'));
+    if(anchoredPath){
+      const at={};
+      for(const x of devEls){
+        const p=savedPos('dev:'+x.data.label,'simple|');
+        x.position={x:p.x, y:p.y};
+        at[x.data.id]={x:p.x, y:p.y};
+      }
+      // put each middle node on the line between the devices it joins
+      for(const x of els){
+        if(x.data.source || x.data.kind==='device') continue;
+        const touching=els.filter(y=>y.data.source && (y.data.source===x.data.id || y.data.target===x.data.id))
+          .map(y=>y.data.source===x.data.id ? y.data.target : y.data.source)
+          .map(id=>at[id]).filter(Boolean);
+        if(touching.length>=2){
+          x.position={x:(touching[0].x+touching[1].x)/2, y:(touching[0].y+touching[1].y)/2};
+        } else if(touching.length===1){
+          const only=touching[0];
+          const others=Object.values(at).filter(q=>q!==only);
+          let vx=0, vy=-150;
+          if(others.length){
+            const o=others[0], dx=only.x-o.x, dy=only.y-o.y, L=Math.hypot(dx,dy)||1;
+            vx=dx/L*150; vy=dy/L*150;
+          }
+          x.position={x:only.x+vx, y:only.y+vy};
+        }
+      }
+    }
     sizeNodes(els);
+    const vpP = (STATE.cy && !STATE.viewIsPath)
+      ? {zoom:STATE.cy.zoom(), pan:Object.assign({}, STATE.cy.pan())} : null;
     const cyp = cytoscape({
       container: document.getElementById('cy'),
       elements: els, motionBlur:false,
       style: graphStyle(),
-      layout:{name:'breadthfirst', directed:true, animate:false, padding:44,
-              spacingFactor:1.15, nodeDimensionsIncludeLabels:true}
+      layout: anchoredPath
+        ? {name:'preset', padding:44, fit: !vpP}
+        : {name:'breadthfirst', directed:true, animate:false, padding:44,
+           spacingFactor:1.15, nodeDimensionsIncludeLabels:true}
     });
+    if(anchoredPath && vpP){ cyp.zoom(vpP.zoom); cyp.pan(vpP.pan); }
     cyp.on('tap','node[kind="device"]', evt=>{
       const d=STATE.model.devices.find(x=>x.id===evt.target.id());
       if(d) showDevice(d);
@@ -1828,8 +2033,7 @@ function render(){
     /* Keep the two devices where they sit on the map, so opening a link does
        not rearrange your mental picture. Connections stack along the
        perpendicular of the line between them. */
-    const pos=STATE.positions||{};
-    const pa=pos['dev:'+a.name], pb=pos['dev:'+b.name];
+    const pa=savedPos('dev:'+a.name,'simple|'), pb=savedPos('dev:'+b.name,'simple|');
     const anchored=!!(pa&&pb);
     let ax = anchored?pa.x:0,   ay = anchored?pa.y:0;
     let bx = anchored?pb.x:620, by = anchored?pb.y:0;
@@ -1934,6 +2138,12 @@ function render(){
     return;
   }
 
+  if(view==='find' && (!STATE.findResult || !STATE.findResult.devs.length)){
+    el.style.display='flex';
+    el.innerHTML='<strong>Nothing found</strong><span>Search for an address, a subnet, a VLAN or a VRF in the left panel.</span>';
+    if(STATE.cy){ STATE.cy.destroy(); STATE.cy=null; }
+    return;
+  }
   if(view==='sel' && !sel.size){
     el.style.display='flex';
     el.innerHTML='<strong>No devices selected</strong><span>Turn on Select devices, tap the ones you want, then Analyse selected.</span>';
@@ -1969,6 +2179,20 @@ function render(){
     }
   }
 
+  // site and zone containers, only those with a visible device inside
+  const usedGroups=new Set();
+  for(const d of model.devices){
+    if(!vis(d) || !d.groupId) continue;
+    let g=groupById(d.groupId);
+    while(g){ usedGroups.add(g.id); g = g.parent ? groupById(g.parent) : null; }
+  }
+  for(const g of groups()){
+    if(!usedGroups.has(g.id)) continue;
+    els.push({data:{id:'g_'+g.id, label:g.name, kind:'group',
+                    gkind:g.parent?'zone':'site',
+                    parent: g.parent && usedGroups.has(g.parent) ? 'g_'+g.parent : undefined}});
+  }
+
   for(const d of model.devices){
     if(!vis(d)) continue;
     const lo = d.interfaces.filter(i=>i.addrs.some(a=>a.len===32)).length;
@@ -1978,6 +2202,7 @@ function render(){
     const vc = Object.keys(d.vlans||{}).length;
     els.push({data:{id:d.id, label:(selMode?(sel.has(d.id)?'☑ ':'☐ '):'')+d.name, kind:'device',
                     vendor:d.vendor, role, picked: sel.has(d.id)?1:0, pkey:'dev:'+d.name,
+                    parent: (d.groupId && usedGroups.has(d.groupId)) ? 'g_'+d.groupId : undefined,
                     sub:(d.vendor==='palo-alto'?'firewall':(role==='switch'?'switch':'router'))+
                         (lo?' · '+lo+' lo':'')+(vc?' · '+vc+' vlan':'')+
                         (stubCount[d.id]?' · '+stubCount[d.id]+' local nets':'')}});
@@ -2037,6 +2262,15 @@ function render(){
     }
   }
 
+  // first-hop redundancy pairs
+  if(view!=='simple') for(const p of (model.haPairs||[])){
+    const ds=p.devs.filter(vis);
+    for(let i=0;i<ds.length;i++) for(let j=i+1;j<ds.length;j++){
+      els.push({data:{id:'e'+(++e), source:ds[i].id, target:ds[j].id, kind:'ha',
+                      label:p.proto+' '+p.group+'\n'+int2ip(p.vip)}});
+    }
+  }
+
   // WAN clouds joining sites we cannot see inside
   if(model.clouds){
     for(const c of model.clouds){
@@ -2053,9 +2287,12 @@ function render(){
     }
   }
 
-  const saved = STATE.positions || {};
+  // search results and selections borrow the topology arrangement to read from,
+  // but always write positions back into their own view
+  STATE.posNS = (view==='find'||view==='sel') ? 'simple|' : view+'|';
+  STATE.posWriteNS = view+'|';
   const keyOf = e => nodePosKey(e.data);
-  const nodes = els.filter(e=>!e.data.source);
+  const nodes = els.filter(e=>!e.data.source && e.data.kind!=='group');
 
   /* Keep every node the user has already placed exactly where it is, and drop
      only the new ones into free space beside them. Re-running the layout
@@ -2064,7 +2301,7 @@ function render(){
   let placed=0;
   let minX=Infinity, maxX=-Infinity, minY=Infinity, maxY=-Infinity;
   for(const n of nodes){
-    const p=saved[keyOf(n)];
+    const p=savedPos(keyOf(n));
     if(!p) continue;
     placed++;
     if(p.x<minX) minX=p.x;
@@ -2078,7 +2315,7 @@ function render(){
     const colX=maxX+240, rowH=Math.max(90,(maxY-minY)/8||90);
     let col=0, row=0;
     for(const n of nodes){
-      const p=saved[keyOf(n)];
+      const p=savedPos(keyOf(n));
       if(p){ n.position={x:p.x, y:p.y}; continue; }
       n.position={x:colX+col*210, y:minY+row*rowH};
       if(++row>7){ row=0; col++; }
@@ -2132,6 +2369,9 @@ function render(){
   const vp = (STATE.cy && !STATE.viewIsPath)
     ? {zoom:STATE.cy.zoom(), pan:Object.assign({}, STATE.cy.pan())} : null;
   if(STATE.cy) STATE.cy.destroy();
+  if((document.getElementById('opt-nolinks')||{}).checked){
+    for(let i=els.length-1;i>=0;i--) if(els[i].data.source) els.splice(i,1);
+  }
   sizeNodes(els);
   const cy = cytoscape({
     container: document.getElementById('cy'),
@@ -2141,7 +2381,7 @@ function render(){
     hideEdgesOnViewport:bigGraph,
     pixelRatio:bigGraph?1:'auto',
     style: graphStyle(),
-    layout: usePreset ? {name:'preset', padding:40, fit:false}
+    layout: usePreset ? {name:'preset', padding:40, fit:!vp}
       : bigGraph
         ? {name:'concentric', animate:false, padding:40, minNodeSpacing:34,
            concentric:n=>n.degree(), levelWidth:()=>2, nodeDimensionsIncludeLabels:true}
@@ -2161,13 +2401,19 @@ function render(){
   });
   cy.on('tap','node[kind="subnet"]', evt=>showSegment(evt.target.data('net')||evt.target.data('label')));
   cy.on('tap','edge', evt=>onEdgeTap(cy, evt.target));
-  cy.on('dragfree','node', ()=>{ capturePositions(); autosave(); });
+  const writeNS = STATE.posWriteNS;
+  cy.on('dragfree','node', ()=>{ capturePositions(cy, writeNS); autosave(); });
+  /* A layout does not finish synchronously. Capturing straight away would save
+     half-settled coordinates and restore them next time as if the user had
+     arranged them that way — which is what collapsed the map into a column.
+     Bind to this graph and this namespace so a quick view switch cannot write
+     one view's layout into another. */
+  cy.one('layoutstop', ()=>{ capturePositions(cy, writeNS); autosave(); });
 
   STATE.cy=cy; STATE.edgeFor=edgeFor; STATE.edgePair=edgePair; STATE.viewIsPath=false;
   updateSelBtn();
   if(usePreset && vp){ cy.zoom(vp.zoom); cy.pan(vp.pan); }
-  // remember where the new nodes landed so they stay put next time
-  capturePositions();
+  if(usePreset) capturePositions(cy, writeNS);   // preset is immediate; others wait for layoutstop
   if(STATE.lastTrace) paintTrace(STATE.lastTrace);
 }
 
@@ -2280,8 +2526,14 @@ function paintTrace(res){
     }
   }
 
-  for(const h of res.hops) cy.getElementById(h.dev.id).addClass('hot');
-  for(const id of seq) cy.getElementById(id).addClass('hot');
+  for(const h of res.hops){
+    const n=cy.getElementById(h.dev.id);
+    if(n.length && n.data('kind')!=='group') n.addClass('hot');
+  }
+  for(const id of seq){
+    const n=cy.getElementById(id);
+    if(n.length && n.data('kind')!=='group') n.addClass('hot');
+  }
 
   // light each link in the order the packet crosses it
   steps.forEach((st,i)=>{
@@ -2400,8 +2652,8 @@ function vlansOf(dev){
   for(const i of dev.interfaces){
     if(i.l2 && i.mode==='access' && i.accessVlan) set.add(i.accessVlan);
     if(i.l2 && Array.isArray(i.allowed)) for(const v of i.allowed) set.add(v);
-    const m=/^vlan(\d+)$/i.exec(i.name||'');
-    if(m && i.addrs.length) set.add(parseInt(m[1],10));
+    const v=vlanOfIface(i);
+    if(v && i.addrs.length) set.add(parseInt(v,10));
   }
   dev._vlans=set;
   return set;
@@ -2409,8 +2661,8 @@ function vlansOf(dev){
 function sviFor(devices, vlan){
   for(const d of devices)
     for(const i of d.interfaces){
-      const m=/^vlan(\d+)$/i.exec(i.name||'');
-      if(m && parseInt(m[1],10)===vlan && i.addrs.length) return {dev:d, iface:i};
+      const v=vlanOfIface(i);
+      if(v && parseInt(v,10)===vlan && i.addrs.length) return {dev:d, iface:i};
     }
   return null;
 }
@@ -2591,6 +2843,7 @@ function rebuild(){
     cloudOpts: STATE.cloudOpts||{}
   });
   renderDevList();
+  renderGroups();
   renderProviders();
   renderClouds();
   render();
@@ -2642,6 +2895,42 @@ function renderDevList(){
 function openDeviceAt(deviceId, line){
   const d=STATE.devices.find(x=>x.id===deviceId);
   if(d) showDevice(d, {tab:'config', line});
+}
+
+function renderGroups(){
+  const ul=document.getElementById('grouplist');
+  if(!ul) return;
+  ul.innerHTML='';
+  const sites=groups().filter(g=>!g.parent);
+  const draw=(g,depth)=>{
+    const li=document.createElement('li');
+    const n=STATE.devices.filter(d=>d.groupId===g.id).length;
+    const nm=document.createElement('span'); nm.className='dev-name';
+    nm.textContent=(depth?'  └ ':'')+g.name+(n?'  ('+n+')':'');
+    nm.style.opacity=depth?'0.9':'1';
+    const x=document.createElement('button'); x.className='dev-x'; x.textContent='×'; x.title='Remove';
+    x.onclick=(ev)=>{
+      ev.stopPropagation();
+      const kids=groups().filter(z=>z.parent===g.id).map(z=>z.id);
+      const gone=new Set([g.id,...kids]);
+      for(const d of STATE.devices) if(gone.has(d.groupId)) d.groupId=null;
+      STATE.groups=groups().filter(z=>!gone.has(z.id));
+      rebuild();
+    };
+    li.append(nm,x);
+    li.onclick=()=>{ const el=document.getElementById('grp-name'); el.value=g.name; el.focus(); };
+    ul.appendChild(li);
+    for(const z of groups().filter(y=>y.parent===g.id)) draw(z,1);
+  };
+  for(const g of sites) draw(g,0);
+
+  const sel=document.getElementById('grp-parent');
+  if(sel){
+    const keep=sel.value;
+    sel.innerHTML='<option value="">as a site</option>'+
+      sites.map(g=>'<option value="'+g.id+'">zone in '+esc(g.name)+'</option>').join('');
+    sel.value=keep;
+  }
 }
 
 function renderProviders(){
@@ -3053,6 +3342,25 @@ function updateSelBtn(){
   b.textContent = 'Analyse selected ('+n+')';
 }
 
+function showFind(){
+  const fr=STATE.findResult||{devs:[]};
+  const r=document.getElementById('result');
+  STATE.selected=null; renderDevList();
+  r.innerHTML='<h2 class="sec">'+fr.devs.length+' device'+(fr.devs.length===1?'':'s')+
+      ' match '+esc(fr.q)+'</h2>'+
+    '<p class="note" style="margin-top:0">Shown on the map in the topology arrangement.</p>'+
+    fr.devs.map((x,i)=>
+      '<div class="cfgpane-label"><span><a href="#" data-find="'+i+'" style="color:var(--cyan);text-decoration:none">'+
+      esc(x.dev.name)+'</a></span><span>'+esc(zoneOf(x.dev)?zoneOf(x.dev).name:'')+'</span></div>'+
+      '<table class="fib">'+x.why.map(w=>'<tr><td>'+esc(w)+'</td></tr>').join('')+'</table>').join('')+
+    '<div id="warnbox"></div>';
+  renderWarnings();
+  r.querySelectorAll('[data-find]').forEach(el=>el.onclick=(ev)=>{
+    ev.preventDefault();
+    showDevice(fr.devs[parseInt(el.dataset.find,10)].dev);
+  });
+}
+
 function showDevice(d, opts){
   opts = opts || {};
   if(STATE.selected !== d.id){ STATE.devTab='overview'; STATE.editingConfig=false; STATE.renaming=false; }
@@ -3182,7 +3490,14 @@ function showDevice(d, opts){
       '<button class="btn tiny" id="rn-cancel">Cancel</button></div>'
     : '<div class="dev-head"><h2 class="sec">'+esc(d.name)+'</h2>'+
       '<button class="btn tiny" id="rn-start">Rename</button>'+
-      '<button class="btn tiny danger" id="dev-delete">Delete</button></div>';
+      '<button class="btn tiny danger" id="dev-delete">Delete</button></div>'+
+      '<div class="rt-form" style="margin-top:8px">'+
+        '<select id="dev-zone"><option value="">no zone</option>'+
+          groups().map(g=>'<option value="'+g.id+'"'+(d.groupId===g.id?' selected':'')+'>'+
+            (g.parent?esc((groupById(g.parent)||{name:''}).name)+' / ':'')+esc(g.name)+'</option>').join('')+
+        '</select>'+
+        '<button class="btn" id="dev-clearcfg">Clear config</button>'+
+      '</div>';
 
   r.innerHTML =
     headHtml+
@@ -3211,6 +3526,15 @@ function showDevice(d, opts){
   if(rnInput) rnInput.onkeydown=(e)=>{
     if(e.key==='Enter') rnSave.click();
     if(e.key==='Escape') rnCancel.click();
+  };
+  const zoneSel=document.getElementById('dev-zone');
+  if(zoneSel) zoneSel.onchange=()=>{ d.groupId=zoneSel.value||null; rebuild(); showDevice(d); };
+  const clearCfg=document.getElementById('dev-clearcfg');
+  if(clearCfg) clearCfg.onclick=()=>{
+    if(!(d.rawText||'').trim()){ return; }
+    if(!confirm('Clear the config for '+d.name+'? The device stays on the topology with its routing table and neighbours. The original is kept so you can revert.')) return;
+    deleteConfig(d);
+    rebuild(); showDevice(d,{tab:'config'});
   };
   const devDel=document.getElementById('dev-delete');
   if(devDel) devDel.onclick=()=>{
@@ -3355,10 +3679,17 @@ function showDevice(d, opts){
   });
 }
 
+/* A VLAN can be named three ways: a Cisco SVI (Vlan10), a sub-interface tag
+   (ethernet1/17.1184 or Gi0/0.100), or an explicit tag in the config. */
 function vlanOfIface(ifc){
   if(!ifc) return null;
-  const m=/^vlan(\d+)$/i.exec(ifc.name||'');
-  return m?m[1]:null;
+  if(ifc.vlanTag!=null) return String(ifc.vlanTag);
+  const n=ifc.name||'';
+  let m=/^vlan\.?(\d+)$/i.exec(n);
+  if(m) return m[1];
+  m=/\.(\d+)$/.exec(n);            // sub-interface: the suffix is the 802.1q tag
+  if(m) return m[1];
+  return null;
 }
 function ifDesc(ifc){
   if(!ifc) return '—';
@@ -3497,6 +3828,37 @@ document.getElementById('add-paste').onclick=()=>{
 };
 document.getElementById('opt-view').onchange=()=>{ render(); autosave(); };
 document.getElementById('opt-select').onchange=()=>{ render(); updateSelBtn(); };
+document.getElementById('opt-nolinks').onchange=()=>{ render(); autosave(); };
+document.getElementById('rot-l').onclick=()=>rotateView(-15);
+document.getElementById('rot-r').onclick=()=>rotateView(15);
+document.getElementById('grp-add').onclick=()=>{
+  const el=document.getElementById('grp-name');
+  const name=el.value.trim();
+  if(!name){ el.style.borderColor='var(--red)'; return; }
+  const parent=document.getElementById('grp-parent').value||null;
+  if(!groups().some(g=>g.name.toLowerCase()===name.toLowerCase() && (g.parent||null)===parent))
+    groups().push({id:'g'+(++grpSeq), name, parent});
+  el.value=''; el.style.borderColor='';
+  rebuild();
+};
+document.getElementById('grp-name').addEventListener('keydown',e=>{
+  if(e.key==='Enter') document.getElementById('grp-add').click();
+});
+function doFind(){
+  const q=document.getElementById('find-q').value;
+  const devs=findMatches(q);
+  STATE.findResult={q, devs};
+  if(!devs.length){
+    document.getElementById('result').innerHTML=
+      '<div class="verdict bad"><b>No match</b><p>Nothing matches '+esc(q)+'.</p></div><div id="warnbox"></div>';
+    renderWarnings();
+  } else {
+    showFind();
+  }
+  setView('find');
+}
+document.getElementById('find-go').onclick=doFind;
+document.getElementById('find-q').addEventListener('keydown',e=>{ if(e.key==='Enter') doFind(); });
 document.getElementById('analyse').onclick=()=>{
   const ids=STATE.selectedDevs||new Set();
   showSelection(STATE.devices.filter(d=>ids.has(d.id)));
@@ -3577,13 +3939,22 @@ function posKey(kind, label){
 function nodePosKey(data){
   return data.pkey || posKey(data.kind, data.label);
 }
-function capturePositions(){
-  if(!STATE.cy || STATE.viewIsPath) return;   // path view is transient — never let it overwrite the map
-  STATE.cy.nodes().forEach(n=>{
+/* Positions are namespaced per view. Fall back to the un-namespaced key so
+   layouts saved before namespacing, and layouts arranged in the topology view,
+   are still honoured. */
+function savedPos(key, ns){
+  const P=STATE.positions||{};
+  return P[(ns||STATE.posNS||'simple|')+key] || P['simple|'+key] || P[key] || null;
+}
+function capturePositions(cyArg, nsArg){
+  const cy = cyArg || STATE.cy;
+  if(!cy || (!cyArg && STATE.viewIsPath)) return;   // transient views never write positions
+  const ns = nsArg || STATE.posWriteNS || STATE.posNS || 'simple|';
+  cy.nodes().forEach(n=>{
     if(n.hasClass('tmp')) return;
     const d=n.data();
-    if(!d.label) return;
-    STATE.positions[nodePosKey(d)] = n.position();
+    if(!d.label || d.kind==='group') return;
+    STATE.positions[ns+nodePosKey(d)] = n.position();
   });
 }
 function projectObject(){
@@ -3595,6 +3966,8 @@ function projectObject(){
     trace:{src:document.getElementById('src').value, dst:document.getElementById('dst').value},
     positions:STATE.positions,
     clouds:STATE.clouds||[],
+    groups:groups(),
+    nolinks:document.getElementById('opt-nolinks').checked,
     providers:(STATE.providers||[]).map(p=>({name:p.name, patterns:p.patterns})),
     cloudOpts:STATE.cloudOpts||{},
     autowan:document.getElementById('opt-autowan').checked,
@@ -3603,6 +3976,7 @@ function projectObject(){
       otext: d.originalText!=null ? d.originalText : d.rawText,
       cname: !!d.customName,
       show: d.show!==false,
+      group: d.groupId||null,
       nbrs: d.neighbors||[],
       auth:d.tableAuthoritative,
       routes:d.manualRoutes.map(r=>({p:cidr(r.net,r.len),
@@ -3614,7 +3988,12 @@ function loadProject(obj){
   if(!obj || !Array.isArray(obj.devices)) return false;
   STATE.devices=[]; devSeq=0; STATE.lastTrace=null;
   STATE.positions = obj.positions || {};
+  for(const k of Object.keys(STATE.positions))     // pre-namespace layouts
+    if(k.indexOf('|')<0 && !STATE.positions['simple|'+k]) STATE.positions['simple|'+k]=STATE.positions[k];
   STATE.clouds = Array.isArray(obj.clouds) ? obj.clouds : [];
+  STATE.groups = Array.isArray(obj.groups) ? obj.groups : [];
+  for(const g of STATE.groups){ const n=parseInt(String(g.id).replace(/\D/g,''),10); if(n>grpSeq) grpSeq=n; }
+  if(obj.nolinks!=null) document.getElementById('opt-nolinks').checked=!!obj.nolinks;
   STATE.providers = Array.isArray(obj.providers) && obj.providers.length
     ? obj.providers.map(p=>({name:p.name, patterns:p.patterns||[p.name]}))
     : DEFAULT_PROVIDERS.map(p=>({name:p.name, patterns:p.patterns.slice()}));
@@ -3626,6 +4005,7 @@ function loadProject(obj){
     if(pd.name) d.name=pd.name;
     d.customName = !!pd.cname;
     d.show = pd.show!==false;
+    d.groupId = pd.group||null;
     d.neighbors = Array.isArray(pd.nbrs) ? pd.nbrs : [];
     d.originalText = pd.otext!=null ? pd.otext : (pd.text||'');
     d.tableAuthoritative=!!pd.auth;
@@ -3692,7 +4072,8 @@ document.getElementById('projfile').onchange=function(){
 };
 document.getElementById('clear-all').onclick=()=>{
   if(!STATE.devices.length) return;
-  STATE.devices=[]; STATE.positions={}; STATE.lastTrace=null; STATE.selected=null; STATE.clouds=[];
+  STATE.devices=[]; STATE.positions={}; STATE.lastTrace=null; STATE.selected=null;
+  STATE.clouds=[]; STATE.groups=[]; STATE.findResult=null;
   document.getElementById('result').innerHTML='<p class="note">Cleared. Add a config to start again.</p><div id="warnbox"></div>';
   rebuild();
 };
