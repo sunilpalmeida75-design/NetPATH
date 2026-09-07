@@ -346,11 +346,11 @@ table.fib td:first-child{color:var(--ink)}
           <option value="sel">Selected devices</option>
         </select>
       </label>
-      <label class="toggle"><input type="checkbox" id="opt-focus" checked> Focus path after trace</label>
+      <label class="toggle"><input type="checkbox" id="opt-focus"> Switch to path view after trace</label>
       <label class="toggle"><input type="checkbox" id="opt-igp" checked> Infer IGP reachability</label>
       <label class="toggle"><input type="checkbox" id="opt-select"> Select devices</label>
       <button class="btn" id="analyse" style="display:none">Analyse selected</button>
-      <button class="btn" id="relayout">Re-arrange</button>
+      <button class="btn" id="viewback" style="display:none">← Back</button>
       <button class="btn" id="fit">Fit</button>
     </div>
     <div id="cy"></div>
@@ -1574,6 +1574,26 @@ function sizeNodes(els){
   return els;
 }
 
+/* View history, so every screen has a way back to where you came from. */
+function setView(v){
+  const sel=document.getElementById('opt-view');
+  if(sel.value===v){ render(); return; }
+  sel.value=v;
+  render();
+}
+function goBack(){
+  const v=(STATE.viewHist||[]).pop();
+  if(v==null) return;
+  STATE.navBack=true;
+  document.getElementById('opt-view').value=v;
+  render();
+  STATE.navBack=false;
+}
+function updateBackBtn(){
+  const b=document.getElementById('viewback');
+  if(b) b.style.display = (STATE.viewHist && STATE.viewHist.length) ? '' : 'none';
+}
+
 function graphStyle(){
   return [
       {selector:'node[kind="device"]', style:{
@@ -1643,6 +1663,14 @@ function render(){
   el.style.display='none';
 
   const view = (document.getElementById('opt-view')||{}).value || 'simple';
+  // remember where we came from, unless this render is itself a Back
+  STATE.viewHist = STATE.viewHist || [];
+  if(STATE.lastView!=null && STATE.lastView!==view && !STATE.navBack){
+    STATE.viewHist.push(STATE.lastView);
+    if(STATE.viewHist.length>20) STATE.viewHist.shift();
+  }
+  STATE.lastView=view;
+  updateBackBtn();
   const selMode = (document.getElementById('opt-select')||{}).checked;
   const sel = STATE.selectedDevs = STATE.selectedDevs || new Set();
   // "Selected devices" view narrows the whole map to the chosen devices
@@ -1786,19 +1814,41 @@ function render(){
     const mid=[];   // things that sit in the middle column
     for(const s of shared) mid.push({type:'net', key:'net:'+s.key, s});
     for(const c of clouds) mid.push({type:'cloud', key:'cloud:'+c.name, c});
-    l2.forEach((L,i)=>mid.push({type:'l2', key:'l2:'+i, L}));
+    for(const k in (model.l2links||{})){
+      const L=model.l2links[k];
+      if((L.a.dev===a&&L.b.dev===b)||(L.a.dev===b&&L.b.dev===a)) mid.push({type:'l2', key:'l2:'+k, L});
+    }
 
     // clicking one connection isolates it; "Show all links" brings them back
     const only=STATE.linkOnly;
     const shownMid = only ? mid.filter(x=>x.key===only) : mid;
     const cols=shownMid.filter(x=>x.type!=='l2');
     const cables=shownMid.filter(x=>x.type==='l2');
-    const rows=Math.max(cols.length,1), step=140, top=-((rows-1)*step)/2;
+
+    /* Keep the two devices where they sit on the map, so opening a link does
+       not rearrange your mental picture. Connections stack along the
+       perpendicular of the line between them. */
+    const pos=STATE.positions||{};
+    const pa=pos['dev:'+a.name], pb=pos['dev:'+b.name];
+    const anchored=!!(pa&&pb);
+    let ax = anchored?pa.x:0,   ay = anchored?pa.y:0;
+    let bx = anchored?pb.x:620, by = anchored?pb.y:0;
+    let dx=bx-ax, dy=by-ay, len=Math.hypot(dx,dy)||1;
+    const MIN=560;                       // room for the interface and subnet text
+    if(len<MIN){
+      const grow=(MIN-len)/2/len;
+      ax-=dx*grow; ay-=dy*grow; bx+=dx*grow; by+=dy*grow;
+      dx=bx-ax; dy=by-ay; len=Math.hypot(dx,dy)||1;
+    }
+    const mx=(ax+bx)/2, my=(ay+by)/2;
+    const ux=-dy/len, uy=dx/len;         // perpendicular unit vector
+    const step=120, top=-((Math.max(cols.length,1)-1)*step)/2;
+    const midPos=(idx)=>({x:mx+ux*(top+idx*step), y:my+uy*(top+idx*step)});
 
     els.push({data:{id:a.id, label:a.name, kind:'device', vendor:a.vendor,
-                    role:a.isSwitch?'switch':'router'}, position:{x:0, y:0}});
+                    role:a.isSwitch?'switch':'router', pkey:'dev:'+a.name}, position:{x:ax, y:ay}});
     els.push({data:{id:b.id, label:b.name, kind:'device', vendor:b.vendor,
-                    role:b.isSwitch?'switch':'router'}, position:{x:620, y:0}});
+                    role:b.isSwitch?'switch':'router', pkey:'dev:'+b.name}, position:{x:bx, y:by}});
 
     const port=(m)=>{
       const i=m.iface, bits=[];
@@ -1810,11 +1860,11 @@ function render(){
     };
 
     cols.forEach((item,idx)=>{
-      const y=top+idx*step;
+      const p=midPos(idx);
       if(item.type==='net'){
         const s=item.s;
         const sid='s_'+s.key.replace(/[^\w]/g,'_');
-        els.push({data:{id:sid, label:s.key, net:s.key, kind:'subnet'}, position:{x:310, y}});
+        els.push({data:{id:sid, label:s.key, net:s.key, kind:'subnet'}, position:p});
         for(const m of s.a){
           const id='e'+(++e), p=port(m);
           els.push({data:{id, source:a.id, target:sid, kind:'link', label:p.label, meta:p.meta, item:item.key}});
@@ -1827,7 +1877,7 @@ function render(){
         }
       } else {
         const c=item.c, cid='cl_'+c.id;
-        els.push({data:{id:cid, label:c.name, kind:'wan'}, position:{x:310, y}});
+        els.push({data:{id:cid, label:c.name, kind:'wan'}, position:p});
         for(const dev of [a,b]){
           const mem=c.members.find(x=>x.dev===dev);
           const id='e'+(++e);
@@ -1859,12 +1909,16 @@ function render(){
 
     if(STATE.cy) STATE.cy.destroy();
     sizeNodes(els);
+    const vpL = (STATE.cy && !STATE.viewIsPath)
+      ? {zoom:STATE.cy.zoom(), pan:Object.assign({}, STATE.cy.pan())} : null;
+    if(STATE.cy) STATE.cy.destroy();
     const cyl = cytoscape({
       container: document.getElementById('cy'),
       elements: els, motionBlur:false,
       style: graphStyle(),
-      layout:{name:'preset', padding:60}
+      layout:{name:'preset', padding:60, fit: !(anchored && vpL)}
     });
+    if(anchored && vpL){ cyl.zoom(vpL.zoom); cyl.pan(vpL.pan); }
     cyl.on('tap','node[kind="device"]', evt=>{
       const d=model.devices.find(x=>x.id===evt.target.id());
       if(d) showDevice(d);
@@ -1961,7 +2015,7 @@ function render(){
             }
           } else {
             id='e'+(++e);
-            els.push({data:{id, source:a.dev.id, target:b.dev.id, kind:'p2p',
+            els.push({data:{id, source:a.dev.id, target:b.dev.id, kind:'p2p', net:k,
               label: members.length===2 ? shortIf(a.iface.name)+'  ·  '+k+'  ·  '+shortIf(b.iface.name) : k}});
           }
           edgePair[a.dev.id+'::'+a.iface.name+'::'+b.dev.id]=id;
@@ -1992,7 +2046,7 @@ function render(){
       els.push({data:{id:cid, label:c.name, kind:'wan', pkey:'wan:'+c.name}});
       for(const m of mem){
         const id='e'+(++e);
-        els.push({data:{id, source:m.dev.id, target:cid, kind:'wanlink',
+        els.push({data:{id, source:m.dev.id, target:cid, kind:'wanlink', cloud:c.name,
                         label: view==='simple' ? '' : shortIf(m.ifaceName)}});
         if(!edgeFor[m.dev.id+'::'+m.ifaceName]) edgeFor[m.dev.id+'::'+m.ifaceName]=id;
       }
@@ -2040,11 +2094,11 @@ function render(){
         const pk=[L.a.dev.id,L.b.dev.id].sort().join('|');
         if(pairEdge[pk]) continue;                 // already joined by an L3 link
         const id='e'+(++e); pairEdge[pk]=id;
-        els.push({data:{id, source:L.a.dev.id, target:L.b.dev.id, kind:'l2', label:''}});
+        els.push({data:{id, source:L.a.dev.id, target:L.b.dev.id, kind:'l2', l2key:k, label:''}});
         continue;
       }
       const id='e'+(++e);
-      els.push({data:{id, source:L.a.dev.id, target:L.b.dev.id, kind:'l2',
+      els.push({data:{id, source:L.a.dev.id, target:L.b.dev.id, kind:'l2', l2key:k,
                       label:shortIf(L.a.port)+' · '+shortIf(L.b.port)}});
     }
   }
@@ -2124,9 +2178,7 @@ STATE.timers=[]; STATE.raf=null;
 function clearTrace(){
   stopFx();
   STATE.lastTrace=null;
-  const sel=document.getElementById('opt-view');
-  if(sel.value==='path') sel.value = STATE.prevView || 'simple';
-  render();
+  if(document.getElementById('opt-view').value==='path') goBack(); else render();
   const r=document.getElementById('result');
   r.innerHTML='<p class="note">Enter two addresses and trace. Each hop shows the route that matched, '+
     'the interface it leaves by, and — on firewalls — which security rule the traffic hits.</p>'+
@@ -2819,11 +2871,7 @@ function showLink(a,b){
   document.getElementById('lk-a').onclick=()=>showDevice(a);
   document.getElementById('lk-b').onclick=()=>showDevice(b);
   const back=document.getElementById('lk-back');
-  if(back) back.onclick=()=>{
-    document.getElementById('opt-view').value = STATE.prevView || 'simple';
-    STATE.linkOnly=null;
-    render();
-  };
+  if(back) back.onclick=()=>{ STATE.linkOnly=null; goBack(); };
   const all=document.getElementById('lk-all');
   if(all) all.onclick=()=>{ STATE.linkOnly=null; render(); showLink(a,b); };
 }
@@ -2852,25 +2900,49 @@ function showSegment(key){
 
 function onEdgeTap(cy, edge){
   if(!STATE.model) return;
-  const sd=cy.getElementById(edge.data('source')).data();
-  const td=cy.getElementById(edge.data('target')).data();
+  const ed=edge.data();
+  const sd=cy.getElementById(ed.source).data();
+  const td=cy.getElementById(ed.target).data();
   const devOf = d => d && d.kind==='device' ? STATE.model.devices.find(x=>x.id===d.id) : null;
   const a=devOf(sd), b=devOf(td);
-  if(a && b){ openLink(a,b); return; }
-  const seg = sd.kind==='subnet' ? sd : (td.kind==='subnet' ? td : null);
-  if(seg){ showSegment(seg.net || seg.label); return; }
-  const dev=a||b;
+  if(a && b){ openLink(a, b, ed); return; }
+
+  // device ↔ subnet edge: open the link between this device and the other one
+  // on that segment, focused on that segment
+  const segData = sd.kind==='subnet' ? sd : (td.kind==='subnet' ? td : null);
+  const dev = a || b;
+  if(segData && dev){
+    const key=segData.net || segData.label;
+    const sn=STATE.model.subnets[key];
+    const others = sn ? sn.members.filter(m=>m.dev!==dev) : [];
+    if(others.length===1){ openLink(dev, others[0].dev, {net:key}); return; }
+    showSegment(key); return;
+  }
+  if(segData){ showSegment(segData.net||segData.label); return; }
+
+  // device ↔ cloud edge
+  if(dev && ed.cloud){
+    const c=(STATE.model.clouds||[]).find(x=>x.name===ed.cloud);
+    const other=c && c.members.map(m=>m.dev).find(x=>x!==dev);
+    if(other){ openLink(dev, other, ed); return; }
+  }
   if(dev) showDevice(dev);
 }
 
-/* Open the dedicated link screen: graph on the left, detail on the right. */
-function openLink(a,b){
+/* Open the link screen. If the tapped edge names one specific connection,
+   isolate it straight away — that is the one the user pointed at. */
+function openLink(a,b,ed){
   const sel=document.getElementById('opt-view');
-  if(sel.value!=='link' && sel.value!=='path') STATE.prevView=sel.value;
-  if(!STATE.linkFocus || STATE.linkFocus.a!==a.id || STATE.linkFocus.b!==b.id) STATE.linkOnly=null;
+  const samePair = STATE.linkFocus && STATE.linkFocus.a===a.id && STATE.linkFocus.b===b.id;
   STATE.linkFocus={a:a.id, b:b.id};
-  sel.value='link';
-  render();
+  let only=null;
+  if(ed){
+    if(ed.net) only='net:'+ed.net;
+    else if(ed.l2key) only='l2:'+ed.l2key;
+    else if(ed.cloud) only='cloud:'+ed.cloud;
+  }
+  STATE.linkOnly = only || (samePair ? STATE.linkOnly : null);
+  setView('link');
   showLink(a,b);
 }
 
@@ -2963,16 +3035,11 @@ function showSelection(devs){
   html+='<div id="warnbox"></div>';
   r.innerHTML=html;
   renderWarnings();
-  document.getElementById('sel-view').onclick=()=>{
-    const s=document.getElementById('opt-view');
-    if(s.value!=='sel' && s.value!=='path' && s.value!=='link') STATE.prevView=s.value;
-    s.value='sel'; render();
-  };
+  document.getElementById('sel-view').onclick=()=>setView('sel');
   document.getElementById('sel-clear').onclick=()=>{
     STATE.selectedDevs=new Set();
-    const s=document.getElementById('opt-view');
-    if(s.value==='sel') s.value=STATE.prevView||'simple';
-    render(); updateSelBtn();
+    if(document.getElementById('opt-view').value==='sel') goBack(); else render();
+    updateSelBtn();
     r.innerHTML='<p class="note">Selection cleared.</p><div id="warnbox"></div>';
     renderWarnings();
   };
@@ -3449,16 +3516,8 @@ document.getElementById('prov-name').addEventListener('keydown',e=>{
   if(e.key==='Enter') document.getElementById('prov-add').click();
 });
 document.getElementById('opt-igp').onchange=()=>{ STATE.lastTrace=null; rebuild(); };
-document.getElementById('relayout').onclick=()=>{
-  if(!STATE.cy) return;
-  const big=STATE.cy.nodes().length>120;
-  STATE.cy.layout(big
-    ? {name:'concentric', animate:false, padding:40, minNodeSpacing:34,
-       concentric:n=>n.degree(), levelWidth:()=>2, nodeDimensionsIncludeLabels:true}
-    : {name:'cose', animate:false, nodeRepulsion:12000, idealEdgeLength:110,
-       padding:40, numIter:400, nodeDimensionsIncludeLabels:true}).run();
-};
 document.getElementById('fit').onclick=()=>{ if(STATE.cy) STATE.cy.fit(undefined,40); };
+document.getElementById('viewback').onclick=goBack;
 document.getElementById('modeseg').onclick=(e)=>{
   const b=e.target.closest('button[data-mode]'); if(!b) return;
   STATE.traceMode=b.dataset.mode;
@@ -3476,11 +3535,8 @@ function runTrace(){
   const focus = document.getElementById('opt-focus').checked;
   const finish = (res)=>{
     STATE.lastTrace=res;
-    const sel=document.getElementById('opt-view');
     if(focus && !res.error && res.hops && res.hops.length){
-      if(sel.value!=='path' && sel.value!=='link') STATE.prevView=sel.value;
-      sel.value='path';
-      render();            // render paints the trace itself
+      setView('path');     // render paints the trace itself
     } else {
       render(); paintTrace(res);
     }
