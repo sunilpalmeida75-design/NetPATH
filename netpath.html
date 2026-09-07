@@ -343,10 +343,13 @@ table.fib td:first-child{color:var(--ink)}
           <option value="all">Everything</option>
           <option value="path">Traced path only</option>
           <option value="link">Link detail</option>
+          <option value="sel">Selected devices</option>
         </select>
       </label>
       <label class="toggle"><input type="checkbox" id="opt-focus" checked> Focus path after trace</label>
       <label class="toggle"><input type="checkbox" id="opt-igp" checked> Infer IGP reachability</label>
+      <label class="toggle"><input type="checkbox" id="opt-select"> Select devices</label>
+      <button class="btn" id="analyse" style="display:none">Analyse selected</button>
       <button class="btn" id="relayout">Re-arrange</button>
       <button class="btn" id="fit">Fit</button>
     </div>
@@ -483,6 +486,23 @@ function expandVlanList(s){
 
 /* Cisco writes the same port a dozen ways. Normalize so CDP output, LLDP
    output and the config all agree on one spelling. */
+/* Diagram labels use short forms — GigabitEthernet0/0 becomes g0/0. Full names
+   stay in the detail panels, where precision matters more than space. */
+function shortIf(name){
+  if(!name) return '';
+  const s=String(name).trim();
+  const m=s.match(/^([A-Za-z][A-Za-z\-]*?)([\d][\d\/\.:]*)$/);
+  if(!m) return s;
+  const word=m[1].toLowerCase(), n=m[2];
+  const map=[[/^twentyfive|^twe/,'twe'],[/^tengig|^te/,'t'],[/^fortygig|^fo/,'fo'],
+             [/^hundredgig|^hu/,'hu'],[/^twogig|^tw/,'tw'],[/^gigabit|^gi/,'g'],
+             [/^fastether|^fa/,'f'],[/^port-channel|^po/,'po'],[/^vlan|^vl/,'vlan'],
+             [/^loopback|^lo/,'lo'],[/^tunnel|^tu/,'tun'],[/^serial|^se/,'s'],
+             [/^management|^mg/,'mg'],[/^aggregate-ethernet|^ae/,'ae'],[/^ethernet|^et|^eth/,'e']];
+  for(const [re,short] of map) if(re.test(word)) return short+n;
+  return s;
+}
+
 function normPort(raw){
   if(!raw) return '';
   const s=String(raw).trim().replace(/\s+/g,'');
@@ -1058,7 +1078,9 @@ function buildModel(devices, opts){
 
   for(const d of devices){
     d._vlans=null;
-    if(byName[d.name]) warn('Two devices are both called '+d.name+' — check you did not add the same config twice.');
+    if(byName[d.name])
+      warn('Duplicate hostname "'+d.name+'" — loaded from '+byName[d.name].file+' and '+d.file+
+           '. Traces and links may resolve to the wrong one. Rename one of them.', d.id, null);
     byName[d.name]=d;
     for(const i of d.interfaces){
       i.dev = d;
@@ -1528,10 +1550,34 @@ function trace(model, srcStr, dstStr, startId){
 /* ============================================================
    Graph
    ============================================================ */
+/* Cytoscape deprecated width/height:'label', so size nodes ourselves from the
+   text. Monospace runs about 0.62em per character. */
+function labelSize(label, font, padX, padY, minW){
+  const lines=String(label||'').split('\n');
+  let longest=0;
+  for(const l of lines) if(l.length>longest) longest=l.length;
+  return {
+    w: Math.max(minW||20, Math.round(longest*font*0.62)+padX),
+    h: Math.round(lines.length*font*1.35)+padY
+  };
+}
+function sizeNodes(els){
+  for(const el of els){
+    if(el.data.source) continue;                 // edges
+    if(el.data.w!=null) continue;
+    const k=el.data.kind;
+    const s = k==='subnet' ? labelSize(el.data.label,11,8,6,24)
+            : k==='wan'    ? labelSize(el.data.label,12,34,28,96)
+            :                labelSize(el.data.label,13,30,26,96);
+    el.data.w=s.w; el.data.h=s.h;
+  }
+  return els;
+}
+
 function graphStyle(){
   return [
       {selector:'node[kind="device"]', style:{
-        'shape':'round-rectangle','width':'label','height':46,'padding':'14px',
+        'shape':'round-rectangle','width':'data(w)','height':'data(h)',
         'background-color':'#1c2c3e','border-width':1,'border-color':'#3a5273',
         'label':'data(label)','color':'#d3dfec','font-family':'IBM Plex Mono, monospace',
         'font-size':13,'font-weight':600,'text-valign':'center','text-halign':'center',
@@ -1546,7 +1592,7 @@ function graphStyle(){
         'line-color':'#3f7a63','line-style':'dashed','line-dash-pattern':[3,3],'width':1.6,
         'color':'#5d9c81','font-size':8.5,'z-index':1}},
       {selector:'node[kind="subnet"]', style:{
-        'shape':'round-rectangle','width':'label','height':'label','padding':'1px',
+        'shape':'round-rectangle','width':'data(w)','height':'data(h)',
         'background-opacity':0,'border-width':0,
         'label':'data(label)','color':'#4fc3d9','font-family':'IBM Plex Mono, monospace',
         'font-size':11,'text-valign':'center','text-halign':'center','text-wrap':'wrap',
@@ -1564,7 +1610,7 @@ function graphStyle(){
       {selector:'edge.fwd', style:{'mid-target-arrow-shape':'triangle','mid-target-arrow-color':'#e8a13a','arrow-scale':0.85}},
       {selector:'edge.rev', style:{'mid-source-arrow-shape':'triangle','mid-source-arrow-color':'#e8a13a','arrow-scale':0.85}},
       {selector:'node[kind="wan"]', style:{
-        'shape':'round-rectangle','width':'label','height':44,'padding':'16px',
+        'shape':'round-rectangle','width':'data(w)','height':'data(h)',
         'background-color':'#241c33','border-width':1.5,'border-color':'#6f5c9e','border-style':'dashed',
         'label':'data(label)','color':'#b9a6e0','font-family':'IBM Plex Mono, monospace',
         'font-size':12,'font-weight':600,'text-valign':'center','text-halign':'center'}},
@@ -1579,6 +1625,7 @@ function graphStyle(){
       {selector:'node.pkt', style:{
         'width':11,'height':11,'shape':'ellipse','background-color':'#ffc766',
         'border-width':3,'border-color':'rgba(232,161,58,.28)','z-index':40,'events':'no','label':''}},
+      {selector:'node[picked = 1]', style:{'border-color':'#4fc3d9','border-width':2.5,'color':'#8fdcec'}},
       {selector:'node.hot', style:{'border-color':'#e8a13a','border-width':2,'color':'#f0b256'}},
       {selector:'node[kind="subnet"].hot', style:{'border-width':0,'color':'#e8a13a'}},
       {selector:'node[kind="subnet"].drop', style:{'border-width':0,'color':'#e0625f'}},
@@ -1596,7 +1643,10 @@ function render(){
   el.style.display='none';
 
   const view = (document.getElementById('opt-view')||{}).value || 'simple';
-  const vis = d => d.show!==false;
+  const selMode = (document.getElementById('opt-select')||{}).checked;
+  const sel = STATE.selectedDevs = STATE.selectedDevs || new Set();
+  // "Selected devices" view narrows the whole map to the chosen devices
+  const vis = d => (view==='sel') ? sel.has(d.id) : d.show!==false;
 
   /* Traced path only: rebuild the scene from the trace itself rather than the
      full model, so you get just the devices on the path with the interfaces
@@ -1630,7 +1680,7 @@ function render(){
       const v=vlanOfIface(ifc); if(v) bits.push('vlan '+v);
       if(ifc.zone) bits.push(ifc.zone);
       if(ifc.vrf && ifc.vrf!=='default') bits.push('vrf '+ifc.vrf);
-      return {label: ifc.name+(bits.length?'\n'+bits.join(' · '):''), meta: bits.length?1:0};
+      return {label: shortIf(ifc.name)+(bits.length?'\n'+bits.join(' · '):''), meta: bits.length?1:0};
     };
     const addCloud=(name)=>{
       const id='cl_'+name.replace(/[^\w]/g,'_');
@@ -1687,9 +1737,10 @@ function render(){
     }
 
     if(STATE.cy) STATE.cy.destroy();
+    sizeNodes(els);
     const cyp = cytoscape({
       container: document.getElementById('cy'),
-      elements: els, wheelSensitivity:0.2, motionBlur:false,
+      elements: els, motionBlur:false,
       style: graphStyle(),
       layout:{name:'breadthfirst', directed:true, animate:false, padding:44,
               spacingFactor:1.15, nodeDimensionsIncludeLabels:true}
@@ -1754,7 +1805,7 @@ function render(){
       const v=vlanOfIface(i); if(v) bits.push('vlan '+v);
       if(i.zone) bits.push(i.zone);
       if(i.vrf && i.vrf!=='default') bits.push('vrf '+i.vrf);
-      return {label: i.name+'\n'+int2ip(m.addr.ip)+(bits.length?'\n'+bits.join(' · '):''),
+      return {label: shortIf(i.name)+'\n'+int2ip(m.addr.ip)+(bits.length?'\n'+bits.join(' · '):''),
               meta: bits.length?1:0};
     };
 
@@ -1781,7 +1832,7 @@ function render(){
           const mem=c.members.find(x=>x.dev===dev);
           const id='e'+(++e);
           els.push({data:{id, source:dev===a?a.id:cid, target:dev===a?cid:b.id,
-                          kind:'wanlink', label:mem?mem.ifaceName:'', item:item.key}});
+                          kind:'wanlink', label:mem?shortIf(mem.ifaceName):'', item:item.key}});
           if(mem) edgeFor[dev.id+'::'+mem.ifaceName]=id;
         }
       }
@@ -1795,7 +1846,7 @@ function render(){
       const vl=(p)=>!p?'':(p.mode==='access'?('access '+(p.accessVlan||'?'))
             :(Array.isArray(p.allowed)?('trunk '+(p.allowed.length?p.allowed.join(','):'none')):'trunk all'));
       els.push({data:{id:'e'+(++e), source:a.id, target:b.id, kind:'l2', item:item.key,
-        label:first.port+(vl(pa)?'\n'+vl(pa):'')+'\n↔\n'+second.port+(vl(pb)?'\n'+vl(pb):'')}});
+        label:shortIf(first.port)+(vl(pa)?'\n'+vl(pa):'')+'\n↔\n'+shortIf(second.port)+(vl(pb)?'\n'+vl(pb):'')}});
     }
 
     if(!shownMid.length){
@@ -1807,9 +1858,10 @@ function render(){
     }
 
     if(STATE.cy) STATE.cy.destroy();
+    sizeNodes(els);
     const cyl = cytoscape({
       container: document.getElementById('cy'),
-      elements: els, wheelSensitivity:0.2, motionBlur:false,
+      elements: els, motionBlur:false,
       style: graphStyle(),
       layout:{name:'preset', padding:60}
     });
@@ -1828,6 +1880,13 @@ function render(){
     return;
   }
 
+  if(view==='sel' && !sel.size){
+    el.style.display='flex';
+    el.innerHTML='<strong>No devices selected</strong><span>Turn on Select devices, tap the ones you want, then Analyse selected.</span>';
+    if(STATE.cy){ STATE.cy.destroy(); STATE.cy=null; }
+    updateSelBtn();
+    return;
+  }
   const hideStubs = view!=='all';
   el.innerHTML = el.dataset.def;
   const els=[]; const edgeFor={}; const edgePair={}; const pairEdge={};
@@ -1863,7 +1922,8 @@ function render(){
     const role = (d.isSwitch && !routes && !d.interfaces.some(i=>i.addrs.length && !/^vlan/i.test(i.name)))
                  ? 'switch' : 'router';
     const vc = Object.keys(d.vlans||{}).length;
-    els.push({data:{id:d.id, label:d.name, kind:'device', vendor:d.vendor, role,
+    els.push({data:{id:d.id, label:(selMode?(sel.has(d.id)?'☑ ':'☐ '):'')+d.name, kind:'device',
+                    vendor:d.vendor, role, picked: sel.has(d.id)?1:0, pkey:'dev:'+d.name,
                     sub:(d.vendor==='palo-alto'?'firewall':(role==='switch'?'switch':'router'))+
                         (lo?' · '+lo+' lo':'')+(vc?' · '+vc+' vlan':'')+
                         (stubCount[d.id]?' · '+stubCount[d.id]+' local nets':'')}});
@@ -1902,7 +1962,7 @@ function render(){
           } else {
             id='e'+(++e);
             els.push({data:{id, source:a.dev.id, target:b.dev.id, kind:'p2p',
-              label: members.length===2 ? a.iface.name+'  ·  '+k+'  ·  '+b.iface.name : k}});
+              label: members.length===2 ? shortIf(a.iface.name)+'  ·  '+k+'  ·  '+shortIf(b.iface.name) : k}});
           }
           edgePair[a.dev.id+'::'+a.iface.name+'::'+b.dev.id]=id;
           edgePair[b.dev.id+'::'+b.iface.name+'::'+a.dev.id]=id;
@@ -1915,10 +1975,10 @@ function render(){
 
     const sid='s_'+k.replace(/[^\w]/g,'_');
     drawnSubnets.add(sid);
-    els.push({data:{id:sid, label:k, net:k, kind:'subnet'}});
+    els.push({data:{id:sid, label:k, net:k, kind:'subnet', pkey:'net:'+k}});
     for(const m of members){
       const id='e'+(++e);
-      els.push({data:{id, source:m.dev.id, target:sid, kind:'link', label:m.iface.name}});
+      els.push({data:{id, source:m.dev.id, target:sid, kind:'link', label:shortIf(m.iface.name)}});
       edgeFor[m.dev.id+'::'+m.iface.name]=id;
     }
   }
@@ -1929,18 +1989,18 @@ function render(){
       const mem=c.members.filter(m=>vis(m.dev));
       if(!mem.length) continue;
       const cid='cl_'+c.id;
-      els.push({data:{id:cid, label:c.name, kind:'wan'}});
+      els.push({data:{id:cid, label:c.name, kind:'wan', pkey:'wan:'+c.name}});
       for(const m of mem){
         const id='e'+(++e);
         els.push({data:{id, source:m.dev.id, target:cid, kind:'wanlink',
-                        label: view==='simple' ? '' : m.ifaceName}});
+                        label: view==='simple' ? '' : shortIf(m.ifaceName)}});
         if(!edgeFor[m.dev.id+'::'+m.ifaceName]) edgeFor[m.dev.id+'::'+m.ifaceName]=id;
       }
     }
   }
 
   const saved = STATE.positions || {};
-  const keyOf = e => posKey(e.data.kind, e.data.label);
+  const keyOf = e => nodePosKey(e.data);
   const nodes = els.filter(e=>!e.data.source);
 
   /* Keep every node the user has already placed exactly where it is, and drop
@@ -1985,8 +2045,7 @@ function render(){
       }
       const id='e'+(++e);
       els.push({data:{id, source:L.a.dev.id, target:L.b.dev.id, kind:'l2',
-                      label:L.a.port.replace(/^([A-Za-z]{2})[A-Za-z]*/,'$1')+' · '+
-                            L.b.port.replace(/^([A-Za-z]{2})[A-Za-z]*/,'$1')}});
+                      label:shortIf(L.a.port)+' · '+shortIf(L.b.port)}});
     }
   }
 
@@ -2019,10 +2078,10 @@ function render(){
   const vp = (STATE.cy && !STATE.viewIsPath)
     ? {zoom:STATE.cy.zoom(), pan:Object.assign({}, STATE.cy.pan())} : null;
   if(STATE.cy) STATE.cy.destroy();
+  sizeNodes(els);
   const cy = cytoscape({
     container: document.getElementById('cy'),
     elements: els,
-    wheelSensitivity:0.2,
     motionBlur:false,
     textureOnViewport:bigGraph,
     hideEdgesOnViewport:bigGraph,
@@ -2038,13 +2097,20 @@ function render(){
 
   cy.on('tap','node[kind="device"]', evt=>{
     const d = STATE.model.devices.find(x=>x.id===evt.target.id());
-    if(d) showDevice(d);
+    if(!d) return;
+    if(selMode){
+      if(sel.has(d.id)) sel.delete(d.id); else sel.add(d.id);
+      render();
+      return;
+    }
+    showDevice(d);
   });
   cy.on('tap','node[kind="subnet"]', evt=>showSegment(evt.target.data('net')||evt.target.data('label')));
   cy.on('tap','edge', evt=>onEdgeTap(cy, evt.target));
   cy.on('dragfree','node', ()=>{ capturePositions(); autosave(); });
 
   STATE.cy=cy; STATE.edgeFor=edgeFor; STATE.edgePair=edgePair; STATE.viewIsPath=false;
+  updateSelBtn();
   if(usePreset && vp){ cy.zoom(vp.zoom); cy.pan(vp.pan); }
   // remember where the new nodes landed so they stay put next time
   capturePositions();
@@ -2808,6 +2874,118 @@ function openLink(a,b){
   showLink(a,b);
 }
 
+/* Report across a chosen set of devices — how they connect to each other and
+   what they have in common. */
+function showSelection(devs){
+  const m=STATE.model, r=document.getElementById('result');
+  STATE.selected=null; renderDevList();
+  if(devs.length<1){
+    r.innerHTML='<p class="note">Nothing selected. Turn on Select devices and tap the ones you want.</p><div id="warnbox"></div>';
+    renderWarnings(); return;
+  }
+  const inSet=new Set(devs.map(d=>d.id));
+
+  // pairwise connections inside the set
+  const pairs=[];
+  for(let i=0;i<devs.length;i++) for(let j=i+1;j<devs.length;j++){
+    const a=devs[i], b=devs[j], nets=[], l2=[], cl=[];
+    for(const k in m.subnets){
+      const sn=m.subnets[k];
+      if(sn.members.some(x=>x.dev===a) && sn.members.some(x=>x.dev===b)) nets.push({k, sn});
+    }
+    for(const k in (m.l2links||{})){
+      const L=m.l2links[k];
+      if((L.a.dev===a&&L.b.dev===b)||(L.a.dev===b&&L.b.dev===a)) l2.push(L);
+    }
+    for(const c of (m.clouds||[]))
+      if(c.members.some(x=>x.dev===a)&&c.members.some(x=>x.dev===b)) cl.push(c);
+    if(nets.length||l2.length||cl.length) pairs.push({a,b,nets,l2,cl});
+  }
+
+  // subnets that touch the set but reach outside it
+  const external=[];
+  for(const k in m.subnets){
+    const sn=m.subnets[k];
+    const inside=sn.members.filter(x=>inSet.has(x.dev.id));
+    const outside=sn.members.filter(x=>!inSet.has(x.dev.id));
+    if(inside.length && outside.length) external.push({k, outside});
+  }
+  const vlanCount={};
+  for(const d of devs) for(const v of vlansOf(d)) vlanCount[v]=(vlanCount[v]||0)+1;
+  const sharedVlans=Object.keys(vlanCount).map(Number).filter(v=>vlanCount[v]>1).sort((a,b)=>a-b);
+
+  let html='<h2 class="sec">'+devs.length+' devices selected</h2>'+
+    '<p class="note" style="margin-top:0">'+devs.map(d=>esc(d.name)).join(' · ')+'</p>'+
+    '<div class="btn-row" style="margin-bottom:14px">'+
+      '<button class="btn btn-go" id="sel-view">Show only these on the map</button>'+
+      '<button class="btn" id="sel-clear">Clear selection</button>'+
+    '</div>'+
+    '<table class="fib"><tr><th>Device</th><th>Interfaces</th><th>Routes</th><th>VLANs</th></tr>'+
+    devs.map(d=>'<tr><td>'+esc(d.name)+'</td><td>'+d.interfaces.length+'</td>'+
+      '<td>'+d.fib.length+'</td><td>'+vlansOf(d).size+'</td></tr>').join('')+'</table>';
+
+  html+='<h2 class="sec">Connections between them</h2>';
+  if(!pairs.length){
+    html+='<p class="note" style="margin-top:0">These devices have no direct link to each other in the model.</p>';
+  } else {
+    for(const p of pairs){
+      html+='<div class="cfgpane-label"><span>'+esc(p.a.name)+' ↔ '+esc(p.b.name)+'</span>'+
+        '<span>'+(p.nets.length?p.nets.length+' subnet':'')+(p.l2.length?' · '+p.l2.length+' L2':'')+
+        (p.cl.length?' · '+p.cl.map(c=>esc(c.name)).join(','):'')+'</span></div>'+
+        '<table class="fib">'+
+        p.nets.map(n=>{
+          const ia=n.sn.members.filter(x=>x.dev===p.a), ib=n.sn.members.filter(x=>x.dev===p.b);
+          return '<tr><td>'+esc(n.k)+'</td>'+
+            '<td>'+ia.map(x=>esc(shortIf(x.iface.name))).join(', ')+'</td>'+
+            '<td>'+ib.map(x=>esc(shortIf(x.iface.name))).join(', ')+'</td></tr>';
+        }).join('')+
+        p.l2.map(L=>{
+          const f=L.a.dev===p.a?L.a:L.b, sd=L.a.dev===p.a?L.b:L.a;
+          return '<tr><td><span class="tag allow">L2</span></td><td>'+esc(shortIf(f.port))+
+                 '</td><td>'+esc(shortIf(sd.port))+'</td></tr>';
+        }).join('')+
+        '</table>';
+    }
+  }
+
+  if(sharedVlans.length)
+    html+='<h2 class="sec">VLANs in common</h2><p class="note" style="margin-top:0">'+
+      sharedVlans.map(v=>'vlan '+v).join(' · ')+'</p>';
+
+  html+='<h2 class="sec">Reaches outside the selection</h2>';
+  html+= external.length
+    ? '<table class="fib"><tr><th>Subnet</th><th>Also on</th></tr>'+
+      external.slice(0,40).map(x=>'<tr><td>'+esc(x.k)+'</td><td>'+
+        x.outside.map(o=>esc(o.dev.name)).join(', ')+'</td></tr>').join('')+'</table>'+
+      (external.length>40?'<p class="note">Showing 40 of '+external.length+'.</p>':'')
+    : '<p class="note" style="margin-top:0">Nothing links these devices to the rest of the network.</p>';
+
+  html+='<div id="warnbox"></div>';
+  r.innerHTML=html;
+  renderWarnings();
+  document.getElementById('sel-view').onclick=()=>{
+    const s=document.getElementById('opt-view');
+    if(s.value!=='sel' && s.value!=='path' && s.value!=='link') STATE.prevView=s.value;
+    s.value='sel'; render();
+  };
+  document.getElementById('sel-clear').onclick=()=>{
+    STATE.selectedDevs=new Set();
+    const s=document.getElementById('opt-view');
+    if(s.value==='sel') s.value=STATE.prevView||'simple';
+    render(); updateSelBtn();
+    r.innerHTML='<p class="note">Selection cleared.</p><div id="warnbox"></div>';
+    renderWarnings();
+  };
+}
+
+function updateSelBtn(){
+  const b=document.getElementById('analyse');
+  if(!b) return;
+  const n=(STATE.selectedDevs||new Set()).size;
+  b.style.display = n ? '' : 'none';
+  b.textContent = 'Analyse selected ('+n+')';
+}
+
 function showDevice(d, opts){
   opts = opts || {};
   if(STATE.selected !== d.id){ STATE.devTab='overview'; STATE.editingConfig=false; STATE.renaming=false; }
@@ -2917,8 +3095,10 @@ function showDevice(d, opts){
     '<textarea class="rt-paste" id="mr-paste" placeholder="Paste show ip route, or show routing route from PAN-OS"></textarea>'+
     '<div class="btn-row" style="margin-top:8px">'+
       '<button class="btn" id="mr-import">Import table</button>'+
+      '<button class="btn" id="mr-file-btn">Import from file</button>'+
       (d.manualRoutes.length?'<button class="btn danger" id="mr-clear">Delete table</button>':'')+
     '</div>'+
+    '<input type="file" id="mr-file" class="hidden" accept=".txt,.log,.cfg,.out,.csv">'+
     '<label class="auth"><input type="checkbox" id="mr-auth"'+(d.tableAuthoritative?' checked':'')+'>'+
       '<span>This table is complete — do not infer any routes for '+esc(d.name)+'.</span></label>'+
     '<h2 class="sec">Interfaces</h2><table class="fib"><tr><th>Interface</th><th>Address</th><th>Zone / VRF</th></tr>'+ifs+'</table>'+
@@ -3042,6 +3222,28 @@ function showDevice(d, opts){
     if(!confirm('Delete the routing table you added for '+d.name+'? Inferred routes will be used again.')) return;
     d.manualRoutes=[]; d.tableAuthoritative=false; refresh();
   };
+  const mrFileBtn=document.getElementById('mr-file-btn');
+  const mrFile=document.getElementById('mr-file');
+  if(mrFileBtn && mrFile){
+    mrFileBtn.onclick=()=>mrFile.click();
+    mrFile.onchange=()=>{
+      const f=mrFile.files[0]; if(!f) return;
+      const rd=new FileReader();
+      rd.onload=()=>{
+        const got=importRouteTable(rd.result);
+        if(!got.length){
+          document.getElementById('mr-paste').value=String(rd.result).slice(0,4000);
+          document.getElementById('mr-paste').style.borderColor='var(--red)';
+          return;
+        }
+        d.manualRoutes.push(...got);
+        d.tableAuthoritative=true;
+        refresh();
+      };
+      rd.readAsText(f);
+      mrFile.value='';
+    };
+  }
   const auth=document.getElementById('mr-auth');
   if(auth) auth.onchange=()=>{ d.tableAuthoritative=auth.checked; rebuild(); };
 
@@ -3227,6 +3429,11 @@ document.getElementById('add-paste').onclick=()=>{
   addText(ta.value, 'pasted-'+(STATE.devices.length+1)); ta.value='';
 };
 document.getElementById('opt-view').onchange=()=>{ render(); autosave(); };
+document.getElementById('opt-select').onchange=()=>{ render(); updateSelBtn(); };
+document.getElementById('analyse').onclick=()=>{
+  const ids=STATE.selectedDevs||new Set();
+  showSelection(STATE.devices.filter(d=>ids.has(d.id)));
+};
 document.getElementById('opt-autowan').onchange=()=>{ rebuild(); };
 document.getElementById('prov-add').onclick=()=>{
   const el=document.getElementById('prov-name');
@@ -3311,13 +3518,16 @@ STATE.positions={};
 function posKey(kind, label){
   return (kind==='subnet'?'net:':kind==='wan'?'wan:':'dev:')+label;
 }
+function nodePosKey(data){
+  return data.pkey || posKey(data.kind, data.label);
+}
 function capturePositions(){
   if(!STATE.cy || STATE.viewIsPath) return;   // path view is transient — never let it overwrite the map
   STATE.cy.nodes().forEach(n=>{
     if(n.hasClass('tmp')) return;
     const d=n.data();
     if(!d.label) return;
-    STATE.positions[posKey(d.kind, d.label)] = n.position();
+    STATE.positions[nodePosKey(d)] = n.position();
   });
 }
 function projectObject(){
