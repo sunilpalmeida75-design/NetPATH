@@ -37,9 +37,31 @@ body{
 button{font-family:inherit; font-size:13px; cursor:pointer}
 input,textarea,select{font-family:var(--mono); font-size:13px}
 
-.shell{display:grid; grid-template-columns:290px minmax(0,1fr) 400px; height:100vh}
+:root{--left:290px; --right:400px}
+.shell{display:grid; grid-template-columns:var(--left) 6px minmax(0,1fr) 6px var(--right); height:100vh}
+.gutter{
+  position:relative; cursor:col-resize; background:var(--bg);
+  border-left:1px solid var(--rule); border-right:1px solid var(--rule);
+}
+.gutter:hover{background:var(--panel)}
+.gutter::after{
+  content:''; position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+  width:2px; height:26px; border-radius:1px; background:var(--rule);
+}
+.gutter:hover::after{background:var(--cyan)}
+.gutter.dragging::after{background:var(--cyan)}
+.pan-toggle{
+  position:absolute; top:14px; left:50%; transform:translateX(-50%);
+  width:18px; height:26px; padding:0; font-size:11px; line-height:1;
+  background:var(--panel); color:var(--ink-faint); border:1px solid var(--rule);
+  border-radius:4px; cursor:pointer; z-index:6;
+}
+.pan-toggle:hover{color:var(--ink); border-color:var(--ink-faint)}
+body.resizing{cursor:col-resize; user-select:none}
+.rail{min-width:0}
 @media (max-width:1100px){
   .shell{grid-template-columns:1fr; height:auto; min-height:100vh}
+  .gutter{display:none}
   .stage{height:60vh}
 }
 
@@ -176,6 +198,9 @@ ol.hops li::before{
 .tag.static{background:rgba(79,195,217,.16); color:var(--cyan)}
 .tag.igp{background:rgba(127,147,170,.18); color:var(--ink-dim)}
 .tag.table{background:rgba(160,130,220,.18); color:#a98ede}
+.tag.ospf{background:rgba(79,195,217,.16); color:var(--cyan)}
+.tag.eigrp{background:rgba(95,185,138,.16); color:var(--green)}
+.tag.bgp{background:rgba(232,161,58,.16); color:var(--amber)}
 .tag.manual{background:rgba(160,130,220,.18); color:#a98ede}
 .rt-form{display:grid; grid-template-columns:1fr 1fr; gap:7px; margin-top:9px}
 .rt-form input{background:var(--bg); border:1px solid var(--rule); color:var(--ink); border-radius:5px; padding:6px 8px; width:100%}
@@ -296,7 +321,10 @@ table.fib td:first-child{color:var(--ink)}
       </div>
 
       <h2 class="sec">Project</h2>
-      <div class="btn-row" style="margin-top:0">
+      <div class="rt-form" style="margin-top:0">
+        <input id="proj-name" class="wide" placeholder="project name" spellcheck="false">
+      </div>
+      <div class="btn-row">
         <button class="btn" id="save-proj">Save project</button>
         <button class="btn" id="open-proj">Open project</button>
         <button class="btn" id="clear-all">Clear all</button>
@@ -304,7 +332,7 @@ table.fib td:first-child{color:var(--ink)}
       <input type="file" id="projfile" accept=".json,.netpath" class="hidden">
       <p class="saved-note" id="autosave-note">Your work stays in this browser until you clear it.</p>
 
-      <h2 class="sec">Devices</h2>
+      <h2 class="sec">Devices <span id="dev-count" style="color:var(--ink-faint);font-weight:400"></span></h2>
       <ul class="devs" id="devlist"></ul>
       <p class="note" id="dev-empty">No devices yet.</p>
 
@@ -346,6 +374,8 @@ table.fib td:first-child{color:var(--ink)}
     </div>
   </aside>
 
+  <div class="gutter" id="gut-l"><button class="pan-toggle" id="tog-l" title="Hide the left panel">‹</button></div>
+
   <!-- ============ CENTER: graph ============ -->
   <main class="stage">
     <div class="stage-bar">
@@ -363,6 +393,13 @@ table.fib td:first-child{color:var(--ink)}
       </label>
       <label class="toggle"><input type="checkbox" id="opt-focus"> Switch to path view after trace</label>
       <label class="toggle"><input type="checkbox" id="opt-igp" checked> Infer IGP reachability</label>
+      <label class="toggle">Layer
+        <select id="opt-layer">
+          <option value="both" selected>L2 + L3</option>
+          <option value="l3">L3 only</option>
+          <option value="l2">L2 only</option>
+        </select>
+      </label>
       <label class="toggle"><input type="checkbox" id="opt-nolinks"> Hide links</label>
       <label class="toggle"><input type="checkbox" id="opt-select"> Select devices</label>
       <button class="btn" id="analyse" style="display:none">Analyse selected</button>
@@ -385,6 +422,8 @@ table.fib td:first-child{color:var(--ink)}
       <span><i style="background:#e8a13a"></i>Traced path</span>
     </div>
   </main>
+
+  <div class="gutter" id="gut-r"><button class="pan-toggle" id="tog-r" title="Hide the right panel">›</button></div>
 
   <!-- ============ RIGHT: trace ============ -->
   <aside class="rail rail-right">
@@ -604,6 +643,13 @@ function parseCisco(text, fname){
         return;
       }
       if((m=t.match(/^encapsulation\s+dot1q\s+(\d+)/i))){ cur.vlanTag=parseInt(m[1],10); return; }
+      if((m=t.match(/^bandwidth\s+(\d+)/i))){ cur.bw=parseInt(m[1],10); return; }
+      if((m=t.match(/^delay\s+(\d+)/i))){ cur.delay=parseInt(m[1],10); return; }
+      if((m=t.match(/^ip\s+ospf\s+cost\s+(\d+)/i))){ cur.ospfCost=parseInt(m[1],10); return; }
+      if((m=t.match(/^ip\s+ospf\s+hello-interval\s+(\d+)/i))){ cur.hello=parseInt(m[1],10); return; }
+      if((m=t.match(/^ip\s+ospf\s+dead-interval\s+(\d+)/i))){ cur.dead=parseInt(m[1],10); return; }
+      if((m=t.match(/^ip\s+ospf\s+network\s+(\S+)/i))){ cur.ospfNet=m[1].toLowerCase(); return; }
+      if((m=t.match(/^ip\s+ospf\s+authentication/i))){ cur.ospfAuth=true; return; }
       // first-hop redundancy: the virtual IP is what other devices point at
       if((m=t.match(/^standby\s+(?:(\d+)\s+)?ip\s+(\d+\.\d+\.\d+\.\d+)/i))){
         cur.vips=cur.vips||[];
@@ -627,7 +673,11 @@ function parseCisco(text, fname){
         for(const v of (cur.vips||[])) if(v.group===g) v.prio=pr;
         return;
       }
-      if((m=t.match(/^ip\s+ospf\s+\d+\s+area\s+\S+/i))){ cur.ospf=true; dev.dynamic=true; return; }
+      if((m=t.match(/^ip\s+ospf\s+(\d+)\s+area\s+(\S+)/i))){
+        cur.ospf=true; cur.ospfArea=m[2]; dev.dynamic=true;
+        dev.ospf=dev.ospf||{pid:m[1], routerId:null, nets:[], refBw:100, passiveAll:false, passive:{}, line:lineNo};
+        return;
+      }
     }
 
     // --- top-level VLAN database ---
@@ -641,18 +691,84 @@ function parseCisco(text, fname){
       return;
     }
 
-    if((m=t.match(/^router\s+ospf\b/i))){ ctx='ospf'; dev.dynamic=true; return; }
-    if((m=t.match(/^router\s+bgp\s+(\d+)/i))){ ctx='bgp'; dev.dynamic=true; dev.asn=m[1]; return; }
-    if((m=t.match(/^router\s+eigrp\b/i))){ ctx='eigrp'; dev.dynamic=true; return; }
-
-    if(ctx==='ospf' && (m=t.match(/^network\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+)\s+area\s+(\S+)/i))){
-      const len=wild2len(m[2]); const ip=ip2int(m[1]);
-      if(ip!==null && len!==null) dev.ospfNets.push({net:netOf(ip,len), len});
+    if((m=t.match(/^router\s+ospf\s*(\d+)?/i))){
+      ctx='ospf'; dev.dynamic=true;
+      dev.ospf=dev.ospf||{pid:m[1]||'1', routerId:null, nets:[], refBw:100, passiveAll:false, passive:{}, line:lineNo};
       return;
     }
-    if(ctx==='bgp' && (m=t.match(/^neighbor\s+(\d+\.\d+\.\d+\.\d+)\s+remote-as\s+(\d+)/i))){
-      dev.bgpPeers.push({ip:ip2int(m[1]), asn:m[2]});
+    if((m=t.match(/^router\s+bgp\s+(\d+)/i))){
+      ctx='bgp'; dev.dynamic=true; dev.asn=m[1];
+      dev.bgp={asn:m[1], routerId:null, neighbors:{}, networks:[], line:lineNo};
       return;
+    }
+    if((m=t.match(/^router\s+eigrp\s+(\S+)/i))){
+      ctx='eigrp'; dev.dynamic=true;
+      dev.eigrp=dev.eigrp||{as:/^\d+$/.test(m[1])?m[1]:null, name:/^\d+$/.test(m[1])?null:m[1],
+                            k:[1,0,1,0,0], nets:[], autoSummary:false, passive:{}, passiveAll:false,
+                            routerId:null, line:lineNo};
+      return;
+    }
+
+    if(ctx==='ospf'){
+      if((m=t.match(/^network\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+)\s+area\s+(\S+)/i))){
+        const len=wild2len(m[2]); const ip=ip2int(m[1]);
+        if(ip!==null && len!==null){
+          dev.ospfNets.push({net:netOf(ip,len), len});
+          if(dev.ospf) dev.ospf.nets.push({net:netOf(ip,len), len, area:m[3], line:lineNo});
+        }
+        return;
+      }
+      if((m=t.match(/^router-id\s+(\d+\.\d+\.\d+\.\d+)/i))){ if(dev.ospf) dev.ospf.routerId=m[1]; return; }
+      if((m=t.match(/^auto-cost\s+reference-bandwidth\s+(\d+)/i))){ if(dev.ospf) dev.ospf.refBw=parseInt(m[1],10); return; }
+      if(/^passive-interface\s+default/i.test(t)){ if(dev.ospf) dev.ospf.passiveAll=true; return; }
+      if((m=t.match(/^passive-interface\s+(\S+)/i))){ if(dev.ospf) dev.ospf.passive[normPort(m[1]).toLowerCase()]=true; return; }
+      if((m=t.match(/^no\s+passive-interface\s+(\S+)/i))){ if(dev.ospf) dev.ospf.passive[normPort(m[1]).toLowerCase()]=false; return; }
+    }
+    if(ctx==='eigrp' && dev.eigrp){
+      if((m=t.match(/^autonomous-system\s+(\d+)/i))){ dev.eigrp.as=m[1]; return; }
+      if((m=t.match(/^network\s+(\d+\.\d+\.\d+\.\d+)(?:\s+(\d+\.\d+\.\d+\.\d+))?/i))){
+        const ip=ip2int(m[1]);
+        const len=m[2]?wild2len(m[2]):classfulLen(ip);
+        if(ip!==null && len!=null) dev.eigrp.nets.push({net:netOf(ip,len), len, line:lineNo});
+        return;
+      }
+      if((m=t.match(/^metric\s+weights\s+\d+\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/i))){
+        dev.eigrp.k=[+m[1],+m[2],+m[3],+m[4],+m[5]]; return;
+      }
+      if(/^auto-summary/i.test(t) && !/^no\s/i.test(t)){ dev.eigrp.autoSummary=true; return; }
+      if((m=t.match(/^eigrp\s+router-id\s+(\d+\.\d+\.\d+\.\d+)/i))){ dev.eigrp.routerId=m[1]; return; }
+      if(/^passive-interface\s+default/i.test(t)){ dev.eigrp.passiveAll=true; return; }
+      if((m=t.match(/^passive-interface\s+(\S+)/i))){ dev.eigrp.passive[normPort(m[1]).toLowerCase()]=true; return; }
+      if((m=t.match(/^no\s+passive-interface\s+(\S+)/i))){ dev.eigrp.passive[normPort(m[1]).toLowerCase()]=false; return; }
+    }
+    if(ctx==='bgp'){
+      const nb=(ipStr)=>{
+        const b=dev.bgp; if(!b) return null;
+        return b.neighbors[ipStr] = b.neighbors[ipStr] || {ip:ip2int(ipStr), ipStr, line:lineNo};
+      };
+      if((m=t.match(/^bgp\s+router-id\s+(\d+\.\d+\.\d+\.\d+)/i))){ dev.bgp.routerId=m[1]; return; }
+      if((m=t.match(/^neighbor\s+(\d+\.\d+\.\d+\.\d+)\s+remote-as\s+(\d+)/i))){
+        const n=nb(m[1]); if(n){ n.remoteAs=m[2]; n.asLine=lineNo; }
+        dev.bgpPeers.push({ip:ip2int(m[1]), asn:m[2]});
+        return;
+      }
+      if((m=t.match(/^neighbor\s+(\d+\.\d+\.\d+\.\d+)\s+description\s+(.+)/i))){ const n=nb(m[1]); if(n) n.desc=m[2]; return; }
+      if((m=t.match(/^neighbor\s+(\d+\.\d+\.\d+\.\d+)\s+update-source\s+(\S+)/i))){ const n=nb(m[1]); if(n) n.updateSource=m[2]; return; }
+      if((m=t.match(/^neighbor\s+(\d+\.\d+\.\d+\.\d+)\s+ebgp-multihop(?:\s+(\d+))?/i))){ const n=nb(m[1]); if(n) n.multihop=parseInt(m[2]||'2',10); return; }
+      if((m=t.match(/^neighbor\s+(\d+\.\d+\.\d+\.\d+)\s+next-hop-self/i))){ const n=nb(m[1]); if(n) n.nextHopSelf=true; return; }
+      if((m=t.match(/^neighbor\s+(\d+\.\d+\.\d+\.\d+)\s+route-reflector-client/i))){ const n=nb(m[1]); if(n) n.rrClient=true; return; }
+      if((m=t.match(/^neighbor\s+(\d+\.\d+\.\d+\.\d+)\s+weight\s+(\d+)/i))){ const n=nb(m[1]); if(n) n.weight=parseInt(m[2],10); return; }
+      if((m=t.match(/^neighbor\s+(\d+\.\d+\.\d+\.\d+)\s+shutdown/i))){ const n=nb(m[1]); if(n) n.shutdown=true; return; }
+      if((m=t.match(/^neighbor\s+(\d+\.\d+\.\d+\.\d+)\s+route-map\s+(\S+)\s+(in|out)/i))){
+        const n=nb(m[1]); if(n){ n.routeMaps=n.routeMaps||[]; n.routeMaps.push(m[2]+' '+m[3]); } return;
+      }
+      if((m=t.match(/^neighbor\s+(\d+\.\d+\.\d+\.\d+)\s+activate/i))){ nb(m[1]); return; }
+      if((m=t.match(/^network\s+(\d+\.\d+\.\d+\.\d+)(?:\s+mask\s+(\d+\.\d+\.\d+\.\d+))?/i))){
+        const ip=ip2int(m[1]);
+        const len=m[2]?mask2len(m[2]):classfulLen(ip);
+        if(ip!==null && len!=null && dev.bgp) dev.bgp.networks.push({net:netOf(ip,len), len, line:lineNo});
+        return;
+      }
     }
 
     // Static routes — IOS, NX-OS and ASA forms
@@ -982,7 +1098,7 @@ function newDevice(vendor, fname){
     id:'d'+(++devSeq), vendor, file:fname||'pasted', name:null, rawText:'', originalText:null,
     interfaces:[], statics:[], ospfNets:[], bgpPeers:[],
     zones:new Set(), vrs:new Set(), addrObjects:{}, rules:[],
-    manualRoutes:[], tableAuthoritative:false, usedFallbackName:false,
+    manualRoutes:[], tableAuthoritative:false, usedFallbackName:false, bgpTable:[], bgp:null,
     vlans:{}, neighbors:[], isSwitch:false,
     dynamic:false, warnings:[], fib:[]
   };
@@ -1009,11 +1125,13 @@ function reparseInto(existing, text){
   const manualRoutes = existing.manualRoutes, tableAuthoritative = existing.tableAuthoritative;
   const customName = !!existing.customName;
   const neighbors = existing.neighbors || [];
+  const bgpTable = existing.bgpTable || [];
   Object.assign(existing, fresh);
   existing.id = id; existing.file = file; existing.originalText = originalText;
   existing.manualRoutes = manualRoutes; existing.tableAuthoritative = tableAuthoritative;
   existing.customName = customName;
   existing.neighbors = neighbors;
+  existing.bgpTable = bgpTable;
   existing.name = keepName;
   return existing;
 }
@@ -1206,6 +1324,11 @@ function buildModel(devices, opts){
   }
 
   // ---- inferred IGP: BFS shortest path, only fills gaps
+  // Real protocol metrics first; the hop-count fallback only fills what is left
+  igpRoutes(devices, subnets, 'ospf', warn);
+  igpRoutes(devices, subnets, 'eigrp', warn);
+  igpChecks(devices, subnets, warn);
+
   if(opts.igp){
     for(const d of devices){
       if(d.tableAuthoritative) continue;   // a real table was imported; do not invent routes
@@ -1263,6 +1386,8 @@ function buildModel(devices, opts){
         if(v.ip==null) continue;
         (vips[v.ip]=vips[v.ip]||[]).push({dev:d, iface:i, prio:v.prio||100, group:v.group, proto:v.proto});
       }
+  bgpChecks(devices, warn);
+
   const haPairs=[];
   for(const ip in vips){
     const mem=vips[ip];
@@ -1746,6 +1871,13 @@ function rotateView(deg){
   render(); autosave();
 }
 
+/* A trunk carries several VLANs and is worth telling apart from an access
+   port at a glance. */
+function l2IsTrunk(L){
+  const pa=findPort(L.a.dev,L.a.port), pb=findPort(L.b.dev,L.b.port);
+  return (pa && pa.mode==='trunk') || (pb && pb.mode==='trunk');
+}
+
 function graphStyle(){
   return [
       {selector:'node[kind="device"]', style:{
@@ -1763,6 +1895,8 @@ function graphStyle(){
       {selector:'edge[kind="l2"]', style:{
         'line-color':'#3f7a63','line-style':'dashed','line-dash-pattern':[3,3],'width':1.6,
         'color':'#5d9c81','font-size':8.5,'z-index':1}},
+      {selector:'edge[trunk = 1]', style:{
+        'line-style':'solid','width':3,'line-color':'#57b98c','color':'#7fd4a8','z-index':3}},
       {selector:'node[kind="subnet"]', style:{
         'shape':'round-rectangle','width':'data(w)','height':'data(h)',
         'background-opacity':0,'border-width':0,
@@ -1829,6 +1963,7 @@ function render(){
   el.style.display='none';
 
   const view = (document.getElementById('opt-view')||{}).value || 'simple';
+  const layer = (document.getElementById('opt-layer')||{}).value || 'both';
   // remember where we came from, unless this render is itself a Back
   STATE.viewHist = STATE.viewHist || [];
   if(STATE.lastView!=null && STATE.lastView!==view && !STATE.navBack){
@@ -1858,11 +1993,17 @@ function render(){
     }
     const els=[]; const edgeFor={}; const made={};
     let e=0;
+    const pathGroups=new Set();
     const addDev=(d)=>{
       if(made[d.id]) return;
       made[d.id]=true;
+      if(d.groupId){
+        let g=groupById(d.groupId);
+        while(g){ pathGroups.add(g.id); g = g.parent ? groupById(g.parent) : null; }
+      }
       els.push({data:{id:d.id, label:d.name, kind:'device', vendor:d.vendor,
-                      role:d.isSwitch?'switch':'router'}});
+                      role:d.isSwitch?'switch':'router',
+                      parent: d.groupId ? 'g_'+d.groupId : undefined}});
     };
     const netOfIface=(ifc)=>{
       if(!ifc || !ifc.addrs) return null;
@@ -1934,9 +2075,18 @@ function render(){
     }
 
     if(STATE.cy) STATE.cy.destroy();
+    // sites and zones the path passes through
+    for(const g of groups()){
+      if(!pathGroups.has(g.id)) continue;
+      els.unshift({data:{id:'g_'+g.id, label:g.name, kind:'group',
+                         gkind:g.parent?'zone':'site',
+                         parent: g.parent && pathGroups.has(g.parent) ? 'g_'+g.parent : undefined}});
+    }
+
     /* Keep the devices where they sit on the topology, so the path reads as
        part of the same picture rather than a new arrangement. */
     const devEls=els.filter(x=>!x.data.source && x.data.kind==='device');
+    els.forEach(x=>{ if(x.data.kind==='group') delete x.position; });
     const anchoredPath = devEls.length>0 && devEls.every(x=>savedPos('dev:'+x.data.label,'simple|'));
     if(anchoredPath){
       const at={};
@@ -2100,6 +2250,7 @@ function render(){
       const vl=(p)=>!p?'':(p.mode==='access'?('access '+(p.accessVlan||'?'))
             :(Array.isArray(p.allowed)?('trunk '+(p.allowed.length?p.allowed.join(','):'none')):'trunk all'));
       els.push({data:{id:'e'+(++e), source:a.id, target:b.id, kind:'l2', item:item.key,
+        trunk:l2IsTrunk(L)?1:0,
         label:shortIf(first.port)+(vl(pa)?'\n'+vl(pa):'')+'\n↔\n'+shortIf(second.port)+(vl(pb)?'\n'+vl(pb):'')}});
     }
 
@@ -2210,7 +2361,7 @@ function render(){
 
   let e=0;
   const drawnSubnets=new Set();
-  for(const k in model.subnets){
+  if(layer!=='l2') for(const k in model.subnets){
     const sn=model.subnets[k];
     const members=sn.members.filter(m=>vis(m.dev));
     if(!members.length) continue;
@@ -2272,7 +2423,7 @@ function render(){
   }
 
   // WAN clouds joining sites we cannot see inside
-  if(model.clouds){
+  if(model.clouds && layer!=='l2'){
     for(const c of model.clouds){
       const mem=c.members.filter(m=>vis(m.dev));
       if(!mem.length) continue;
@@ -2323,7 +2474,7 @@ function render(){
   }
 
   // layer 2 links from CDP/LLDP neighbor data
-  if(model.l2links){
+  if(model.l2links && layer!=='l3'){
     for(const k in model.l2links){
       const L=model.l2links[k];
       if(!vis(L.a.dev) || !vis(L.b.dev)) continue;
@@ -2331,11 +2482,13 @@ function render(){
         const pk=[L.a.dev.id,L.b.dev.id].sort().join('|');
         if(pairEdge[pk]) continue;                 // already joined by an L3 link
         const id='e'+(++e); pairEdge[pk]=id;
-        els.push({data:{id, source:L.a.dev.id, target:L.b.dev.id, kind:'l2', l2key:k, label:''}});
+        els.push({data:{id, source:L.a.dev.id, target:L.b.dev.id, kind:'l2', l2key:k,
+                        trunk:l2IsTrunk(L)?1:0, label:''}});
         continue;
       }
       const id='e'+(++e);
       els.push({data:{id, source:L.a.dev.id, target:L.b.dev.id, kind:'l2', l2key:k,
+                      trunk:l2IsTrunk(L)?1:0,
                       label:shortIf(L.a.port)+' · '+shortIf(L.b.port)}});
     }
   }
@@ -2343,7 +2496,7 @@ function render(){
   // VLAN correlation: a switch with no CDP/LLDP data still gets placed against
   // the L3 segments its VLANs belong to. Marked inferred — it shows membership,
   // not cabling.
-  if(model.vlanReport && view!=='simple'){
+  if(model.vlanReport && view!=='simple' && layer!=='l3'){
     const linked={};
     if(model.l2links) for(const k in model.l2links){
       linked[model.l2links[k].a.dev.id]=true; linked[model.l2links[k].b.dev.id]=true;
@@ -2740,6 +2893,426 @@ function auditVlans(devices, l2links, warn){
 }
 
 /* ============================================================
+   BGP — configuration checks and best-path selection
+
+   There is no "latest BGP"; BGP-4 (RFC 4271) is still the version. Best-path
+   selection is not in the RFC — the order below is Cisco's documented one.
+   ============================================================ */
+
+function bgpChecks(devices, warn){
+  const byAsn={};
+  const ownerOfIp={};
+  for(const d of devices){
+    for(const i of d.interfaces) for(const a of i.addrs) ownerOfIp[a.ip]=d;
+    if(!d.bgp) continue;
+    (byAsn[d.bgp.asn]=byAsn[d.bgp.asn]||[]).push(d);
+  }
+
+  // duplicate router-ids break session establishment
+  const rid={};
+  for(const d of devices){
+    if(!d.bgp || !d.bgp.routerId) continue;
+    if(rid[d.bgp.routerId])
+      warn('BGP router-id '+d.bgp.routerId+' is used by both '+rid[d.bgp.routerId].name+' and '+d.name+
+           '. Sessions between them will not come up.', d.id, d.bgp.line);
+    rid[d.bgp.routerId]=d;
+  }
+
+  for(const d of devices){
+    const b=d.bgp; if(!b) continue;
+    const hasEbgp=Object.values(b.neighbors).some(n=>n.remoteAs && n.remoteAs!==b.asn);
+
+    for(const key in b.neighbors){
+      const n=b.neighbors[key];
+      if(!n.remoteAs){
+        warn(d.name+': BGP neighbor '+n.ipStr+' has no remote-as, so the session is never configured.', d.id, n.line);
+        continue;
+      }
+      if(n.shutdown) continue;
+      const isIbgp = n.remoteAs===b.asn;
+
+      // is the peer address reachable?
+      const connected = d._conn.some(c=>inNet(n.ip,c.net,c.len));
+      if(!isIbgp && !connected && !n.multihop)
+        warn(d.name+': eBGP neighbor '+n.ipStr+' is not on a connected subnet and ebgp-multihop is not set.', d.id, n.asLine||n.line);
+      if(isIbgp && !connected && !n.updateSource)
+        warn(d.name+': iBGP neighbor '+n.ipStr+' is not directly connected and no update-source is set — usually a loopback is intended.', d.id, n.asLine||n.line);
+
+      // does the far end agree?
+      const peer=ownerOfIp[n.ip];
+      if(peer && peer.bgp){
+        if(peer.bgp.asn!==n.remoteAs)
+          warn(d.name+': neighbor '+n.ipStr+' is configured as AS '+n.remoteAs+' but '+peer.name+
+               ' is running AS '+peer.bgp.asn+'. The session will not establish.', d.id, n.asLine||n.line);
+        const back=Object.values(peer.bgp.neighbors).some(x=>ownerOfIp[x.ip]===d);
+        if(!back)
+          warn(d.name+': peers with '+peer.name+' at '+n.ipStr+', but '+peer.name+
+               ' has no matching neighbor statement back. The session is one-sided.', peer.id, peer.bgp.line);
+      } else if(peer && !peer.bgp){
+        warn(d.name+': neighbor '+n.ipStr+' is '+peer.name+', which has no BGP configuration.', peer.id, null);
+      }
+
+      // classic blackhole: iBGP peers learn eBGP routes with an unreachable next hop
+      if(isIbgp && hasEbgp && !n.nextHopSelf && !n.rrClient)
+        warn(d.name+': iBGP neighbor '+n.ipStr+' has no next-hop-self, and '+d.name+
+             ' has eBGP peers. Routes passed to it will keep an external next hop that it may not reach.', d.id, n.asLine||n.line);
+    }
+
+    // network statements only advertise if the prefix is actually in the table
+    for(const nw of b.networks){
+      const have=d.fib.some(r=>r.net===nw.net && r.len===nw.len);
+      if(!have)
+        warn(d.name+': BGP network '+cidr(nw.net,nw.len)+' is not in the routing table, so it will not be advertised.', d.id, nw.line);
+    }
+  }
+
+  // iBGP needs a full mesh unless a route reflector is in play
+  for(const asn in byAsn){
+    const members=byAsn[asn];
+    if(members.length<3) continue;
+    const anyRR=members.some(d=>Object.values(d.bgp.neighbors).some(n=>n.rrClient));
+    if(anyRR) continue;
+    for(let i=0;i<members.length;i++) for(let j=i+1;j<members.length;j++){
+      const a=members[i], b=members[j];
+      const aIps=new Set(); for(const x of a.interfaces) for(const y of x.addrs) aIps.add(y.ip);
+      const bIps=new Set(); for(const x of b.interfaces) for(const y of x.addrs) bIps.add(y.ip);
+      const aToB=Object.values(a.bgp.neighbors).some(n=>bIps.has(n.ip));
+      const bToA=Object.values(b.bgp.neighbors).some(n=>aIps.has(n.ip));
+      if(!aToB && !bToA)
+        warn('AS '+asn+' iBGP is not a full mesh: '+a.name+' and '+b.name+
+             ' do not peer, and no route reflector is configured.', a.id, a.bgp.line);
+    }
+  }
+}
+
+/* Parse `show ip bgp`. The header line gives reliable column positions;
+   without it the columns are ambiguous because AS numbers look like metrics. */
+function parseBgpTable(text){
+  const lines=String(text||'').split(/\r?\n/);
+  let cols=null, out=[], lastNet=null;
+  for(const raw of lines){
+    if(/Network\s+Next\s*Hop\s+Metric\s+LocPrf\s+Weight\s+Path/i.test(raw)){
+      cols={
+        net: raw.search(/Network/i),
+        nh:  raw.search(/Next\s*Hop/i),
+        met: raw.search(/Metric/i),
+        lp:  raw.search(/LocPrf/i),
+        wt:  raw.search(/Weight/i),
+        path:raw.search(/Path/i)
+      };
+      continue;
+    }
+    const t=raw.trim();
+    if(!t) continue;
+    if(/^(BGP table version|Status codes|Origin codes|Network\b)/i.test(t)) continue;
+
+    const status=(raw.match(/^[\s*>sdhirSx=#]{0,4}/)||[''])[0];
+    let net=null, nh=null, met=null, lp=null, wt=null, pathStr='';
+
+    if(cols){
+      const cut=(a,b)=>raw.slice(a, b===undefined?undefined:b).trim();
+      net=cut(cols.net, cols.nh) || null;
+      nh=cut(cols.nh, cols.met) || null;
+      met=cut(cols.met, cols.lp); lp=cut(cols.lp, cols.wt); wt=cut(cols.wt, cols.path);
+      pathStr=cut(cols.path);
+    } else {
+      const tk=t.replace(/^[\s*>sdhirSx=#]+/,'').split(/\s+/);
+      if(!tk.length) continue;
+      let idx=0;
+      if(/^\d+\.\d+\.\d+\.\d+(\/\d+)?$/.test(tk[0])){ net=tk[0]; idx=1; }
+      if(/^\d+\.\d+\.\d+\.\d+$/.test(tk[idx]||'')){ nh=tk[idx]; idx++; }
+      const rest=tk.slice(idx);
+      const nums=[]; let k=0;
+      while(k<rest.length && /^\d+$/.test(rest[k]) && nums.length<3){ nums.push(rest[k]); k++; }
+      if(nums.length===3){ met=nums[0]; lp=nums[1]; wt=nums[2]; }
+      else if(nums.length===2){ lp=nums[0]; wt=nums[1]; }
+      else if(nums.length===1){ wt=nums[0]; }
+      pathStr=rest.slice(k).join(' ');
+    }
+
+    if(net) lastNet=net; else net=lastNet;
+    const c=parseCidr(net||'') || (ip2int(net||'')!=null ? {net:netOf(ip2int(net),classfulLen(ip2int(net))), len:classfulLen(ip2int(net))} : null);
+    if(!c || !nh) continue;
+
+    const originM=/([ie?])\s*$/.exec(pathStr);
+    const origin=originM?originM[1]:'?';
+    const asPath=pathStr.replace(/([ie?])\s*$/,'').trim()
+      .split(/\s+/).filter(x=>/^\d+$/.test(x)).map(Number);
+
+    out.push({
+      net:c.net, len:c.len, nextHop:ip2int(nh), nextHopStr:nh,
+      med: met===''||met==null ? null : parseInt(met,10),
+      localPref: lp===''||lp==null ? 100 : parseInt(lp,10),
+      weight: wt===''||wt==null ? 0 : parseInt(wt,10),
+      asPath, origin,
+      internal: status.indexOf('i')>=0,
+      best: status.indexOf('>')>=0,
+      valid: status.indexOf('*')>=0
+    });
+  }
+  return out;
+}
+
+const ORIGIN_RANK={'i':0,'e':1,'?':2};
+
+/* Cisco's best-path order. Returns the winner and the step that decided it. */
+function bgpBestPath(paths, opts){
+  opts=opts||{};
+  const valid=paths.filter(p=>p.valid!==false);
+  if(!valid.length) return null;
+  if(valid.length===1) return {best:valid[0], reason:'only path', step:0};
+
+  const steps=[
+    ['highest weight',            p=>-p.weight],
+    ['highest local preference',  p=>-p.localPref],
+    // locally sourced routes carry weight 32768 or a 0.0.0.0 next hop
+    ['locally originated',        p=>(p.weight===32768 || p.nextHop===0)?0:1],
+    ['shortest AS path',          p=>p.asPath.length],
+    ['lowest origin code',        p=>ORIGIN_RANK[p.origin]!=null?ORIGIN_RANK[p.origin]:3],
+    ['lowest MED',                p=>p.med==null?0:p.med],
+    ['eBGP over iBGP',            p=>p.internal?1:0],
+    ['lowest neighbor address',   p=>p.nextHop>>>0]
+  ];
+
+  let pool=valid.slice();
+  for(let i=0;i<steps.length;i++){
+    const [name, key]=steps[i];
+    // MED only compares paths from the same neighbouring AS
+    if(name==='lowest MED'){
+      const firstAs=pool.map(p=>p.asPath[0]);
+      if(new Set(firstAs).size>1) continue;
+    }
+    let bestVal=Infinity;
+    for(const p of pool){ const v=key(p); if(v<bestVal) bestVal=v; }
+    const next=pool.filter(p=>key(p)===bestVal);
+    if(next.length<pool.length){
+      pool=next;
+      if(pool.length===1) return {best:pool[0], reason:name, step:i+1, considered:valid.length};
+    }
+  }
+  return {best:pool[0], reason:'tie — first path kept', step:steps.length, considered:valid.length};
+}
+
+/* ============================================================
+   OSPF and EIGRP — real metrics rather than hop count
+
+   OSPF cost = reference bandwidth / interface bandwidth.
+   EIGRP classic composite = 256 * (10^7 / slowest bandwidth + total delay),
+   with the default K values K1=K3=1. Both are Cisco's documented formulas.
+   ============================================================ */
+
+/* Interface bandwidth in kbps and delay in tens of microseconds, from the
+   config where stated and from the interface type otherwise. */
+function ifBandwidth(i){
+  if(i.bw) return i.bw;
+  const n=(i.name||'').toLowerCase();
+  if(/^hu|^hundred/.test(n)) return 100000000;
+  if(/^fo|^forty/.test(n))   return 40000000;
+  if(/^te|^ten/.test(n))     return 10000000;
+  if(/^twe/.test(n))         return 25000000;
+  if(/^gi|^ae|^po|^vlan|^ethernet1\//.test(n)) return 1000000;
+  if(/^fa/.test(n))          return 100000;
+  if(/^se/.test(n))          return 1544;
+  if(/^lo/.test(n))          return 8000000;
+  return 1000000;
+}
+function ifDelay(i){
+  if(i.delay) return i.delay;
+  const n=(i.name||'').toLowerCase();
+  if(/^hu|^fo|^te|^twe/.test(n)) return 10;
+  if(/^gi|^ae|^po|^vlan|^ethernet1\//.test(n)) return 10;
+  if(/^fa/.test(n)) return 100;
+  if(/^se/.test(n)) return 20000;
+  if(/^lo/.test(n)) return 5000;
+  return 100;
+}
+function ospfCost(dev, i){
+  if(i.ospfCost) return i.ospfCost;
+  const ref=(dev.ospf && dev.ospf.refBw) || 100;      // Mbps
+  return Math.max(1, Math.floor(ref*1000 / ifBandwidth(i)));   // Cisco truncates
+}
+function eigrpMetric(minBwKbps, sumDelay){
+  return 256 * (Math.floor(10000000 / Math.max(1,minBwKbps)) + sumDelay);
+}
+
+/* Is this interface actually running the protocol? */
+function inOspf(dev, i){
+  if(!dev.ospf) return false;
+  if(i.ospfArea) return true;
+  for(const a of i.addrs)
+    for(const n of dev.ospf.nets) if(inNet(a.ip, n.net, n.len)) return true;
+  return false;
+}
+function ospfAreaOf(dev, i){
+  if(i.ospfArea) return i.ospfArea;
+  if(!dev.ospf) return null;
+  for(const a of i.addrs)
+    for(const n of dev.ospf.nets) if(inNet(a.ip, n.net, n.len)) return n.area;
+  return null;
+}
+function inEigrp(dev, i){
+  if(!dev.eigrp) return false;
+  for(const a of i.addrs)
+    for(const n of dev.eigrp.nets) if(inNet(a.ip, n.net, n.len)) return true;
+  return false;
+}
+function isPassive(cfg, i){
+  if(!cfg) return false;
+  const k=normPort(i.name).toLowerCase();
+  if(cfg.passive[k]===true) return true;
+  if(cfg.passiveAll && cfg.passive[k]!==false) return true;
+  return false;
+}
+
+/* Shortest path per protocol, carrying the real metric. */
+function igpRoutes(devices, subnets, proto, warn){
+  const enabled = d => proto==='ospf' ? !!d.ospf : !!d.eigrp;
+  const on = (d,i) => proto==='ospf' ? inOspf(d,i) : inEigrp(d,i);
+  const cfgOf = d => proto==='ospf' ? d.ospf : d.eigrp;
+
+  // adjacency: both ends run the protocol on a shared segment and neither is passive
+  const adj={};
+  for(const k in subnets){
+    const sn=subnets[k];
+    for(const a of sn.members) for(const b of sn.members){
+      if(a.dev===b.dev) continue;
+      if(!enabled(a.dev) || !enabled(b.dev)) continue;
+      if(!on(a.dev,a.iface) || !on(b.dev,b.iface)) continue;
+      if(isPassive(cfgOf(a.dev), a.iface) || isPassive(cfgOf(b.dev), b.iface)) continue;
+      if(proto==='eigrp' && a.dev.eigrp.as && b.dev.eigrp.as && a.dev.eigrp.as!==b.dev.eigrp.as) continue;
+      (adj[a.dev.id]=adj[a.dev.id]||[]).push({to:b.dev, viaIface:a.iface, nextHop:b.addr.ip, peerIface:b.iface});
+    }
+  }
+
+  for(const d of devices){
+    if(!enabled(d) || d.tableAuthoritative) continue;
+    // Dijkstra; EIGRP tracks slowest bandwidth and cumulative delay along the path
+    const best={[d.id]:{cost:0, minBw:Infinity, delay:0, via:null}};
+    const seen={};
+    for(;;){
+      let cur=null, curId=null, curCost=Infinity;
+      for(const id in best){ if(seen[id]) continue; if(best[id].cost<curCost){ curCost=best[id].cost; curId=id; } }
+      if(curId==null) break;
+      seen[curId]=true;
+      cur=devices.find(x=>x.id===curId);
+      for(const e of (adj[curId]||[])){
+        const st=best[curId];
+        let cost, minBw=st.minBw, delay=st.delay;
+        if(proto==='ospf'){
+          cost = st.cost + ospfCost(cur, e.viaIface);
+        } else {
+          minBw = Math.min(st.minBw, ifBandwidth(e.viaIface));
+          delay = st.delay + ifDelay(e.viaIface);
+          cost = eigrpMetric(minBw, delay);
+        }
+        const via = st.via || {iface:e.viaIface.name, nextHop:e.nextHop, vrf:e.viaIface.vrf};
+        if(!best[e.to.id] || cost < best[e.to.id].cost)
+          best[e.to.id]={cost, minBw, delay, via};
+      }
+    }
+    for(const other of devices){
+      if(other===d) continue;
+      const st=best[other.id];
+      if(!st || !st.via) continue;
+      for(const n of other._nets){
+        const key=n.net+'/'+n.len+'|'+st.via.vrf;
+        if(d._keys.has(key)) continue;
+        d._keys.add(key);
+        d.fib.push({net:n.net, len:n.len, type:proto, ad: proto==='ospf'?110:90,
+                    metric: st.cost, iface:st.via.iface, nextHop:st.via.nextHop, vrf:st.via.vrf});
+      }
+    }
+  }
+}
+
+function igpChecks(devices, subnets, warn){
+  // duplicate OSPF router-ids
+  const rid={};
+  for(const d of devices){
+    const r=d.ospf && d.ospf.routerId;
+    if(!r) continue;
+    if(rid[r]) warn('OSPF router-id '+r+' is used by both '+rid[r].name+' and '+d.name+
+                    '. Adjacencies between them will not form.', d.id, d.ospf.line);
+    rid[r]=d;
+  }
+
+  for(const k in subnets){
+    const sn=subnets[k];
+    for(let x=0;x<sn.members.length;x++) for(let y=x+1;y<sn.members.length;y++){
+      const a=sn.members[x], b=sn.members[y];
+      if(a.dev===b.dev) continue;
+
+      if(a.dev.ospf && b.dev.ospf && inOspf(a.dev,a.iface) && inOspf(b.dev,b.iface)){
+        const aa=ospfAreaOf(a.dev,a.iface), ba=ospfAreaOf(b.dev,b.iface);
+        if(aa!=null && ba!=null && String(aa)!==String(ba))
+          warn('OSPF area mismatch on '+k+': '+a.dev.name+' '+a.iface.name+' is area '+aa+
+               ' but '+b.dev.name+' '+b.iface.name+' is area '+ba+'. No adjacency will form.', a.dev.id, null);
+        const ah=a.iface.hello, bh=b.iface.hello;
+        if(ah && bh && ah!==bh)
+          warn('OSPF hello interval mismatch on '+k+': '+a.dev.name+' uses '+ah+'s, '+b.dev.name+' uses '+bh+'s.', a.dev.id, null);
+        const ad=a.iface.dead, bd=b.iface.dead;
+        if(ad && bd && ad!==bd)
+          warn('OSPF dead interval mismatch on '+k+': '+a.dev.name+' uses '+ad+'s, '+b.dev.name+' uses '+bd+'s.', a.dev.id, null);
+        if(a.iface.ospfNet && b.iface.ospfNet && a.iface.ospfNet!==b.iface.ospfNet)
+          warn('OSPF network type mismatch on '+k+': '+a.dev.name+' is '+a.iface.ospfNet+
+               ', '+b.dev.name+' is '+b.iface.ospfNet+'.', a.dev.id, null);
+        if(!!a.iface.ospfAuth !== !!b.iface.ospfAuth)
+          warn('OSPF authentication is set on only one side of '+k+' ('+
+               (a.iface.ospfAuth?a.dev.name:b.dev.name)+').', a.dev.id, null);
+        const ap=isPassive(a.dev.ospf,a.iface), bp=isPassive(b.dev.ospf,b.iface);
+        if(ap!==bp || (ap&&bp))
+          warn('OSPF passive-interface on '+k+': '+(ap?a.dev.name+' '+a.iface.name:b.dev.name+' '+b.iface.name)+
+               ' will not form an adjacency across this transit link.', ap?a.dev.id:b.dev.id, null);
+      }
+
+      if(a.dev.eigrp && b.dev.eigrp && inEigrp(a.dev,a.iface) && inEigrp(b.dev,b.iface)){
+        if(a.dev.eigrp.as && b.dev.eigrp.as && a.dev.eigrp.as!==b.dev.eigrp.as)
+          warn('EIGRP AS mismatch on '+k+': '+a.dev.name+' is AS '+a.dev.eigrp.as+
+               ' but '+b.dev.name+' is AS '+b.dev.eigrp.as+'. They will not become neighbours.', a.dev.id, a.dev.eigrp.line);
+        if(a.dev.eigrp.k.join()!==b.dev.eigrp.k.join())
+          warn('EIGRP K value mismatch on '+k+' between '+a.dev.name+' ('+a.dev.eigrp.k.join(' ')+
+               ') and '+b.dev.name+' ('+b.dev.eigrp.k.join(' ')+'). No adjacency will form.', a.dev.id, a.dev.eigrp.line);
+        const ap=isPassive(a.dev.eigrp,a.iface), bp=isPassive(b.dev.eigrp,b.iface);
+        if(ap!==bp || (ap&&bp))
+          warn('EIGRP passive-interface on '+k+': '+(ap?a.dev.name+' '+a.iface.name:b.dev.name+' '+b.iface.name)+
+               ' will not form a neighbour across this transit link.', ap?a.dev.id:b.dev.id, null);
+      }
+    }
+  }
+
+  for(const d of devices){
+    if(d.eigrp && d.eigrp.autoSummary)
+      warn(d.name+': EIGRP auto-summary is on, which advertises classful summaries and commonly '+
+           'black-holes discontiguous subnets.', d.id, d.eigrp.line);
+
+    // an area that never touches the backbone
+    if(d.ospf){
+      const areas=new Set();
+      for(const i of d.interfaces) if(inOspf(d,i)){ const a=ospfAreaOf(d,i); if(a!=null) areas.add(String(a)); }
+      if(areas.size>1 && !areas.has('0') && !areas.has('0.0.0.0'))
+        warn(d.name+' is an OSPF area border router between '+[...areas].join(' and ')+
+             ' but has no interface in area 0. Inter-area routing will not work.', d.id, d.ospf.line);
+    }
+
+    // interfaces with addresses that no network statement covers
+    for(const i of d.interfaces){
+      if(!i.addrs.length || i.shutdown) continue;
+      if(d.ospf && d.ospf.nets.length && !inOspf(d,i) && !i.ospfArea){
+        const anyCovered=d.ospf.nets.length>0;
+        if(anyCovered && i.addrs.some(a=>a.len<32)){
+          // only report transit links, not stubs the user chose to leave out
+          const key=cidr(netOf(i.addrs[0].ip,i.addrs[0].len), i.addrs[0].len);
+          const sn=subnets[key];
+          if(sn && sn.members.length>1 && sn.members.some(m=>m.dev!==d && m.dev.ospf))
+            warn(d.name+': '+i.name+' connects to an OSPF neighbour but no network statement covers '+
+                 key+'.', d.id, i.line);
+        }
+      }
+    }
+  }
+}
+
+/* ============================================================
    Before / after comparison
    ============================================================ */
 
@@ -2861,6 +3434,12 @@ function isModified(d){ return (d.rawText||'') !== (d.originalText==null ? d.raw
 function renderDevList(){
   const ul=document.getElementById('devlist'); ul.innerHTML='';
   document.getElementById('dev-empty').style.display = STATE.devices.length?'none':'block';
+  const cnt=document.getElementById('dev-count');
+  if(cnt){
+    const shown=STATE.devices.filter(d=>d.show!==false).length;
+    cnt.textContent = STATE.devices.length
+      ? '· '+STATE.devices.length+(shown!==STATE.devices.length?' ('+shown+' shown)':'') : '';
+  }
   for(const d of STATE.devices){
     const li=document.createElement('li');
     li.className = (STATE.selected===d.id?'sel':'')+(d.show===false?' off':'');
@@ -3084,6 +3663,7 @@ function routeSummary(s){
 }
 function showLink(a,b){
   STATE.selected=null; renderDevList();
+  openRight();
   const m=STATE.model, r=document.getElementById('result');
   const shared=[];
   for(const k in m.subnets){
@@ -3166,6 +3746,7 @@ function showLink(a,b){
 }
 
 function showSegment(key){
+  openRight();
   const m=STATE.model, sn=m.subnets[key];
   const r=document.getElementById('result');
   if(!sn){
@@ -3238,6 +3819,7 @@ function openLink(a,b,ed){
 /* Report across a chosen set of devices — how they connect to each other and
    what they have in common. */
 function showSelection(devs){
+  openRight();
   const m=STATE.model, r=document.getElementById('result');
   STATE.selected=null; renderDevList();
   if(devs.length<1){
@@ -3343,6 +3925,7 @@ function updateSelBtn(){
 }
 
 function showFind(){
+  openRight();
   const fr=STATE.findResult||{devs:[]};
   const r=document.getElementById('result');
   STATE.selected=null; renderDevList();
@@ -3363,6 +3946,7 @@ function showFind(){
 
 function showDevice(d, opts){
   opts = opts || {};
+  openRight();
   if(STATE.selected !== d.id){ STATE.devTab='overview'; STATE.editingConfig=false; STATE.renaming=false; }
   if(opts.tab) STATE.devTab=opts.tab;
   STATE.selected=d.id;
@@ -3424,6 +4008,60 @@ function showDevice(d, opts){
     '</div>'+
     '<datalist id="wan-names">'+clouds.map(c=>'<option value="'+esc(c.name)+'">').join('')+'</datalist>';
 
+  let bgpHtml='';
+  if(d.bgp){
+    const nbs=Object.values(d.bgp.neighbors);
+    bgpHtml =
+      '<h2 class="sec">BGP</h2>'+
+      '<p class="note" style="margin-top:0">AS '+esc(d.bgp.asn)+
+        (d.bgp.routerId?' · router-id '+esc(d.bgp.routerId):'')+
+        ' · '+nbs.length+' neighbour'+(nbs.length===1?'':'s')+'</p>'+
+      (nbs.length?'<table class="fib"><tr><th>Neighbour</th><th>AS</th><th>Type</th><th>Options</th></tr>'+
+        nbs.map(n=>{
+          const t=!n.remoteAs?'—':(n.remoteAs===d.bgp.asn?'iBGP':'eBGP');
+          const opt=[n.updateSource?'src '+n.updateSource:'', n.nextHopSelf?'nh-self':'',
+                     n.rrClient?'RR client':'', n.multihop?'multihop':'', n.shutdown?'shutdown':'']
+                     .filter(Boolean).join(', ');
+          return '<tr><td>'+esc(n.ipStr)+'</td><td>'+esc(n.remoteAs||'—')+'</td>'+
+                 '<td>'+t+'</td><td>'+esc(opt||'—')+'</td></tr>';
+        }).join('')+'</table>':'')+
+      (d.bgp.networks.length?'<div class="cfgpane-label"><span>advertised networks</span><span>'+
+        d.bgp.networks.length+'</span></div><table class="fib">'+
+        d.bgp.networks.map(n=>'<tr><td>'+cidr(n.net,n.len)+'</td></tr>').join('')+'</table>':'')+
+      '<textarea class="rt-paste" id="bgp-paste" placeholder="Paste show ip bgp to work out the best path"></textarea>'+
+      '<div class="btn-row" style="margin-top:8px">'+
+        '<button class="btn" id="bgp-import">Import BGP table</button>'+
+        '<button class="btn" id="bgp-file-btn">From file</button>'+
+        ((d.bgpTable&&d.bgpTable.length)?'<button class="btn danger" id="bgp-clear">Delete table</button>':'')+
+      '</div>'+
+      '<input type="file" id="bgp-file" class="hidden" accept=".txt,.log,.out">';
+
+    if(d.bgpTable && d.bgpTable.length){
+      const byPfx={};
+      for(const pth of d.bgpTable) (byPfx[cidr(pth.net,pth.len)]=byPfx[cidr(pth.net,pth.len)]||[]).push(pth);
+      const keys=Object.keys(byPfx).sort();
+      bgpHtml+='<div class="cfgpane-label"><span>best path</span><span>'+keys.length+' prefixes</span></div>';
+      for(const k of keys.slice(0,60)){
+        const paths=byPfx[k];
+        const res=bgpBestPath(paths);
+        const agree = res && paths.some(p=>p.best) ? (res.best.best===true) : null;
+        bgpHtml+='<div class="cfgpane-label"><span>'+esc(k)+'</span><span>'+
+          (res?esc(res.reason):'')+(agree===false?' <span class="tag deny">differs from device</span>':'')+'</span></div>'+
+          '<table class="fib"><tr><th>Next hop</th><th>W</th><th>LP</th><th>MED</th><th>AS path</th><th></th></tr>'+
+          paths.map(pth=>'<tr><td>'+esc(pth.nextHopStr)+'</td><td>'+pth.weight+'</td>'+
+            '<td>'+pth.localPref+'</td><td>'+(pth.med==null?'—':pth.med)+'</td>'+
+            '<td>'+(pth.asPath.join(' ')||'—')+' '+pth.origin+'</td>'+
+            '<td>'+(res&&res.best===pth?'<span class="tag allow">best</span>':
+                    (pth.best?'<span class="tag igp">device</span>':''))+'</td></tr>').join('')+
+          '</table>';
+      }
+      if(keys.length>60) bgpHtml+='<p class="note">Showing 60 of '+keys.length+' prefixes.</p>';
+      bgpHtml+='<p class="note">Selection follows Cisco order: weight, local preference, locally originated, '+
+        'AS path length, origin, MED, eBGP over iBGP, then lowest neighbour address. IGP metric to the next hop '+
+        'and route age are not compared.</p>';
+    }
+  }
+
   const l2ports = d.interfaces.filter(i=>i.l2);
   const vlanIds = Object.keys(d.vlans||{}).map(Number).sort((a,b)=>a-b);
   const rep = (STATE.model && STATE.model.vlanReport) || {};
@@ -3480,6 +4118,7 @@ function showDevice(d, opts){
     '<h2 class="sec">Routes in use</h2><table class="fib"><tr><th>Prefix</th><th>Via</th><th>Source</th><th>VRF</th></tr>'+rows+'</table>'+
     rowsMore+
     stubHtml+
+    bgpHtml+
     wanHtml+
     l2Html;
 
@@ -3659,6 +4298,36 @@ function showDevice(d, opts){
     d.neighbors=[]; refresh();
   };
 
+  const bgpImp=document.getElementById('bgp-import');
+  if(bgpImp) bgpImp.onclick=()=>{
+    const box=document.getElementById('bgp-paste');
+    const got=parseBgpTable(box.value);
+    if(!got.length){ box.style.borderColor='var(--red)'; return; }
+    d.bgpTable=(d.bgpTable||[]).concat(got);
+    refresh();
+  };
+  const bgpFileBtn=document.getElementById('bgp-file-btn'), bgpFile=document.getElementById('bgp-file');
+  if(bgpFileBtn && bgpFile){
+    bgpFileBtn.onclick=()=>bgpFile.click();
+    bgpFile.onchange=()=>{
+      const f=bgpFile.files[0]; if(!f) return;
+      const rd=new FileReader();
+      rd.onload=()=>{
+        const got=parseBgpTable(rd.result);
+        if(!got.length){
+          document.getElementById('bgp-paste').value=String(rd.result).slice(0,4000);
+          document.getElementById('bgp-paste').style.borderColor='var(--red)';
+          return;
+        }
+        d.bgpTable=(d.bgpTable||[]).concat(got);
+        refresh();
+      };
+      rd.readAsText(f); bgpFile.value='';
+    };
+  }
+  const bgpClr=document.getElementById('bgp-clear');
+  if(bgpClr) bgpClr.onclick=()=>{ d.bgpTable=[]; refresh(); };
+
   const wanAdd=document.getElementById('wan-add');
   if(wanAdd) wanAdd.onclick=()=>{
     const nameEl=document.getElementById('wan-name');
@@ -3709,7 +4378,8 @@ function hopsHtml(res){
     if(h.route){
       html+='<div class="hop-line">'+cidr(h.route.net,h.route.len)+
             ' via <span>'+(h.route.nextHop!=null?int2ip(h.route.nextHop):(h.route.iface||'connected'))+'</span>'+
-            '<span class="tag '+h.route.type+'">'+h.route.type+'</span>'+
+            '<span class="tag '+h.route.type+'">'+h.route.type+
+              (h.route.metric!=null?' '+h.route.metric:'')+'</span>'+
             (h.route.vrf && h.route.vrf!=='default' ? '<span class="tag igp">vrf '+esc(h.route.vrf)+'</span>':'')+
             '</div>';
     }
@@ -3745,6 +4415,7 @@ function pinHtml(pin, idAttr){
 }
 
 function showCompare(b, a){
+  openRight();
   const r=document.getElementById('result');
   if(b.error||a.error){
     r.innerHTML='<div class="verdict bad"><b>Cannot trace</b><p>'+esc(b.error||a.error)+'</p></div><div id="warnbox"></div>';
@@ -3778,6 +4449,7 @@ function showCompare(b, a){
 
 function showTrace(res, opts){
   opts = opts || {};
+  openRight();
   const r=document.getElementById('result');
   if(res.error){
     r.innerHTML='<div class="verdict bad"><b>Cannot trace</b><p>'+esc(res.error)+'</p></div><div id="warnbox"></div>';
@@ -3829,6 +4501,8 @@ document.getElementById('add-paste').onclick=()=>{
 document.getElementById('opt-view').onchange=()=>{ render(); autosave(); };
 document.getElementById('opt-select').onchange=()=>{ render(); updateSelBtn(); };
 document.getElementById('opt-nolinks').onchange=()=>{ render(); autosave(); };
+document.getElementById('opt-layer').onchange=()=>{ render(); autosave(); };
+document.getElementById('proj-name').addEventListener('input',()=>autosave());
 document.getElementById('rot-l').onclick=()=>rotateView(-15);
 document.getElementById('rot-r').onclick=()=>rotateView(15);
 document.getElementById('grp-add').onclick=()=>{
@@ -3928,6 +4602,71 @@ document.getElementById('run').onclick=()=>{
 }));
 
 /* ============================================================
+   Panel sizing — drag the gutters, or collapse a panel entirely
+   ============================================================ */
+const PANEL={left:290, right:400, leftMin:200, rightMin:280, max:640};
+STATE.ui = STATE.ui || {left:PANEL.left, right:PANEL.right, leftOpen:true, rightOpen:true};
+
+function applyPanels(){
+  const u=STATE.ui;
+  document.documentElement.style.setProperty('--left',  (u.leftOpen  ? u.left  : 0)+'px');
+  document.documentElement.style.setProperty('--right', (u.rightOpen ? u.right : 0)+'px');
+  const l=document.getElementById('tog-l'), r=document.getElementById('tog-r');
+  if(l){ l.textContent = u.leftOpen?'‹':'›'; l.title = (u.leftOpen?'Hide':'Show')+' the left panel'; }
+  if(r){ r.textContent = u.rightOpen?'›':'‹'; r.title = (u.rightOpen?'Hide':'Show')+' the right panel'; }
+  if(STATE.cy) STATE.cy.resize();
+}
+function openRight(){
+  if(STATE.ui.rightOpen) return;
+  STATE.ui.rightOpen=true; applyPanels(); autosave();
+}
+
+function initPanels(){
+  applyPanels();
+  const drag=(gutterId, side)=>{
+    const g=document.getElementById(gutterId);
+    if(!g) return;
+    g.addEventListener('mousedown', ev=>{
+      if(ev.target.classList.contains('pan-toggle')) return;   // the button is not a handle
+      ev.preventDefault();
+      const startX=ev.clientX;
+      const start=STATE.ui[side];
+      if(!STATE.ui[side+'Open']){ STATE.ui[side+'Open']=true; }
+      g.classList.add('dragging');
+      document.body.classList.add('resizing');
+      let raf=null;
+      const move=(e)=>{
+        const delta = side==='left' ? (e.clientX-startX) : (startX-e.clientX);
+        const min = side==='left' ? PANEL.leftMin : PANEL.rightMin;
+        STATE.ui[side]=Math.max(min, Math.min(PANEL.max, start+delta));
+        if(!raf) raf=requestAnimationFrame(()=>{ raf=null; applyPanels(); });
+      };
+      const up=()=>{
+        window.removeEventListener('mousemove',move);
+        window.removeEventListener('mouseup',up);
+        g.classList.remove('dragging');
+        document.body.classList.remove('resizing');
+        applyPanels(); autosave();
+      };
+      window.addEventListener('mousemove',move);
+      window.addEventListener('mouseup',up);
+    });
+    // double-click the gutter to reset that panel
+    g.addEventListener('dblclick', ev=>{
+      if(ev.target.classList.contains('pan-toggle')) return;
+      STATE.ui[side]= side==='left'?PANEL.left:PANEL.right;
+      STATE.ui[side+'Open']=true;
+      applyPanels(); autosave();
+    });
+  };
+  drag('gut-l','left');
+  drag('gut-r','right');
+  document.getElementById('tog-l').onclick=()=>{ STATE.ui.leftOpen=!STATE.ui.leftOpen; applyPanels(); autosave(); };
+  document.getElementById('tog-r').onclick=()=>{ STATE.ui.rightOpen=!STATE.ui.rightOpen; applyPanels(); autosave(); };
+  window.addEventListener('resize', ()=>{ if(STATE.cy) STATE.cy.resize(); });
+}
+
+/* ============================================================
    Save, restore, layout memory
    ============================================================ */
 const LS_KEY='netpath.session.v1';
@@ -3965,8 +4704,11 @@ function projectObject(){
           igp:document.getElementById('opt-igp').checked},
     trace:{src:document.getElementById('src').value, dst:document.getElementById('dst').value},
     positions:STATE.positions,
+    name:(document.getElementById('proj-name').value||'').trim(),
+    ui:STATE.ui,
     clouds:STATE.clouds||[],
     groups:groups(),
+    layer:document.getElementById('opt-layer').value,
     nolinks:document.getElementById('opt-nolinks').checked,
     providers:(STATE.providers||[]).map(p=>({name:p.name, patterns:p.patterns})),
     cloudOpts:STATE.cloudOpts||{},
@@ -3978,6 +4720,7 @@ function projectObject(){
       show: d.show!==false,
       group: d.groupId||null,
       nbrs: d.neighbors||[],
+      bgp: d.bgpTable||[],
       auth:d.tableAuthoritative,
       routes:d.manualRoutes.map(r=>({p:cidr(r.net,r.len),
         nh:r.nextHop!=null?int2ip(r.nextHop):null, i:r.iface||null, ad:r.ad, vrf:r.vrf}))
@@ -3992,6 +4735,10 @@ function loadProject(obj){
     if(k.indexOf('|')<0 && !STATE.positions['simple|'+k]) STATE.positions['simple|'+k]=STATE.positions[k];
   STATE.clouds = Array.isArray(obj.clouds) ? obj.clouds : [];
   STATE.groups = Array.isArray(obj.groups) ? obj.groups : [];
+  if(obj.ui) STATE.ui=Object.assign({left:290,right:400,leftOpen:true,rightOpen:true}, obj.ui);
+  applyPanels();
+  document.getElementById('proj-name').value = obj.name || '';
+  if(obj.layer) document.getElementById('opt-layer').value = obj.layer;
   for(const g of STATE.groups){ const n=parseInt(String(g.id).replace(/\D/g,''),10); if(n>grpSeq) grpSeq=n; }
   if(obj.nolinks!=null) document.getElementById('opt-nolinks').checked=!!obj.nolinks;
   STATE.providers = Array.isArray(obj.providers) && obj.providers.length
@@ -4007,6 +4754,7 @@ function loadProject(obj){
     d.show = pd.show!==false;
     d.groupId = pd.group||null;
     d.neighbors = Array.isArray(pd.nbrs) ? pd.nbrs : [];
+    d.bgpTable = Array.isArray(pd.bgp) ? pd.bgp : [];
     d.originalText = pd.otext!=null ? pd.otext : (pd.text||'');
     d.tableAuthoritative=!!pd.auth;
     d.manualRoutes=(pd.routes||[]).map(x=>{
@@ -4053,7 +4801,9 @@ document.getElementById('save-proj').onclick=()=>{
   const blob=new Blob([JSON.stringify(projectObject(),null,2)],{type:'application/json'});
   const a=document.createElement('a');
   a.href=URL.createObjectURL(blob);
-  a.download='netpath-'+new Date().toISOString().slice(0,10)+'.json';
+  const nm=(document.getElementById('proj-name').value||'').trim()
+    .replace(/[^\w .-]+/g,'').replace(/\s+/g,'-');
+  a.download=(nm||'netpath')+'-'+new Date().toISOString().slice(0,10)+'.json';
   a.click();
   setTimeout(()=>URL.revokeObjectURL(a.href),2000);
 };
@@ -4154,6 +4904,7 @@ if(typeof cytoscape==='undefined'){
     '<strong>The drawing library did not load</strong><span>NetPath pulls Cytoscape.js from a CDN. '+
     'Connect to the internet once, or download cytoscape.min.js next to this file and point the script tag at it.</span>';
 }
+initPanels();
 if(!restore()) rebuild();
 </script>
 </body>
