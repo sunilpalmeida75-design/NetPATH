@@ -367,11 +367,15 @@ table.fib td:first-child{color:var(--ink)}
         <label>Zone box <input type="color" id="th-zoneBg"></label>
         <label>Zone text <input type="color" id="th-zoneText"></label>
       </div>
+      <div class="btn-row" style="margin-top:0;margin-bottom:8px">
+        <button class="btn tiny" id="th-dark">Dark</button>
+        <button class="btn tiny" id="th-visio">Visio white</button>
+      </div>
       <label class="auth" style="margin-top:8px"><input type="checkbox" id="th-canvasGrid">
         <span>Dotted grid on the canvas</span></label>
       <label class="auth"><input type="checkbox" id="th-zoneGrid">
         <span>Dotted grid inside zone and site boxes</span></label>
-      <button class="btn tiny" id="th-reset" style="margin-top:8px">Reset to default</button>
+      <button class="btn tiny" id="th-reset" style="margin-top:8px">Reset all colours</button>
 
       <h2 class="sec">Providers</h2>
       <label class="auth" style="margin-top:0"><input type="checkbox" id="opt-autowan" checked>
@@ -1151,25 +1155,29 @@ function panTokens(text){
   }
   return out;
 }
-function panParseBlock(tk, i, node){
+function panParseBlock(tk, i, node, depth){
+  depth = depth || 0;
   while(i<tk.length){
-    if(tk[i].t==='}') return i+1;
+    if(tk[i].t==='}'){
+      if(depth>0) return i+1;
+      i++; continue;        // a fragment can open with a stray close — keep going
+    }
     const name=tk[i].t, line=tk[i].line; i++;
     if(i<tk.length && tk[i].t==='{'){
       const child={vals:[], kids:{}, line};
-      i=panParseBlock(tk, i+1, child);
+      i=panParseBlock(tk, i+1, child, depth+1);
       (node.kids[name]=node.kids[name]||[]).push(child);
     } else if(i<tk.length && tk[i].t===';'){
       node.vals.push(name); i++;                       // a bare list member
     } else {
       const vals=[];
-      while(i<tk.length && tk[i].t!==';' && tk[i].t!=='{'){ vals.push(tk[i].t); i++; }
+      while(i<tk.length && tk[i].t!==';' && tk[i].t!=='{' && tk[i].t!=='}'){ vals.push(tk[i].t); i++; }
       if(i<tk.length && tk[i].t==='{'){
         const child={vals:vals.slice(), kids:{}, line};
-        i=panParseBlock(tk, i+1, child);
+        i=panParseBlock(tk, i+1, child, depth+1);
         (node.kids[name]=node.kids[name]||[]).push(child);
       } else {
-        i++;                                            // consume the ;
+        if(i<tk.length && tk[i].t===';') i++;           // consume the ;
         (node.kids[name]=node.kids[name]||[]).push({vals, kids:{}, line});
       }
     }
@@ -1211,6 +1219,13 @@ function pIps(node){
   return out;
 }
 
+/* Walk every node in the tree, calling back with each key and its block. */
+function panWalk(node, cb){
+  for(const k in node.kids)
+    for(const n of node.kids[k]){ cb(k, n); panWalk(n, cb); }
+}
+const PAN_IFNAME=/^(ethernet\d+\/\d+(\.\d+)?|ae\d+(\.\d+)?|vlan(\.\d+)?|loopback(\.\d+)?|tunnel(\.\d+)?)$/i;
+
 function parsePanCurly(text, fname){
   const dev=newDevice('palo-alto', fname);
   const root=panRoot(text);
@@ -1224,107 +1239,106 @@ function parsePanCurly(text, fname){
   }
   function addIp(name, val, line){
     const c=parseCidr(val);
-    if(c) iface(name, line).addrs.push({ip:c.ip, len:c.len, line});
-    else if(ip2int(val)!==null) iface(name, line).addrs.push({ip:ip2int(val), len:32, line});
+    const i=iface(name, line);
+    const ip = c ? c.ip : ip2int(val);
+    const len = c ? c.len : 32;
+    if(ip===null) return;
+    if(i.addrs.some(a=>a.ip===ip && a.len===len)) return;   // exports often repeat
+    i.addrs.push({ip, len, line});
   }
 
+  panWalk(root, (key, node)=>{
+    if(key==='hostname' && node.vals.length && !dev.name) dev.name=node.vals[0];
+  });
   const sys=pKid(root,'deviceconfig','system');
   if(sys && pVal(sys,'hostname')) dev.name=pVal(sys,'hostname');
 
-  // interfaces, including sub-interfaces and their 802.1q tags
-  const netNode=pKid(root,'network');
-  const ifRoot=pKid(netNode||root,'interface');
-  for(const type of ['ethernet','aggregate-ethernet']){
-    for(const e of pEntries(pKid(ifRoot,type))){
-      const l3=pKid(e.node,'layer3');
-      if(!l3) continue;
-      for(const v of pIps(l3)) addIp(e.name, v, e.node.line);
-      if(pVal(l3,'comment')) iface(e.name, e.node.line).desc=pVal(l3,'comment');
-      for(const u of pEntries(pKid(l3,'units'))){
-        for(const v of pIps(u.node)) addIp(u.name, v, u.node.line);
-        const tag=pVal(u.node,'tag');
-        if(tag) iface(u.name, u.node.line).vlanTag=parseInt(tag,10);
-        if(pVal(u.node,'comment')) iface(u.name, u.node.line).desc=pVal(u.node,'comment');
-      }
-    }
-  }
-  for(const type of ['vlan','loopback','tunnel']){
-    const t=pKid(ifRoot,type);
-    if(!t) continue;
-    for(const v of pIps(t)) addIp(type, v, t.line);
-    for(const u of pEntries(pKid(t,'units'))){
-      for(const v of pIps(u.node)) addIp(u.name, v, u.node.line);
-      const tag=pVal(u.node,'tag');
-      if(tag) iface(u.name, u.node.line).vlanTag=parseInt(tag,10);
-    }
-  }
+  /* Interfaces are matched by name wherever they appear, so a config fragment
+     that starts partway down the tree still parses. The address may sit
+     directly under the interface or under its layer3 block. */
+  panWalk(root, (key, node)=>{
+    if(!PAN_IFNAME.test(key)) return;
+    const l3=pKid(node,'layer3');
+    for(const v of pIps(node)) addIp(key, v, node.line);
+    if(l3) for(const v of pIps(l3)) addIp(key, v, node.line);
+    const tag=pVal(node,'tag');
+    if(tag && /^\d+$/.test(tag)) iface(key, node.line).vlanTag=parseInt(tag,10);
+    const c=pVal(node,'comment') || (l3 && pVal(l3,'comment'));
+    if(c) iface(key, node.line).desc=c;
+  });
 
-  // zones live under vsys, and sometimes at the top level
-  const zoneRoots=[];
-  for(const v of pEntries(pKid(root,'vsys'))) { const z=pKid(v.node,'zone'); if(z) zoneRoots.push(z); }
-  if(pKid(root,'zone')) zoneRoots.push(pKid(root,'zone'));
-  for(const zr of zoneRoots){
-    for(const z of pEntries(zr)){
+  // zones, wherever the zone block sits
+  panWalk(root, (key, node)=>{
+    if(key!=='zone') return;
+    for(const z of pEntries(node)){
       const l3=pKid(z.node,'network','layer3');
       if(!l3) continue;
       dev.zones.add(z.name);
       for(const m of l3.vals) iface(m, z.node.line).zone=z.name;
       for(const m of pEntries(l3)) iface(m.name, z.node.line).zone=z.name;
     }
-  }
+  });
 
-  // virtual routers, their member interfaces and static routes
-  for(const vr of pEntries(pKid(netNode||root,'virtual-router'))){
-    dev.vrs.add(vr.name);
-    const ifs=pKid(vr.node,'interface');
-    if(ifs){
-      for(const m of ifs.vals) iface(m, vr.node.line).vrf=vr.name;
-      for(const m of pEntries(ifs)) iface(m.name, vr.node.line).vrf=vr.name;
+  // virtual routers and their static routes
+  panWalk(root, (key, node)=>{
+    if(key!=='virtual-router') return;
+    for(const vr of pEntries(node)){
+      dev.vrs.add(vr.name);
+      const ifs=pKid(vr.node,'interface');
+      if(ifs){
+        for(const m of ifs.vals) iface(m, vr.node.line).vrf=vr.name;
+        for(const m of pEntries(ifs)) iface(m.name, vr.node.line).vrf=vr.name;
+      }
+      if(pKid(vr.node,'protocol','ospf') || pKid(vr.node,'protocol','bgp')) dev.dynamic=true;
+      const srRoot = pKid(vr.node,'routing-table','ip','static-route') || pKid(vr.node,'static-route');
+      for(const sr of pEntries(srRoot)){
+        const c=parseCidr(pVal(sr.node,'destination')||'');
+        if(!c) continue;
+        const nhNode=pKid(sr.node,'nexthop');
+        const nh=nhNode ? pVal(nhNode,'ip-address') : null;
+        const met=pVal(sr.node,'metric');
+        dev.statics.push({
+          vrf:vr.name, net:c.net, len:c.len,
+          nextHop: nh ? ip2int(nh) : null,
+          iface: pVal(sr.node,'interface'),
+          ad: met ? (parseInt(met,10)||10) : 10,
+          name: sr.name, line: sr.node.line
+        });
+      }
     }
-    if(pKid(vr.node,'protocol','ospf') || pKid(vr.node,'protocol','bgp')) dev.dynamic=true;
-    const srRoot = pKid(vr.node,'routing-table','ip','static-route') || pKid(vr.node,'static-route');
-    for(const sr of pEntries(srRoot)){
-      const c=parseCidr(pVal(sr.node,'destination')||'');
-      if(!c) continue;
-      const nhNode=pKid(sr.node,'nexthop');
-      const nh=nhNode ? pVal(nhNode,'ip-address') : null;
-      const met=pVal(sr.node,'metric');
-      dev.statics.push({
-        vrf:vr.name, net:c.net, len:c.len,
-        nextHop: nh ? ip2int(nh) : null,
-        iface: pVal(sr.node,'interface'),
-        ad: met ? (parseInt(met,10)||10) : 10,
-        name: sr.name, line: sr.node.line
+  });
+
+  // address objects
+  panWalk(root, (key, node)=>{
+    if(key!=='address') return;
+    for(const a of pEntries(node)){
+      const v=pVal(a.node,'ip-netmask')||pVal(a.node,'ip-range');
+      if(v) dev.addrObjects[a.name]=v;
+    }
+  });
+
+  // security rules
+  let order=0;
+  panWalk(root, (key, node)=>{
+    if(key!=='rules') return;
+    for(const r of pEntries(node)){
+      const list=(k)=>{
+        const n=pKid(r.node,k);
+        if(!n) return ['any'];
+        const out=n.vals.slice();
+        for(const e of pEntries(n)) out.push(e.name);
+        return out.length?out:['any'];
+      };
+      if(dev.rules.some(x=>x.name===r.name)) continue;
+      dev.rules.push({
+        name:r.name, from:list('from'), to:list('to'),
+        source:list('source'), destination:list('destination'),
+        action: pVal(r.node,'action') || 'allow',
+        disabled: /^yes$/i.test(pVal(r.node,'disabled')||''),
+        order:order++, firstLine:r.node.line, actionLine:r.node.line
       });
     }
-  }
-
-  // address objects and security rules
-  const addrRoots=[pKid(root,'address')];
-  for(const v of pEntries(pKid(root,'vsys'))) addrRoots.push(pKid(v.node,'address'));
-  for(const ar of addrRoots) for(const a of pEntries(ar)){
-    const v=pVal(a.node,'ip-netmask')||pVal(a.node,'ip-range');
-    if(v) dev.addrObjects[a.name]=v;
-  }
-  const ruleRoots=[pKid(root,'rulebase','security','rules')];
-  for(const v of pEntries(pKid(root,'vsys'))) ruleRoots.push(pKid(v.node,'rulebase','security','rules'));
-  let order=0;
-  for(const rr of ruleRoots) for(const r of pEntries(rr)){
-    const list=(key)=>{
-      const n=pKid(r.node,key);
-      if(!n) return ['any'];
-      const out=n.vals.slice();
-      for(const e of pEntries(n)) out.push(e.name);
-      return out.length?out:['any'];
-    };
-    dev.rules.push({
-      name:r.name, from:list('from'), to:list('to'),
-      source:list('source'), destination:list('destination'),
-      action: pVal(r.node,'action') || 'allow',
-      disabled: /^yes$/i.test(pVal(r.node,'disabled')||''),
-      order:order++, firstLine:r.node.line, actionLine:r.node.line
-    });
-  }
+  });
 
   let usedFallbackName=false;
   if(!dev.name){ dev.name=fname.replace(/\.[^.]+$/,'') || ('firewall-'+(++devSeq)); usedFallbackName=true; }
@@ -2125,6 +2139,12 @@ const THEME_DEFAULT={
   zoneBg:'#16202e', zoneText:'#7f93aa', zoneGrid:false,
   netText:'#4fc3d9', linkText:'#61799a'
 };
+const THEME_VISIO={
+  canvasBg:'#ffffff', canvasGrid:true,
+  devBg:'#eef3fa', devText:'#1f2b3a',
+  zoneBg:'#f4f6f9', zoneText:'#5a6b80', zoneGrid:false,
+  netText:'#1f6fb2', linkText:'#4a5b6e'
+};
 STATE.theme = Object.assign({}, THEME_DEFAULT);
 function TH(k){ return (STATE.theme && STATE.theme[k]) || THEME_DEFAULT[k]; }
 
@@ -2149,9 +2169,21 @@ function zoneColor(g){
   return {bg, fg, bd:shade(bg,0.28)};
 }
 
+/* 0 = black, 1 = white */
+function luminance(hex){
+  const h=String(hex||'').replace('#','');
+  if(h.length!==6) return 0;
+  const n=parseInt(h,16);
+  return (0.2126*((n>>16)&255) + 0.7152*((n>>8)&255) + 0.0722*(n&255))/255;
+}
+/* The grid has to be visible against its own background, so lighten a dark
+   canvas and darken a light one rather than nudging by a fixed amount. */
+function gridColor(bg){
+  return luminance(bg) > 0.5 ? shade(bg, -0.22) : shade(bg, 0.42);
+}
 function stageBackground(){
   return TH('canvasGrid')
-    ? 'radial-gradient(circle at 1px 1px, '+shade(TH('canvasBg'),0.10)+' 1px, transparent 0) 0 0/26px 26px, '+TH('canvasBg')
+    ? 'radial-gradient(circle at 1px 1px, '+gridColor(TH('canvasBg'))+' 1.4px, transparent 0) 0 0/26px 26px, '+TH('canvasBg')
     : TH('canvasBg');    // solid — no dotted grid, no blending
 }
 function applyTheme(){
@@ -2662,8 +2694,11 @@ function render(){
     // on it. Two members give one link; a shared segment gives a small mesh so
     // every adjacency is still visible without a node in the middle.
     // "transit" keeps that behaviour only for true point-to-point links.
+    const pairOnly = (view==='simple' || view==='sel');   // one bare link per device pair
     const asEdges = devSet.size>=2 && members.length<=8 &&
-      (view==='devices' || view==='simple' || (members.length===2 && devSet.size===2));
+      (view==='devices' || pairOnly || (members.length===2 && devSet.size===2));
+    // the isolated map shows interconnection only — no local segments hanging off a device
+    if(view==='sel' && !asEdges) continue;
 
     if(asEdges){
       for(let i=0;i<members.length;i++){
@@ -2671,7 +2706,7 @@ function render(){
           const a=members[i], b=members[j];
           if(a.dev===b.dev) continue;
           let id;
-          if(view==='simple'){
+          if(pairOnly){
             // one bare link per device pair, however many subnets join them
             const pk=[a.dev.id,b.dev.id].sort().join('|');
             id=pairEdge[pk];
@@ -2713,7 +2748,7 @@ function render(){
   }
 
   // WAN clouds joining sites we cannot see inside
-  if(model.clouds && layer!=='l2'){
+  if(model.clouds && layer!=='l2' && view!=='sel'){
     for(const c of model.clouds){
       const mem=c.members.filter(m=>vis(m.dev));
       if(!mem.length) continue;
@@ -2768,7 +2803,7 @@ function render(){
     for(const k in model.l2links){
       const L=model.l2links[k];
       if(!vis(L.a.dev) || !vis(L.b.dev)) continue;
-      if(view==='simple'){
+      if(view==='simple' || view==='sel'){
         // L3 and L2 are different kinds of connectivity — collapse repeats of
         // each kind to one line, but never let one hide the other.
         const pk=[L.a.dev.id,L.b.dev.id].sort().join('|');
@@ -2788,7 +2823,7 @@ function render(){
   // VLAN correlation: a switch with no CDP/LLDP data still gets placed against
   // the L3 segments its VLANs belong to. Marked inferred — it shows membership,
   // not cabling.
-  if(model.vlanReport && view!=='simple' && layer!=='l3'){
+  if(model.vlanReport && view!=='simple' && view!=='sel' && layer!=='l3'){
     const linked={};
     if(model.l2links) for(const k in model.l2links){
       linked[model.l2links[k].a.dev.id]=true; linked[model.l2links[k].b.dev.id]=true;
@@ -3806,6 +3841,9 @@ function renderGroups(){
     fgIn.style.marginLeft='3px';
     fgIn.onclick=(ev)=>ev.stopPropagation();
     fgIn.oninput=(ev)=>{ ev.stopPropagation(); g.fg=fgIn.value; render(); autosave(); };
+    const rs=document.createElement('button');
+    rs.className='dev-x'; rs.textContent='↺'; rs.title='Use default colours';
+    rs.onclick=(ev)=>{ ev.stopPropagation(); delete g.bg; delete g.fg; renderGroups(); render(); autosave(); };
     const x=document.createElement('button'); x.className='dev-x'; x.textContent='×'; x.title='Remove';
     x.onclick=(ev)=>{
       ev.stopPropagation();
@@ -3815,7 +3853,7 @@ function renderGroups(){
       STATE.groups=groups().filter(z=>!gone.has(z.id));
       rebuild();
     };
-    li.append(nm,bgIn,fgIn,x);
+    li.append(nm,bgIn,fgIn,rs,x);
     li.onclick=()=>{ const el=document.getElementById('grp-name'); el.value=g.name; el.focus(); };
     ul.appendChild(li);
     for(const z of groups().filter(y=>y.parent===g.id)) draw(z,1);
@@ -5263,11 +5301,21 @@ function initTheme(){
     el.checked=!!STATE.theme[k];
     el.onchange=()=>{ STATE.theme[k]=el.checked; applyTheme(); autosave(); };
   }
-  document.getElementById('th-reset').onclick=()=>{
-    STATE.theme=Object.assign({}, THEME_DEFAULT);
+  const applyPreset=(t)=>{
+    STATE.theme=Object.assign({}, t);
     for(const k in map) if(document.getElementById(map[k])) document.getElementById(map[k]).value=STATE.theme[k];
     for(const k in boolMap) if(document.getElementById(boolMap[k])) document.getElementById(boolMap[k]).checked=!!STATE.theme[k];
     applyTheme(); autosave();
+  };
+  document.getElementById('th-dark').onclick=()=>applyPreset(THEME_DEFAULT);
+  document.getElementById('th-visio').onclick=()=>applyPreset(THEME_VISIO);
+  /* Reset clears the per-device and per-zone overrides too, otherwise a box
+     someone recoloured once can never be brought back to the default. */
+  document.getElementById('th-reset').onclick=()=>{
+    for(const d of STATE.devices){ delete d.bg; delete d.fg; }
+    for(const g of groups()){ delete g.bg; delete g.fg; }
+    applyPreset(THEME_DEFAULT);
+    renderGroups();
   };
 }
 initPanels();
