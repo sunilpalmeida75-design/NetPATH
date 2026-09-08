@@ -249,6 +249,14 @@ ol.hops li::before{
 .warn.clickable{cursor:pointer}
 .warn.clickable:hover{background:rgba(232,161,58,.06)}
 .devlist-dot{width:6px; height:6px; border-radius:50%; background:var(--amber); flex:none; margin-left:2px}
+.appear-grid{display:grid; grid-template-columns:1fr 1fr; gap:8px 10px}
+.appear-grid label{display:flex; align-items:center; justify-content:space-between; gap:6px;
+  font-size:12px; color:var(--ink-dim)}
+.appear-grid input[type=color]{width:30px; height:22px; border:1px solid var(--rule); border-radius:4px;
+  background:none; padding:0; cursor:pointer}
+.color-row{display:flex; align-items:center; gap:6px; margin-left:6px}
+.color-row input[type=color]{width:20px; height:20px; border:1px solid var(--rule); border-radius:3px;
+  background:none; padding:0; cursor:pointer}
 
 .seg{display:flex; border:1px solid var(--rule); border-radius:5px; overflow:hidden}
 .seg button{flex:1; background:var(--bg); border:none; color:var(--ink-faint); padding:7px 4px; font-size:12.5px}
@@ -349,6 +357,17 @@ table.fib td:first-child{color:var(--ink)}
         <select id="grp-parent"><option value="">as a site</option></select>
         <div class="wide"><button class="btn" id="grp-add" style="width:100%">Add site or zone</button></div>
       </div>
+
+      <h2 class="sec">Appearance</h2>
+      <div class="appear-grid">
+        <label>Canvas <input type="color" id="th-canvasBg"></label>
+        <label>Diagram text <input type="color" id="th-linkText"></label>
+        <label>Device box <input type="color" id="th-devBg"></label>
+        <label>Device text <input type="color" id="th-devText"></label>
+        <label>Zone box <input type="color" id="th-zoneBg"></label>
+        <label>Zone text <input type="color" id="th-zoneText"></label>
+      </div>
+      <button class="btn tiny" id="th-reset" style="margin-top:8px">Reset to default</button>
 
       <h2 class="sec">Providers</h2>
       <label class="auth" style="margin-top:0"><input type="checkbox" id="opt-autowan" checked>
@@ -632,6 +651,9 @@ function parseCisco(text, fname){
         cur.l2=true; cur.native=parseInt(m[1],10); dev.isSwitch=true; return;
       }
       if(/^switchport\s*$/i.test(t)){ cur.l2=true; dev.isSwitch=true; return; }
+      // a bundled member takes its switching config from the port-channel it
+      // joins — CDP/LLDP still reports the physical port, not the bundle
+      if((m=t.match(/^channel-group\s+(\d+)/i))){ cur.channelGroup=parseInt(m[1],10); return; }
 
       if((m=t.match(/^ip(?:v4)?\s+address\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+)/i))){
         const len=mask2len(m[2]); const ip=ip2int(m[1]);
@@ -790,6 +812,12 @@ function parseCisco(text, fname){
   for(const i of dev.interfaces)
     for(const v of (i.vips||[]))
       if(i.vipPrio && i.vipPrio[v.group]!=null) v.prio=i.vipPrio[v.group];
+
+  for(const i of dev.interfaces){
+    if(i.channelGroup==null) continue;
+    const po=dev.interfaces.find(x=>new RegExp('^port-?channel0*'+i.channelGroup+'$','i').test(x.name));
+    if(po) i.poParent=po;
+  }
 
   let usedFallbackName=false;
   if(!dev.name){ dev.name = fname.replace(/\.[^.]+$/,'') || ('device-'+(++devSeq)); usedFallbackName=true; }
@@ -1874,16 +1902,53 @@ function rotateView(deg){
 /* A trunk carries several VLANs and is worth telling apart from an access
    port at a glance. */
 function l2IsTrunk(L){
-  const pa=findPort(L.a.dev,L.a.port), pb=findPort(L.b.dev,L.b.port);
+  const pa=effL2(L.a.dev,L.a.port), pb=effL2(L.b.dev,L.b.port);
   return (pa && pa.mode==='trunk') || (pb && pb.mode==='trunk');
+}
+
+const THEME_DEFAULT={
+  canvasBg:'#0e1621',
+  devBg:'#1c2c3e', devText:'#d3dfec',
+  zoneBg:'#16202e', zoneText:'#7f93aa',
+  netText:'#4fc3d9', linkText:'#61799a'
+};
+STATE.theme = Object.assign({}, THEME_DEFAULT);
+function TH(k){ return (STATE.theme && STATE.theme[k]) || THEME_DEFAULT[k]; }
+
+/* Mix toward white or black to derive a border shade from a background
+   colour, so a custom box colour still reads as a box without a separate
+   border picker. */
+function shade(hex, amt){
+  const h=String(hex||'').replace('#','');
+  if(h.length!==6) return hex;
+  const n=parseInt(h,16);
+  let r=(n>>16)&255, g=(n>>8)&255, b=n&255;
+  const mix=(c)=> amt>0 ? Math.round(c+(255-c)*amt) : Math.round(c*(1+amt));
+  r=Math.max(0,Math.min(255,mix(r))); g=Math.max(0,Math.min(255,mix(g))); b=Math.max(0,Math.min(255,mix(b)));
+  return '#'+[r,g,b].map(x=>x.toString(16).padStart(2,'0')).join('');
+}
+function deviceColor(d){
+  const bg=(d&&d.bg)||TH('devBg'), fg=(d&&d.fg)||TH('devText');
+  return {bg, fg, bd:shade(bg,0.28)};
+}
+function zoneColor(g){
+  const bg=(g&&g.bg)||TH('zoneBg'), fg=(g&&g.fg)||TH('zoneText');
+  return {bg, fg, bd:shade(bg,0.28)};
+}
+
+function applyTheme(){
+  const st=document.querySelector('.stage');
+  if(st) st.style.background =
+    'radial-gradient(circle at 1px 1px, '+shade(TH('canvasBg'),0.10)+' 1px, transparent 0) 0 0/26px 26px, '+TH('canvasBg');
+  render();   // device/zone colours are baked into element data, so a full re-render picks up new defaults
 }
 
 function graphStyle(){
   return [
       {selector:'node[kind="device"]', style:{
         'shape':'round-rectangle','width':'data(w)','height':'data(h)',
-        'background-color':'#1c2c3e','border-width':2,'border-color':'#3a5273',
-        'label':'data(label)','color':'#d3dfec','font-family':'IBM Plex Mono, monospace',
+        'background-color':'data(bg)','border-width':2,'border-color':'data(bd)',
+        'label':'data(label)','color':'data(fg)','font-family':'IBM Plex Mono, monospace',
         'font-size':13,'font-weight':600,'text-valign':'center','text-halign':'center',
         'text-wrap':'wrap'
       }},
@@ -1900,18 +1965,18 @@ function graphStyle(){
       {selector:'node[kind="subnet"]', style:{
         'shape':'round-rectangle','width':'data(w)','height':'data(h)',
         'background-opacity':0,'border-width':0,
-        'label':'data(label)','color':'#4fc3d9','font-family':'IBM Plex Mono, monospace',
+        'label':'data(label)','color':TH('netText'),'font-family':'IBM Plex Mono, monospace',
         'font-size':11,'text-valign':'center','text-halign':'center','text-wrap':'wrap',
-        'text-background-color':'#0e1621','text-background-opacity':0.92,'text-background-padding':3
+        'text-background-color':TH('canvasBg'),'text-background-opacity':0.92,'text-background-padding':3
       }},
       {selector:'edge', style:{
         'width':1.4,'line-color':'#33485f','curve-style':'bezier',
         'label':'data(label)','color':'#61799a','font-size':9
       }},
-      {selector:'edge', style:{'color':'#61799a','font-family':'IBM Plex Mono, monospace',
-        'text-wrap':'wrap','text-background-color':'#0e1621','text-background-opacity':0.85,'text-background-padding':2}},
+      {selector:'edge', style:{'color':TH('linkText'),'font-family':'IBM Plex Mono, monospace',
+        'text-wrap':'wrap','text-background-color':TH('canvasBg'),'text-background-opacity':0.85,'text-background-padding':2}},
       {selector:'edge[meta = 1]', style:{'color':'#7fd4a8','font-size':9.5}},
-      {selector:'.hot', style:{'line-color':'#e8a13a','width':3,'color':'#e8a13a','z-index':20,
+      {selector:'edge.hot', style:{'line-color':'#e8a13a','width':3,'color':'#e8a13a','z-index':20,
         'line-style':'dashed','line-dash-pattern':[7,6]}},
       {selector:'edge.fwd', style:{'mid-target-arrow-shape':'triangle','mid-target-arrow-color':'#e8a13a','arrow-scale':0.85}},
       {selector:'edge.rev', style:{'mid-source-arrow-shape':'triangle','mid-source-arrow-color':'#e8a13a','arrow-scale':0.85}},
@@ -1932,18 +1997,18 @@ function graphStyle(){
         'width':11,'height':11,'shape':'ellipse','background-color':'#ffc766',
         'border-width':3,'border-color':'rgba(232,161,58,.28)','z-index':40,'events':'no','label':''}},
       {selector:'node[kind="group"]', style:{
-        'shape':'round-rectangle','background-color':'#16202e','background-opacity':0.55,
-        'border-width':1,'border-color':'#33485f','border-style':'dashed','padding':'26px',
-        'label':'data(label)','color':'#7f93aa','font-family':'Inter, system-ui, sans-serif',
+        'shape':'round-rectangle','background-color':'data(bg)','background-opacity':0.55,
+        'border-width':1,'border-color':'data(bd)','border-style':'dashed','padding':'26px',
+        'label':'data(label)','color':'data(fg)','font-family':'Inter, system-ui, sans-serif',
         'font-size':12,'font-weight':600,'text-valign':'top','text-halign':'center',
         'text-margin-y':-6,'z-index':0}},
-      {selector:'node[gkind="site"]', style:{'border-color':'#4a6b8a','background-opacity':0.35}},
+      {selector:'node[gkind="site"]', style:{'background-opacity':0.35}},
       {selector:'edge[kind="ha"]', style:{
         'line-color':'#8a6a2e','line-style':'dotted','width':2,'curve-style':'bezier',
         'color':'#c49a4e','font-size':9,'text-wrap':'wrap','z-index':2}},
       {selector:'node[kind="group"].hot', style:{
-        'border-color':'#33485f','border-width':1,'color':'#7f93aa','background-opacity':0.55}},
-      {selector:'node[gkind="site"].hot', style:{'border-color':'#4a6b8a','background-opacity':0.35}},
+        'border-width':1,'background-opacity':0.55}},
+      {selector:'node[gkind="site"].hot', style:{'background-opacity':0.35}},
       {selector:'node[kind="group"].drop', style:{'border-color':'#33485f','color':'#7f93aa'}},
       {selector:'node[picked = 1]', style:{'border-color':'#4fc3d9','color':'#8fdcec'}},
       {selector:'node.hot', style:{'border-color':'#e8a13a','color':'#f0b256'}},
@@ -2001,8 +2066,9 @@ function render(){
         let g=groupById(d.groupId);
         while(g){ pathGroups.add(g.id); g = g.parent ? groupById(g.parent) : null; }
       }
+      const dc=deviceColor(d);
       els.push({data:{id:d.id, label:d.name, kind:'device', vendor:d.vendor,
-                      role:d.isSwitch?'switch':'router',
+                      role:d.isSwitch?'switch':'router', bg:dc.bg, fg:dc.fg, bd:dc.bd,
                       parent: d.groupId ? 'g_'+d.groupId : undefined}});
     };
     const netOfIface=(ifc)=>{
@@ -2078,8 +2144,9 @@ function render(){
     // sites and zones the path passes through
     for(const g of groups()){
       if(!pathGroups.has(g.id)) continue;
+      const gc=zoneColor(g);
       els.unshift({data:{id:'g_'+g.id, label:g.name, kind:'group',
-                         gkind:g.parent?'zone':'site',
+                         gkind:g.parent?'zone':'site', bg:gc.bg, fg:gc.fg, bd:gc.bd,
                          parent: g.parent && pathGroups.has(g.parent) ? 'g_'+g.parent : undefined}});
     }
 
@@ -2199,10 +2266,13 @@ function render(){
     const step=120, top=-((Math.max(cols.length,1)-1)*step)/2;
     const midPos=(idx)=>({x:mx+ux*(top+idx*step), y:my+uy*(top+idx*step)});
 
+    const dcA=deviceColor(a), dcB=deviceColor(b);
     els.push({data:{id:a.id, label:a.name, kind:'device', vendor:a.vendor,
-                    role:a.isSwitch?'switch':'router', pkey:'dev:'+a.name}, position:{x:ax, y:ay}});
+                    role:a.isSwitch?'switch':'router', pkey:'dev:'+a.name,
+                    bg:dcA.bg, fg:dcA.fg, bd:dcA.bd}, position:{x:ax, y:ay}});
     els.push({data:{id:b.id, label:b.name, kind:'device', vendor:b.vendor,
-                    role:b.isSwitch?'switch':'router', pkey:'dev:'+b.name}, position:{x:bx, y:by}});
+                    role:b.isSwitch?'switch':'router', pkey:'dev:'+b.name,
+                    bg:dcB.bg, fg:dcB.fg, bd:dcB.bd}, position:{x:bx, y:by}});
 
     const port=(m)=>{
       const i=m.iface, bits=[];
@@ -2246,7 +2316,7 @@ function render(){
     for(const item of cables){
       const L=item.L;
       const first = L.a.dev===a ? L.a : L.b, second = L.a.dev===a ? L.b : L.a;
-      const pa=findPort(a,first.port), pb=findPort(b,second.port);
+      const pa=effL2(a,first.port), pb=effL2(b,second.port);
       const vl=(p)=>!p?'':(p.mode==='access'?('access '+(p.accessVlan||'?'))
             :(Array.isArray(p.allowed)?('trunk '+(p.allowed.length?p.allowed.join(','):'none')):'trunk all'));
       els.push({data:{id:'e'+(++e), source:a.id, target:b.id, kind:'l2', item:item.key,
@@ -2304,7 +2374,7 @@ function render(){
   }
   const hideStubs = view!=='all';
   el.innerHTML = el.dataset.def;
-  const els=[]; const edgeFor={}; const edgePair={}; const pairEdge={};
+  const els=[]; const edgeFor={}; const edgePair={}; const pairEdge={}; const pairEdgeL2={};
 
   /* An endpoint subnet has exactly one device on it — a user VLAN, a server
      segment, a loopback range. It carries no topology, so on a large network
@@ -2339,8 +2409,9 @@ function render(){
   }
   for(const g of groups()){
     if(!usedGroups.has(g.id)) continue;
+    const gc=zoneColor(g);
     els.push({data:{id:'g_'+g.id, label:g.name, kind:'group',
-                    gkind:g.parent?'zone':'site',
+                    gkind:g.parent?'zone':'site', bg:gc.bg, fg:gc.fg, bd:gc.bd,
                     parent: g.parent && usedGroups.has(g.parent) ? 'g_'+g.parent : undefined}});
   }
 
@@ -2351,8 +2422,10 @@ function render(){
     const role = (d.isSwitch && !routes && !d.interfaces.some(i=>i.addrs.length && !/^vlan/i.test(i.name)))
                  ? 'switch' : 'router';
     const vc = Object.keys(d.vlans||{}).length;
+    const dc=deviceColor(d);
     els.push({data:{id:d.id, label:(selMode?(sel.has(d.id)?'☑ ':'☐ '):'')+d.name, kind:'device',
                     vendor:d.vendor, role, picked: sel.has(d.id)?1:0, pkey:'dev:'+d.name,
+                    bg:dc.bg, fg:dc.fg, bd:dc.bd,
                     parent: (d.groupId && usedGroups.has(d.groupId)) ? 'g_'+d.groupId : undefined,
                     sub:(d.vendor==='palo-alto'?'firewall':(role==='switch'?'switch':'router'))+
                         (lo?' · '+lo+' lo':'')+(vc?' · '+vc+' vlan':'')+
@@ -2479,9 +2552,11 @@ function render(){
       const L=model.l2links[k];
       if(!vis(L.a.dev) || !vis(L.b.dev)) continue;
       if(view==='simple'){
+        // L3 and L2 are different kinds of connectivity — collapse repeats of
+        // each kind to one line, but never let one hide the other.
         const pk=[L.a.dev.id,L.b.dev.id].sort().join('|');
-        if(pairEdge[pk]) continue;                 // already joined by an L3 link
-        const id='e'+(++e); pairEdge[pk]=id;
+        if(pairEdgeL2[pk]) continue;
+        const id='e'+(++e); pairEdgeL2[pk]=id;
         els.push({data:{id, source:L.a.dev.id, target:L.b.dev.id, kind:'l2', l2key:k,
                         trunk:l2IsTrunk(L)?1:0, label:''}});
         continue;
@@ -2788,10 +2863,25 @@ function findPort(dev, portName){
   const want=normPort(portName).toLowerCase();
   return dev.interfaces.find(i=>normPort(i.name).toLowerCase()===want) || null;
 }
+/* CDP/LLDP report the physical member port, but a bundled interface's actual
+   switching behaviour — trunk mode, allowed VLANs — lives on the port-channel
+   it joins, not on the member itself. Resolve to whichever one actually
+   governs, while keeping the member's own line number for pins. */
+function effL2(dev, portName){
+  const p=findPort(dev, portName);
+  if(!p) return null;
+  if(p.poParent && p.poParent.l2){
+    return {name:p.name, mode:p.poParent.mode, accessVlan:p.poParent.accessVlan,
+            allowed:p.poParent.allowed, native:p.poParent.native, l2:true,
+            bundledVia:p.poParent.name,
+            line:p.poParent.allowedLine||p.poParent.accessLine||p.line};
+  }
+  return p;
+}
 /* Does this port carry the VLAN? Unknown ports are assumed permissive so a
    missing config never invents a failure. */
 function portCarries(dev, portName, vlan){
-  const p=findPort(dev, portName);
+  const p=effL2(dev, portName);
   if(!p || !p.l2) return true;
   if(p.mode==='access') return (p.accessVlan||1)===vlan;
   if(p.allowed===null || p.allowed===undefined) return true;   // "all", or never restricted
@@ -3487,6 +3577,17 @@ function renderGroups(){
     const nm=document.createElement('span'); nm.className='dev-name';
     nm.textContent=(depth?'  └ ':'')+g.name+(n?'  ('+n+')':'');
     nm.style.opacity=depth?'0.9':'1';
+    const bgIn=document.createElement('input'); bgIn.type='color'; bgIn.value=g.bg||TH('zoneBg');
+    bgIn.title='Box colour'; bgIn.style.width='16px'; bgIn.style.height='16px'; bgIn.style.padding='0';
+    bgIn.style.border='1px solid var(--rule)'; bgIn.style.borderRadius='3px'; bgIn.style.background='none';
+    bgIn.onclick=(ev)=>ev.stopPropagation();
+    bgIn.oninput=(ev)=>{ ev.stopPropagation(); g.bg=bgIn.value; render(); autosave(); };
+    const fgIn=document.createElement('input'); fgIn.type='color'; fgIn.value=g.fg||TH('zoneText');
+    fgIn.title='Text colour'; fgIn.style.width='16px'; fgIn.style.height='16px'; fgIn.style.padding='0';
+    fgIn.style.border='1px solid var(--rule)'; fgIn.style.borderRadius='3px'; fgIn.style.background='none';
+    fgIn.style.marginLeft='3px';
+    fgIn.onclick=(ev)=>ev.stopPropagation();
+    fgIn.oninput=(ev)=>{ ev.stopPropagation(); g.fg=fgIn.value; render(); autosave(); };
     const x=document.createElement('button'); x.className='dev-x'; x.textContent='×'; x.title='Remove';
     x.onclick=(ev)=>{
       ev.stopPropagation();
@@ -3496,7 +3597,7 @@ function renderGroups(){
       STATE.groups=groups().filter(z=>!gone.has(z.id));
       rebuild();
     };
-    li.append(nm,x);
+    li.append(nm,bgIn,fgIn,x);
     li.onclick=()=>{ const el=document.getElementById('grp-name'); el.value=g.name; el.focus(); };
     ul.appendChild(li);
     for(const z of groups().filter(y=>y.parent===g.id)) draw(z,1);
@@ -3711,8 +3812,11 @@ function showLink(a,b){
       '<tr><th>'+esc(a.name)+'</th><th>'+esc(b.name)+'</th></tr>'+
       l2.map(L=>{
         const first = L.a.dev===a ? L.a : L.b, second = L.a.dev===a ? L.b : L.a;
-        return '<tr><td>'+esc(first.port)+'<br><span style="color:var(--ink-faint)">'+esc(vl(findPort(a,first.port)))+'</span></td>'+
-               '<td>'+esc(second.port)+'<br><span style="color:var(--ink-faint)">'+esc(vl(findPort(b,second.port)))+'</span></td></tr>';
+        const ea=effL2(a,first.port), eb=effL2(b,second.port);
+        return '<tr><td>'+esc(first.port)+(ea&&ea.bundledVia?' <span style="color:var(--ink-faint)">via '+esc(ea.bundledVia)+'</span>':'')+
+               '<br><span style="color:var(--ink-faint)">'+esc(vl(ea))+'</span></td>'+
+               '<td>'+esc(second.port)+(eb&&eb.bundledVia?' <span style="color:var(--ink-faint)">via '+esc(eb.bundledVia)+'</span>':'')+
+               '<br><span style="color:var(--ink-faint)">'+esc(vl(eb))+'</span></td></tr>';
       }).join('')+'</table>';
   }
   if(clouds.length){
@@ -4129,7 +4233,10 @@ function showDevice(d, opts){
       '<button class="btn tiny" id="rn-cancel">Cancel</button></div>'
     : '<div class="dev-head"><h2 class="sec">'+esc(d.name)+'</h2>'+
       '<button class="btn tiny" id="rn-start">Rename</button>'+
-      '<button class="btn tiny danger" id="dev-delete">Delete</button></div>'+
+      '<button class="btn tiny danger" id="dev-delete">Delete</button>'+
+      '<span class="color-row" title="Box colour"><input type="color" id="dev-bg" value="'+
+        esc(d.bg||TH('devBg'))+'"><input type="color" id="dev-fg" value="'+esc(d.fg||TH('devText'))+
+        '"><button class="dev-x" id="dev-color-reset" title="Use default colours">↺</button></span></div>'+
       '<div class="rt-form" style="margin-top:8px">'+
         '<select id="dev-zone"><option value="">no zone</option>'+
           groups().map(g=>'<option value="'+g.id+'"'+(d.groupId===g.id?' selected':'')+'>'+
@@ -4166,6 +4273,12 @@ function showDevice(d, opts){
     if(e.key==='Enter') rnSave.click();
     if(e.key==='Escape') rnCancel.click();
   };
+  const devBg=document.getElementById('dev-bg'), devFg=document.getElementById('dev-fg');
+  if(devBg) devBg.oninput=()=>{ d.bg=devBg.value; render(); autosave(); };
+  if(devFg) devFg.oninput=()=>{ d.fg=devFg.value; render(); autosave(); };
+  const devColorReset=document.getElementById('dev-color-reset');
+  if(devColorReset) devColorReset.onclick=()=>{ delete d.bg; delete d.fg; rebuild(); showDevice(d); };
+
   const zoneSel=document.getElementById('dev-zone');
   if(zoneSel) zoneSel.onchange=()=>{ d.groupId=zoneSel.value||null; rebuild(); showDevice(d); };
   const clearCfg=document.getElementById('dev-clearcfg');
@@ -4706,6 +4819,7 @@ function projectObject(){
     positions:STATE.positions,
     name:(document.getElementById('proj-name').value||'').trim(),
     ui:STATE.ui,
+    theme:STATE.theme,
     clouds:STATE.clouds||[],
     groups:groups(),
     layer:document.getElementById('opt-layer').value,
@@ -4719,6 +4833,7 @@ function projectObject(){
       cname: !!d.customName,
       show: d.show!==false,
       group: d.groupId||null,
+      bg: d.bg||null, fg: d.fg||null,
       nbrs: d.neighbors||[],
       bgp: d.bgpTable||[],
       auth:d.tableAuthoritative,
@@ -4736,7 +4851,12 @@ function loadProject(obj){
   STATE.clouds = Array.isArray(obj.clouds) ? obj.clouds : [];
   STATE.groups = Array.isArray(obj.groups) ? obj.groups : [];
   if(obj.ui) STATE.ui=Object.assign({left:290,right:400,leftOpen:true,rightOpen:true}, obj.ui);
+  if(obj.theme) STATE.theme=Object.assign({}, THEME_DEFAULT, obj.theme);
   applyPanels();
+  initTheme();
+  const st=document.querySelector('.stage');
+  if(st) st.style.background =
+    'radial-gradient(circle at 1px 1px, '+shade(TH('canvasBg'),0.10)+' 1px, transparent 0) 0 0/26px 26px, '+TH('canvasBg');
   document.getElementById('proj-name').value = obj.name || '';
   if(obj.layer) document.getElementById('opt-layer').value = obj.layer;
   for(const g of STATE.groups){ const n=parseInt(String(g.id).replace(/\D/g,''),10); if(n>grpSeq) grpSeq=n; }
@@ -4753,6 +4873,8 @@ function loadProject(obj){
     d.customName = !!pd.cname;
     d.show = pd.show!==false;
     d.groupId = pd.group||null;
+    if(pd.bg) d.bg=pd.bg;
+    if(pd.fg) d.fg=pd.fg;
     d.neighbors = Array.isArray(pd.nbrs) ? pd.nbrs : [];
     d.bgpTable = Array.isArray(pd.bgp) ? pd.bgp : [];
     d.originalText = pd.otext!=null ? pd.otext : (pd.text||'');
@@ -4904,7 +5026,27 @@ if(typeof cytoscape==='undefined'){
     '<strong>The drawing library did not load</strong><span>NetPath pulls Cytoscape.js from a CDN. '+
     'Connect to the internet once, or download cytoscape.min.js next to this file and point the script tag at it.</span>';
 }
+function initTheme(){
+  const map={canvasBg:'th-canvasBg', linkText:'th-linkText', devBg:'th-devBg',
+             devText:'th-devText', zoneBg:'th-zoneBg', zoneText:'th-zoneText'};
+  for(const k in map){
+    const el=document.getElementById(map[k]);
+    if(!el) continue;
+    el.value=STATE.theme[k];
+    el.oninput=()=>{
+      STATE.theme[k]=el.value;
+      if(k==='linkText') STATE.theme.netText=el.value;   // one control for subnet + link text
+      applyTheme(); autosave();
+    };
+  }
+  document.getElementById('th-reset').onclick=()=>{
+    STATE.theme=Object.assign({}, THEME_DEFAULT);
+    for(const k in map) if(document.getElementById(map[k])) document.getElementById(map[k]).value=STATE.theme[k];
+    applyTheme(); autosave();
+  };
+}
 initPanels();
+initTheme();
 if(!restore()) rebuild();
 </script>
 </body>
