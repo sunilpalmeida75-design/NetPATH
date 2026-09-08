@@ -367,6 +367,10 @@ table.fib td:first-child{color:var(--ink)}
         <label>Zone box <input type="color" id="th-zoneBg"></label>
         <label>Zone text <input type="color" id="th-zoneText"></label>
       </div>
+      <label class="auth" style="margin-top:8px"><input type="checkbox" id="th-canvasGrid">
+        <span>Dotted grid on the canvas</span></label>
+      <label class="auth"><input type="checkbox" id="th-zoneGrid">
+        <span>Dotted grid inside zone and site boxes</span></label>
       <button class="btn tiny" id="th-reset" style="margin-top:8px">Reset to default</button>
 
       <h2 class="sec">Providers</h2>
@@ -531,6 +535,11 @@ let devSeq = 0;
 function detectVendor(text){
   const head = text.slice(0, 4000);
   if(/<\?xml|<config\b/i.test(head)) return 'pan-xml';
+  // PAN-OS curly-brace format: nested blocks and semicolon-terminated leaves
+  const braceOpens=(head.match(/^[^\S\n]*[\w.\/@-]+\s*\{\s*$/gm)||[]).length;
+  const semis=(head.match(/;\s*$/gm)||[]).length;
+  if(braceOpens>=2 && semis>=1 &&
+     /\b(deviceconfig|network|vsys|rulebase|virtual-router|interface)\b/i.test(head)) return 'pan-curly';
   const setLines = (text.match(/^\s*set\s+(network|deviceconfig|vsys|zone|rulebase|address|device)\b/gmi)||[]).length;
   if(setLines >= 3) return 'pan-set';
   if(/^\s*(hostname|interface|ip route|router ospf|router bgp|version \d)/mi.test(text)) return 'cisco';
@@ -1121,6 +1130,209 @@ function parsePanXml(text, fname){
   return dev;
 }
 
+/* ============================================================
+   Palo Alto — curly-brace format
+
+   `show config running` emits this by default (set-format needs
+   `set cli config-output-format set` first). Blocks nest with braces and
+   leaf values end in a semicolon; a list is a block of bare values.
+   ============================================================ */
+function panTokens(text){
+  const out=[]; let i=0, line=1;
+  while(i<text.length){
+    const c=text[i];
+    if(c==='\n'){ line++; i++; continue; }
+    if(/\s/.test(c)){ i++; continue; }
+    if(c==='#'){ while(i<text.length && text[i]!=='\n') i++; continue; }
+    if(c==='{'||c==='}'||c===';'){ out.push({t:c, line}); i++; continue; }
+    if(c==='"'){ i++; let b=''; while(i<text.length && text[i]!=='"'){ if(text[i]==='\n') line++; b+=text[i++]; } i++; out.push({t:b, line}); continue; }
+    let b=''; while(i<text.length && !/[\s{};]/.test(text[i])) b+=text[i++];
+    out.push({t:b, line});
+  }
+  return out;
+}
+function panParseBlock(tk, i, node){
+  while(i<tk.length){
+    if(tk[i].t==='}') return i+1;
+    const name=tk[i].t, line=tk[i].line; i++;
+    if(i<tk.length && tk[i].t==='{'){
+      const child={vals:[], kids:{}, line};
+      i=panParseBlock(tk, i+1, child);
+      (node.kids[name]=node.kids[name]||[]).push(child);
+    } else if(i<tk.length && tk[i].t===';'){
+      node.vals.push(name); i++;                       // a bare list member
+    } else {
+      const vals=[];
+      while(i<tk.length && tk[i].t!==';' && tk[i].t!=='{'){ vals.push(tk[i].t); i++; }
+      if(i<tk.length && tk[i].t==='{'){
+        const child={vals:vals.slice(), kids:{}, line};
+        i=panParseBlock(tk, i+1, child);
+        (node.kids[name]=node.kids[name]||[]).push(child);
+      } else {
+        i++;                                            // consume the ;
+        (node.kids[name]=node.kids[name]||[]).push({vals, kids:{}, line});
+      }
+    }
+  }
+  return i;
+}
+function panRoot(text){
+  const root={vals:[], kids:{}, line:1};
+  panParseBlock(panTokens(text), 0, root);
+  return root;
+}
+function pKid(node, ...path){
+  let cur=node;
+  for(const p of path){
+    if(!cur) return null;
+    const a=cur.kids[p];
+    if(!a || !a.length) return null;
+    cur=a[0];
+  }
+  return cur;
+}
+function pVal(node, key){
+  const a=node && node.kids && node.kids[key];
+  return a && a[0] && a[0].vals.length ? a[0].vals[0] : null;
+}
+/* a block whose children are named entries, e.g. every interface under ethernet */
+function pEntries(node){
+  const out=[];
+  if(!node) return out;
+  for(const k in node.kids) for(const n of node.kids[k]) out.push({name:k, node:n});
+  return out;
+}
+/* `ip { 10.1.1.1/24; }` — the address is a bare value inside the ip block */
+function pIps(node){
+  const ipNode=pKid(node,'ip');
+  if(!ipNode) return [];
+  const out=ipNode.vals.slice();
+  for(const e of pEntries(ipNode)) out.push(e.name);   // some exports nest it as an entry
+  return out;
+}
+
+function parsePanCurly(text, fname){
+  const dev=newDevice('palo-alto', fname);
+  const root=panRoot(text);
+  const ifIndex={};
+  function iface(name, line){
+    if(!ifIndex[name]){
+      ifIndex[name]={name, desc:'', vrf:'default', addrs:[], shutdown:false, ospf:false, zone:null, line};
+      dev.interfaces.push(ifIndex[name]);
+    }
+    return ifIndex[name];
+  }
+  function addIp(name, val, line){
+    const c=parseCidr(val);
+    if(c) iface(name, line).addrs.push({ip:c.ip, len:c.len, line});
+    else if(ip2int(val)!==null) iface(name, line).addrs.push({ip:ip2int(val), len:32, line});
+  }
+
+  const sys=pKid(root,'deviceconfig','system');
+  if(sys && pVal(sys,'hostname')) dev.name=pVal(sys,'hostname');
+
+  // interfaces, including sub-interfaces and their 802.1q tags
+  const netNode=pKid(root,'network');
+  const ifRoot=pKid(netNode||root,'interface');
+  for(const type of ['ethernet','aggregate-ethernet']){
+    for(const e of pEntries(pKid(ifRoot,type))){
+      const l3=pKid(e.node,'layer3');
+      if(!l3) continue;
+      for(const v of pIps(l3)) addIp(e.name, v, e.node.line);
+      if(pVal(l3,'comment')) iface(e.name, e.node.line).desc=pVal(l3,'comment');
+      for(const u of pEntries(pKid(l3,'units'))){
+        for(const v of pIps(u.node)) addIp(u.name, v, u.node.line);
+        const tag=pVal(u.node,'tag');
+        if(tag) iface(u.name, u.node.line).vlanTag=parseInt(tag,10);
+        if(pVal(u.node,'comment')) iface(u.name, u.node.line).desc=pVal(u.node,'comment');
+      }
+    }
+  }
+  for(const type of ['vlan','loopback','tunnel']){
+    const t=pKid(ifRoot,type);
+    if(!t) continue;
+    for(const v of pIps(t)) addIp(type, v, t.line);
+    for(const u of pEntries(pKid(t,'units'))){
+      for(const v of pIps(u.node)) addIp(u.name, v, u.node.line);
+      const tag=pVal(u.node,'tag');
+      if(tag) iface(u.name, u.node.line).vlanTag=parseInt(tag,10);
+    }
+  }
+
+  // zones live under vsys, and sometimes at the top level
+  const zoneRoots=[];
+  for(const v of pEntries(pKid(root,'vsys'))) { const z=pKid(v.node,'zone'); if(z) zoneRoots.push(z); }
+  if(pKid(root,'zone')) zoneRoots.push(pKid(root,'zone'));
+  for(const zr of zoneRoots){
+    for(const z of pEntries(zr)){
+      const l3=pKid(z.node,'network','layer3');
+      if(!l3) continue;
+      dev.zones.add(z.name);
+      for(const m of l3.vals) iface(m, z.node.line).zone=z.name;
+      for(const m of pEntries(l3)) iface(m.name, z.node.line).zone=z.name;
+    }
+  }
+
+  // virtual routers, their member interfaces and static routes
+  for(const vr of pEntries(pKid(netNode||root,'virtual-router'))){
+    dev.vrs.add(vr.name);
+    const ifs=pKid(vr.node,'interface');
+    if(ifs){
+      for(const m of ifs.vals) iface(m, vr.node.line).vrf=vr.name;
+      for(const m of pEntries(ifs)) iface(m.name, vr.node.line).vrf=vr.name;
+    }
+    if(pKid(vr.node,'protocol','ospf') || pKid(vr.node,'protocol','bgp')) dev.dynamic=true;
+    const srRoot = pKid(vr.node,'routing-table','ip','static-route') || pKid(vr.node,'static-route');
+    for(const sr of pEntries(srRoot)){
+      const c=parseCidr(pVal(sr.node,'destination')||'');
+      if(!c) continue;
+      const nhNode=pKid(sr.node,'nexthop');
+      const nh=nhNode ? pVal(nhNode,'ip-address') : null;
+      const met=pVal(sr.node,'metric');
+      dev.statics.push({
+        vrf:vr.name, net:c.net, len:c.len,
+        nextHop: nh ? ip2int(nh) : null,
+        iface: pVal(sr.node,'interface'),
+        ad: met ? (parseInt(met,10)||10) : 10,
+        name: sr.name, line: sr.node.line
+      });
+    }
+  }
+
+  // address objects and security rules
+  const addrRoots=[pKid(root,'address')];
+  for(const v of pEntries(pKid(root,'vsys'))) addrRoots.push(pKid(v.node,'address'));
+  for(const ar of addrRoots) for(const a of pEntries(ar)){
+    const v=pVal(a.node,'ip-netmask')||pVal(a.node,'ip-range');
+    if(v) dev.addrObjects[a.name]=v;
+  }
+  const ruleRoots=[pKid(root,'rulebase','security','rules')];
+  for(const v of pEntries(pKid(root,'vsys'))) ruleRoots.push(pKid(v.node,'rulebase','security','rules'));
+  let order=0;
+  for(const rr of ruleRoots) for(const r of pEntries(rr)){
+    const list=(key)=>{
+      const n=pKid(r.node,key);
+      if(!n) return ['any'];
+      const out=n.vals.slice();
+      for(const e of pEntries(n)) out.push(e.name);
+      return out.length?out:['any'];
+    };
+    dev.rules.push({
+      name:r.name, from:list('from'), to:list('to'),
+      source:list('source'), destination:list('destination'),
+      action: pVal(r.node,'action') || 'allow',
+      disabled: /^yes$/i.test(pVal(r.node,'disabled')||''),
+      order:order++, firstLine:r.node.line, actionLine:r.node.line
+    });
+  }
+
+  let usedFallbackName=false;
+  if(!dev.name){ dev.name=fname.replace(/\.[^.]+$/,'') || ('firewall-'+(++devSeq)); usedFallbackName=true; }
+  dev.usedFallbackName=usedFallbackName;
+  if(!dev.interfaces.length) dev.warnings.push('No layer-3 interfaces found in this config');
+  return dev;
+}
+
 function newDevice(vendor, fname){
   return {
     id:'d'+(++devSeq), vendor, file:fname||'pasted', name:null, rawText:'', originalText:null,
@@ -1134,8 +1346,9 @@ function newDevice(vendor, fname){
 
 function parseConfig(text, fname){
   const v = detectVendor(text);
-  const d = v==='pan-xml' ? parsePanXml(text, fname)
-          : v==='pan-set' ? parsePanSet(text, fname)
+  const d = v==='pan-xml'   ? parsePanXml(text, fname)
+          : v==='pan-curly' ? parsePanCurly(text, fname)
+          : v==='pan-set'   ? parsePanSet(text, fname)
           : parseCisco(text, fname);
   d.rawText = text;
   return d;
@@ -1907,9 +2120,9 @@ function l2IsTrunk(L){
 }
 
 const THEME_DEFAULT={
-  canvasBg:'#0e1621',
+  canvasBg:'#0e1621', canvasGrid:false,
   devBg:'#1c2c3e', devText:'#d3dfec',
-  zoneBg:'#16202e', zoneText:'#7f93aa',
+  zoneBg:'#16202e', zoneText:'#7f93aa', zoneGrid:false,
   netText:'#4fc3d9', linkText:'#61799a'
 };
 STATE.theme = Object.assign({}, THEME_DEFAULT);
@@ -1936,11 +2149,15 @@ function zoneColor(g){
   return {bg, fg, bd:shade(bg,0.28)};
 }
 
+function stageBackground(){
+  return TH('canvasGrid')
+    ? 'radial-gradient(circle at 1px 1px, '+shade(TH('canvasBg'),0.10)+' 1px, transparent 0) 0 0/26px 26px, '+TH('canvasBg')
+    : TH('canvasBg');    // solid — no dotted grid, no blending
+}
 function applyTheme(){
   const st=document.querySelector('.stage');
-  if(st) st.style.background =
-    'radial-gradient(circle at 1px 1px, '+shade(TH('canvasBg'),0.10)+' 1px, transparent 0) 0 0/26px 26px, '+TH('canvasBg');
-  render();   // device/zone colours are baked into element data, so a full re-render picks up new defaults
+  if(st) st.style.background = stageBackground();
+  render();   // device/zone colours and the zone grid are baked into element data
 }
 
 function graphStyle(){
@@ -1997,18 +2214,18 @@ function graphStyle(){
         'width':11,'height':11,'shape':'ellipse','background-color':'#ffc766',
         'border-width':3,'border-color':'rgba(232,161,58,.28)','z-index':40,'events':'no','label':''}},
       {selector:'node[kind="group"]', style:{
-        'shape':'round-rectangle','background-color':'data(bg)','background-opacity':0.55,
+        'shape':'round-rectangle','background-color':'data(bg)','background-opacity':TH('zoneGrid')?0.55:1,
         'border-width':1,'border-color':'data(bd)','border-style':'dashed','padding':'26px',
         'label':'data(label)','color':'data(fg)','font-family':'Inter, system-ui, sans-serif',
         'font-size':12,'font-weight':600,'text-valign':'top','text-halign':'center',
         'text-margin-y':-6,'z-index':0}},
-      {selector:'node[gkind="site"]', style:{'background-opacity':0.35}},
+      {selector:'node[gkind="site"]', style:{'background-opacity':TH('zoneGrid')?0.35:1}},
       {selector:'edge[kind="ha"]', style:{
         'line-color':'#8a6a2e','line-style':'dotted','width':2,'curve-style':'bezier',
         'color':'#c49a4e','font-size':9,'text-wrap':'wrap','z-index':2}},
       {selector:'node[kind="group"].hot', style:{
-        'border-width':1,'background-opacity':0.55}},
-      {selector:'node[gkind="site"].hot', style:{'background-opacity':0.35}},
+        'border-width':1,'background-opacity':TH('zoneGrid')?0.55:1}},
+      {selector:'node[gkind="site"].hot', style:{'background-opacity':TH('zoneGrid')?0.35:1}},
       {selector:'node[kind="group"].drop', style:{'border-color':'#33485f','color':'#7f93aa'}},
       {selector:'node[picked = 1]', style:{'border-color':'#4fc3d9','color':'#8fdcec'}},
       {selector:'node.hot', style:{'border-color':'#e8a13a','color':'#f0b256'}},
@@ -2200,7 +2417,7 @@ function render(){
       if(d) showDevice(d);
     });
     cyp.on('tap','node[kind="subnet"]', evt=>showSegment(evt.target.data('net')||evt.target.data('label')));
-    cyp.on('tap','edge', evt=>onEdgeTap(cyp, evt.target));
+    cyp.on('dbltap','edge', evt=>onEdgeTap(cyp, evt.target));
     STATE.cy=cyp; STATE.edgeFor=edgeFor; STATE.edgePair={}; STATE.viewIsPath=true;
     paintTrace(res);
     return;
@@ -2582,6 +2799,7 @@ function render(){
       for(const v of vlansOf(d)){
         const r=model.vlanReport[v];
         if(!r || !r.svi || r.svi.dev===d) continue;
+        if(!vis(r.svi.dev)) continue;   // never point at a device outside the current set
         const a=r.svi.iface.addrs.find(x=>x.len<32);
         if(!a) continue;
         const sid='s_'+cidr(netOf(a.ip,a.len), a.len).replace(/[^\w]/g,'_');
@@ -2628,7 +2846,7 @@ function render(){
     showDevice(d);
   });
   cy.on('tap','node[kind="subnet"]', evt=>showSegment(evt.target.data('net')||evt.target.data('label')));
-  cy.on('tap','edge', evt=>onEdgeTap(cy, evt.target));
+  cy.on('dbltap','edge', evt=>onEdgeTap(cy, evt.target));
   const writeNS = STATE.posWriteNS;
   cy.on('dragfree','node', ()=>{ capturePositions(cy, writeNS); autosave(); });
   /* A layout does not finish synchronously. Capturing straight away would save
@@ -4855,8 +5073,7 @@ function loadProject(obj){
   applyPanels();
   initTheme();
   const st=document.querySelector('.stage');
-  if(st) st.style.background =
-    'radial-gradient(circle at 1px 1px, '+shade(TH('canvasBg'),0.10)+' 1px, transparent 0) 0 0/26px 26px, '+TH('canvasBg');
+  if(st) st.style.background = stageBackground();
   document.getElementById('proj-name').value = obj.name || '';
   if(obj.layer) document.getElementById('opt-layer').value = obj.layer;
   for(const g of STATE.groups){ const n=parseInt(String(g.id).replace(/\D/g,''),10); if(n>grpSeq) grpSeq=n; }
@@ -5039,9 +5256,17 @@ function initTheme(){
       applyTheme(); autosave();
     };
   }
+  const boolMap={canvasGrid:'th-canvasGrid', zoneGrid:'th-zoneGrid'};
+  for(const k in boolMap){
+    const el=document.getElementById(boolMap[k]);
+    if(!el) continue;
+    el.checked=!!STATE.theme[k];
+    el.onchange=()=>{ STATE.theme[k]=el.checked; applyTheme(); autosave(); };
+  }
   document.getElementById('th-reset').onclick=()=>{
     STATE.theme=Object.assign({}, THEME_DEFAULT);
     for(const k in map) if(document.getElementById(map[k])) document.getElementById(map[k]).value=STATE.theme[k];
+    for(const k in boolMap) if(document.getElementById(boolMap[k])) document.getElementById(boolMap[k]).checked=!!STATE.theme[k];
     applyTheme(); autosave();
   };
 }
