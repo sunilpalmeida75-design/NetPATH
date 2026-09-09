@@ -2387,14 +2387,24 @@ function isFirewall(d){ return !!d && d.vendor==='palo-alto'; }
 /* Explicit exclusion only — separate from the include test, because an
    exclusion is decisive: if either end of a link sits in an excluded VRF or
    VSYS, the whole link goes, not just that end. */
+/* Which interfaces may take their VRF from what they are wired to.
+   A Cisco interface in a named VRF is judged on that name alone. A firewall
+   is different: its virtual router is a separate namespace — often "default",
+   but just as often a local name like FRA_Infra_BST_VR that no switch has
+   ever heard of — so a firewall interface always correlates through its
+   802.1q tag and subnet instead. */
+function canInherit(i){
+  if(STATE.scopeStrict) return false;
+  if(!i) return false;
+  if(isFirewall(i.dev)) return true;
+  return (i.vrf || 'default')==='default';
+}
 function ifaceExcluded(i){
   if(!scopeActive() || !i) return false;
   const s=scopeSets();
   if(STATE.scopeIgnoreFw && isFirewall(i.dev)) return false;
   const own=i.vrf || 'default';
-  const vrfs = (own!=='default' || STATE.scopeStrict)
-    ? [own]
-    : [own, ...(i.linkedVrfs||[])];
+  const vrfs = canInherit(i) ? [own, ...(i.linkedVrfs||[])] : [own];
   for(const v of vrfs) if(s.ve.has(v)) return true;
   if(i.vsys && s.se.has(i.vsys)) return true;
   return false;
@@ -2419,9 +2429,9 @@ function ifaceInScope(i){
      called "default" no matter which VRF the segment belongs to. Without this
      guard, two different VRFs sharing a subnet would pull each other into
      scope. */
-  const vrfs = (own!=='default' || STATE.scopeStrict)
-    ? new Set([own])
-    : new Set([own, ...(i.linkedVrfs||[])]);
+  const vrfs = canInherit(i)
+    ? new Set([own, ...(i.linkedVrfs||[])])
+    : new Set([own]);
 
   for(const v of vrfs) if(s.ve.has(v)) return false;   // any excluded VRF wins
   if(vsys && s.se.has(vsys)) return false;              // excluded VSYS wins
