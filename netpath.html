@@ -1786,21 +1786,44 @@ function buildModel(devices, opts){
   /* Firewall virtual routers and Cisco VRFs are different namespaces — a PAN
      sub-interface sits in VR "default" even when its VLAN's gateway is in
      SITE_DR_INT. So each interface also remembers the VRFs of what it is
-     actually connected to: the other members of its subnet, and the SVI that
-     serves its VLAN. Scoping then follows the segment, not the local name. */
+     actually connected to. Two independent pieces of evidence are used, and
+     both require the addresses to agree:
+       1. the other members of its own subnet, and
+       2. an SVI carrying the same 802.1q tag whose address is in that subnet.
+     A matching tag alone is not enough: VLAN IDs get reused across sites, so
+     ae1.1250 only correlates to Vlan1250 if both sit in one subnet. */
   for(const d of devices) for(const i of d.interfaces) i.linkedVrfs=new Set();
-  // "default" says nothing about where a segment belongs, so only named
-  // VRFs propagate — otherwise excluding "default" would strip every segment
-  // that touches a firewall.
   for(const k in subnets){
     const vrfs=new Set(subnets[k].members.map(m=>m.iface.vrf).filter(v=>v && v!=='default'));
     for(const m of subnets[k].members) for(const v of vrfs) m.iface.linkedVrfs.add(v);
   }
+  // tag-matched gateways, verified against the addressing
+  const sameSubnet=(a,b)=>{
+    for(const x of (a.addrs||[])) for(const y of (b.addrs||[])){
+      if(x.len>=31 || y.len>=31) continue;
+      if(netOf(x.ip,x.len)===netOf(y.ip,x.len) && x.len===y.len) return true;
+    }
+    return false;
+  };
+  const byTag={};
   for(const d of devices) for(const i of d.interfaces){
-    const v=vlanOfIface(i);
-    const rep=v && vlanReport[parseInt(v,10)];
-    const sv=rep && rep.svi && rep.svi.iface!==i ? rep.svi.iface.vrf : null;
-    if(sv && sv!=='default') i.linkedVrfs.add(sv);
+    const t=vlanOfIface(i);
+    if(t) (byTag[t]=byTag[t]||[]).push(i);
+  }
+  for(const t in byTag){
+    const peers=byTag[t];
+    for(const i of peers){
+      for(const j of peers){
+        if(i===j || i.dev===j.dev) continue;
+        const jv=j.vrf;
+        if(!jv || jv==='default') continue;
+        if(sameSubnet(i,j)) i.linkedVrfs.add(jv);          // tag AND subnet agree
+        else if(i.addrs.length && j.addrs.length)
+          warn('VLAN '+t+' is on '+i.dev.name+' '+i.name+' and '+j.dev.name+' '+j.name+
+               ', but their addresses are in different subnets. One side is misconfigured, '+
+               'or the same VLAN ID is reused for two different segments.', i.dev.id, i.line);
+      }
+    }
   }
 
   /* First-hop redundancy. Other devices point at the virtual IP, which no
