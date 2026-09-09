@@ -37,8 +37,9 @@ body{
 button{font-family:inherit; font-size:13px; cursor:pointer}
 input,textarea,select{font-family:var(--mono); font-size:13px}
 
-:root{--left:290px; --right:400px}
-.shell{display:grid; grid-template-columns:var(--left) 6px minmax(0,1fr) 6px var(--right); height:100vh}
+:root{--left:290px; --right:400px; --bottom:220px}
+.shell{display:grid; grid-template-columns:var(--left) 6px minmax(0,1fr) 6px var(--right);
+  grid-template-rows:minmax(0,1fr) 6px var(--bottom); height:100vh}
 .gutter{
   position:relative; cursor:col-resize; background:var(--bg);
   border-left:1px solid var(--rule); border-right:1px solid var(--rule);
@@ -50,6 +51,12 @@ input,textarea,select{font-family:var(--mono); font-size:13px}
 }
 .gutter:hover::after{background:var(--cyan)}
 .gutter.dragging::after{background:var(--cyan)}
+.gutter-h{grid-column:1/-1; cursor:row-resize; background:var(--bg);
+  border-top:1px solid var(--rule); border-bottom:1px solid var(--rule); position:relative}
+.gutter-h:hover{background:var(--panel)}
+.gutter-h::after{content:''; position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+  width:26px; height:2px; border-radius:1px; background:var(--rule)}
+.gutter-h:hover::after, .gutter-h.dragging::after{background:var(--cyan)}
 .pan-toggle{
   position:absolute; top:14px; left:50%; transform:translateX(-50%);
   width:18px; height:26px; padding:0; font-size:11px; line-height:1;
@@ -57,7 +64,30 @@ input,textarea,select{font-family:var(--mono); font-size:13px}
   border-radius:4px; cursor:pointer; z-index:6;
 }
 .pan-toggle:hover{color:var(--ink); border-color:var(--ink-faint)}
+.pan-toggle-h{
+  position:absolute; left:50%; top:-13px; transform:translateX(-50%);
+  width:26px; height:18px; padding:0; font-size:11px; line-height:1;
+  background:var(--panel); color:var(--ink-faint); border:1px solid var(--rule);
+  border-radius:4px; cursor:pointer; z-index:6;
+}
+.pan-toggle-h:hover{color:var(--ink); border-color:var(--ink-faint)}
 body.resizing{cursor:col-resize; user-select:none}
+body.resizing-v{cursor:row-resize; user-select:none}
+.bottom-panel{grid-column:1/-1; background:var(--panel-2); overflow:auto; min-height:0}
+.bottom-head{display:flex; align-items:center; gap:10px; padding:9px 16px; border-bottom:1px solid var(--rule);
+  position:sticky; top:0; background:var(--panel-2)}
+.bottom-head h2{margin:0; font-size:12.5px; font-weight:600; color:var(--ink-dim)}
+.bottom-head .count{font-family:var(--mono); font-size:11px; color:var(--ink-faint)}
+.bottom-body{padding:10px 16px 16px}
+.health-group{margin-bottom:12px}
+.health-group h3{margin:0 0 6px; font-size:11.5px; font-weight:600; color:var(--ink-faint)}
+.health-chips{display:flex; flex-wrap:wrap; gap:6px}
+.health-chip{
+  font-family:var(--mono); font-size:11.5px; color:var(--ink-dim); background:var(--panel);
+  border:1px solid var(--rule); border-radius:4px; padding:3px 8px; cursor:pointer;
+}
+.health-chip:hover{border-color:var(--ink-faint); color:var(--ink)}
+.health-ok{font-size:12.5px; color:var(--ink-faint)}
 .rail{min-width:0}
 @media (max-width:1100px){
   .shell{grid-template-columns:1fr; height:auto; min-height:100vh}
@@ -378,7 +408,13 @@ table.fib td:first-child{color:var(--ink)}
         <button class="btn tiny" id="th-visio">Visio white</button>
       </div>
       <label class="auth" style="margin-top:8px"><input type="checkbox" id="th-canvasGrid">
-        <span>Dotted grid on the canvas</span></label>
+        <span>Grid on the canvas</span></label>
+      <label class="auth" style="margin-left:22px"><span style="flex:1">Grid style</span>
+        <select id="th-gridStyle" style="background:var(--bg);color:var(--ink);border:1px solid var(--rule);
+          border-radius:4px;padding:2px 6px;font-size:12px">
+          <option value="dots">Dots</option>
+          <option value="lines">Lines (Visio)</option>
+        </select></label>
       <label class="auth"><input type="checkbox" id="th-zoneGrid">
         <span>Dotted grid inside zone and site boxes</span></label>
       <button class="btn tiny" id="th-reset" style="margin-top:8px">Reset all colours</button>
@@ -490,6 +526,17 @@ table.fib td:first-child{color:var(--ink)}
       <div id="warnbox"></div>
     </div>
   </aside>
+
+  <div class="gutter-h" id="gut-b">
+    <button class="pan-toggle-h" id="tog-b" title="Minimize">▾</button>
+  </div>
+  <div class="bottom-panel" id="bottom-panel">
+    <div class="bottom-head">
+      <h2>Device readiness</h2>
+      <span class="count" id="health-count"></span>
+    </div>
+    <div class="bottom-body" id="health-body"></div>
+  </div>
 </div>
 
 <script>
@@ -2068,6 +2115,7 @@ function sizeNodes(els){
     if(el.data.w!=null) continue;
     const k=el.data.kind;
     if(k==='group') continue;
+    if(el.data.overrideW){ el.data.w=el.data.overrideW; el.data.h=el.data.overrideH; continue; }
     const s = k==='subnet' ? labelSize(el.data.label,11,8,6,24)
             : k==='wan'    ? labelSize(el.data.label,12,34,28,96)
             :                labelSize(el.data.label,13,30,26,96);
@@ -2177,7 +2225,7 @@ function l2IsTrunk(L){
 }
 
 const THEME_DEFAULT={
-  canvasBg:'#0e1621', canvasGrid:false,
+  canvasBg:'#0e1621', canvasGrid:false, gridStyle:'dots',
   devBg:'#1c2c3e', devText:'#d3dfec',
   roleRouter:'#3a5273', roleSwitch:'#3f7a63', roleFirewall:'#8a6a2e',
   zoneBg:'#16202e', zoneText:'#7f93aa', zoneBorder:'#33485f', zoneGrid:false,
@@ -2187,7 +2235,7 @@ const THEME_DEFAULT={
 /* Visio look: everything white, boxes outlined in green, grid on the canvas
    only — never inside a box. */
 const THEME_VISIO={
-  canvasBg:'#ffffff', canvasGrid:true,
+  canvasBg:'#ffffff', canvasGrid:true, gridStyle:'lines',
   devBg:'#ffffff', devText:'#14304a',
   roleRouter:'#1f7a4d', roleSwitch:'#1f7a4d', roleFirewall:'#1f7a4d',
   zoneBg:'#ffffff', zoneText:'#4a6b80', zoneBorder:'#1f7a4d', zoneGrid:false,
@@ -2243,9 +2291,15 @@ function gridColor(bg){
   return luminance(bg) > 0.5 ? shade(bg, -0.22) : shade(bg, 0.42);
 }
 function stageBackground(){
-  return TH('canvasGrid')
-    ? 'radial-gradient(circle at 1px 1px, '+gridColor(TH('canvasBg'))+' 1.4px, transparent 0) 0 0/26px 26px, '+TH('canvasBg')
-    : TH('canvasBg');    // solid — no dotted grid, no blending
+  if(!TH('canvasGrid')) return TH('canvasBg');    // solid — no grid, no blending
+  const c=gridColor(TH('canvasBg'));
+  if(TH('gridStyle')==='lines'){
+    // a page grid of thin squares, the way Visio draws it — not dots
+    return 'linear-gradient('+c+' 1px, transparent 1px) 0 0/26px 26px,'+
+           'linear-gradient(90deg, '+c+' 1px, transparent 1px) 0 0/26px 26px,'+
+           TH('canvasBg');
+  }
+  return 'radial-gradient(circle at 1px 1px, '+c+' 1.4px, transparent 0) 0 0/26px 26px, '+TH('canvasBg');
 }
 function applyTheme(){
   const st=document.querySelector('.stage');
@@ -2309,7 +2363,7 @@ function graphStyle(){
         'border-width':3,'border-color':'rgba(232,161,58,.28)','z-index':40,'events':'no','label':''}},
       {selector:'node[kind="group"]', style:{
         'shape':'round-rectangle','background-color':'data(bg)','background-opacity':TH('zoneGrid')?0.55:1,
-        'border-width':TH('boxBorderW'),'border-color':'data(bd)','border-style':'dashed','padding':'26px',
+        'border-width':TH('boxBorderW'),'border-color':'data(bd)','border-style':'dashed','padding':'data(pad)',
         'label':'data(label)','color':'data(fg)','font-family':'Inter, system-ui, sans-serif',
         'font-size':12,'font-weight':600,'text-valign':'top','text-halign':'center',
         'text-margin-y':-6,'z-index':0}},
@@ -2381,6 +2435,7 @@ function render(){
       const dc=deviceColor(d, rr);
       els.push({data:{id:d.id, label:d.name, kind:'device', vendor:d.vendor,
                       role:rr, bg:dc.bg, fg:dc.fg, bd:dc.bd,
+                      overrideW:d.boxW||undefined, overrideH:d.boxH||undefined,
                       parent: d.groupId ? 'g_'+d.groupId : undefined}});
     };
     const netOfIface=(ifc)=>{
@@ -2459,6 +2514,7 @@ function render(){
       const gc=zoneColor(g);
       els.unshift({data:{id:'g_'+g.id, label:g.name, kind:'group',
                          gkind:g.parent?'zone':'site', bg:gc.bg, fg:gc.fg, bd:gc.bd,
+                         pad:(g.padding||26)+'px',
                          parent: g.parent && pathGroups.has(g.parent) ? 'g_'+g.parent : undefined}});
     }
 
@@ -2581,11 +2637,11 @@ function render(){
     const rA=roleOf(a), rB=roleOf(b);
     const dcA=deviceColor(a, rA), dcB=deviceColor(b, rB);
     els.push({data:{id:a.id, label:a.name, kind:'device', vendor:a.vendor,
-                    role:rA, pkey:'dev:'+a.name,
-                    bg:dcA.bg, fg:dcA.fg, bd:dcA.bd}, position:{x:ax, y:ay}});
+                    role:rA, pkey:'dev:'+a.name, bg:dcA.bg, fg:dcA.fg, bd:dcA.bd,
+                    overrideW:a.boxW||undefined, overrideH:a.boxH||undefined}, position:{x:ax, y:ay}});
     els.push({data:{id:b.id, label:b.name, kind:'device', vendor:b.vendor,
-                    role:rB, pkey:'dev:'+b.name,
-                    bg:dcB.bg, fg:dcB.fg, bd:dcB.bd}, position:{x:bx, y:by}});
+                    role:rB, pkey:'dev:'+b.name, bg:dcB.bg, fg:dcB.fg, bd:dcB.bd,
+                    overrideW:b.boxW||undefined, overrideH:b.boxH||undefined}, position:{x:bx, y:by}});
 
     const port=(m)=>{
       const i=m.iface, bits=[];
@@ -2725,6 +2781,7 @@ function render(){
     const gc=zoneColor(g);
     els.push({data:{id:'g_'+g.id, label:g.name, kind:'group',
                     gkind:g.parent?'zone':'site', bg:gc.bg, fg:gc.fg, bd:gc.bd,
+                    pad:(g.padding||26)+'px',
                     parent: g.parent && usedGroups.has(g.parent) ? 'g_'+g.parent : undefined}});
   }
 
@@ -2739,6 +2796,7 @@ function render(){
     els.push({data:{id:d.id, label:(selMode?(sel.has(d.id)?'☑ ':'☐ '):'')+d.name, kind:'device',
                     vendor:d.vendor, role, picked: sel.has(d.id)?1:0, pkey:'dev:'+d.name,
                     bg:dc.bg, fg:dc.fg, bd:dc.bd,
+                    overrideW:d.boxW||undefined, overrideH:d.boxH||undefined,
                     parent: (d.groupId && usedGroups.has(d.groupId)) ? 'g_'+d.groupId : undefined,
                     sub:(d.vendor==='palo-alto'?'firewall':(role==='switch'?'switch':'router'))+
                         (lo?' · '+lo+' lo':'')+(vc?' · '+vc+' vlan':'')+
@@ -2969,6 +3027,30 @@ function render(){
       if(moved){ STATE.bends[k]=edge.data('bend'); autosave(); }
     };
     cy.userPanningEnabled(false); cy.boxSelectionEnabled(false);
+    cy.on('mousemove', move); cy.on('mouseup', up); cy.on('tapend', up);
+  });
+  /* Grab the bottom-right corner of a device box to resize it. Anywhere else
+     on the box still does the normal Cytoscape drag-to-move. */
+  cy.on('mousedown','node[kind="device"]', evt=>{
+    const node=evt.target;
+    const rp=evt.renderedPosition||evt.position;
+    const bb=node.renderedBoundingBox();
+    if(Math.abs(rp.x-bb.x2)>12 || Math.abs(rp.y-bb.y2)>12) return;   // not the corner — let it drag
+    node.ungrabify();
+    const startW=node.data('w')||bb.w, startH=node.data('h')||bb.h;
+    const z=cy.zoom();
+    const move=(e)=>{
+      const p=e.renderedPosition||e.position;
+      const w=Math.max(70, startW+(p.x-rp.x)/z);
+      const h=Math.max(36, startH+(p.y-rp.y)/z);
+      node.data('w', w); node.data('h', h);
+    };
+    const up=()=>{
+      cy.off('mousemove', move); cy.off('mouseup', up); cy.off('tapend', up);
+      node.grabify();
+      const d=STATE.model && STATE.model.devices.find(x=>x.id===node.id());
+      if(d){ d.boxW=Math.round(node.data('w')); d.boxH=Math.round(node.data('h')); autosave(); }
+    };
     cy.on('mousemove', move); cy.on('mouseup', up); cy.on('tapend', up);
   });
   const writeNS = STATE.posWriteNS;
@@ -3851,6 +3933,7 @@ function rebuild(){
   renderGroups();
   renderProviders();
   renderClouds();
+  renderHealth();
   render();
   renderWarnings();
   const sel=document.getElementById('startdev');
@@ -3933,6 +4016,13 @@ function renderGroups(){
     const rs=document.createElement('button');
     rs.className='dev-x'; rs.textContent='↺'; rs.title='Use default colours';
     rs.onclick=(ev)=>{ ev.stopPropagation(); delete g.bg; delete g.fg; renderGroups(); render(); autosave(); };
+    const minus=document.createElement('button');
+    minus.className='dev-x'; minus.textContent='−'; minus.title='Smaller';
+    minus.style.marginLeft='3px';
+    minus.onclick=(ev)=>{ ev.stopPropagation(); g.padding=Math.max(8,(g.padding||26)-8); render(); autosave(); };
+    const plus=document.createElement('button');
+    plus.className='dev-x'; plus.textContent='+'; plus.title='Bigger';
+    plus.onclick=(ev)=>{ ev.stopPropagation(); g.padding=Math.min(120,(g.padding||26)+8); render(); autosave(); };
     const x=document.createElement('button'); x.className='dev-x'; x.textContent='×'; x.title='Remove';
     x.onclick=(ev)=>{
       ev.stopPropagation();
@@ -3942,7 +4032,7 @@ function renderGroups(){
       STATE.groups=groups().filter(z=>!gone.has(z.id));
       rebuild();
     };
-    li.append(nm,bgIn,fgIn,rs,x);
+    li.append(nm,bgIn,fgIn,rs,minus,plus,x);
     li.onclick=()=>{ const el=document.getElementById('grp-name'); el.value=g.name; el.focus(); };
     ul.appendChild(li);
     for(const z of groups().filter(y=>y.parent===g.id)) draw(z,1);
@@ -4586,6 +4676,13 @@ function showDevice(d, opts){
       '<span class="color-row" title="Box colour"><input type="color" id="dev-bg" value="'+
         esc(d.bg||TH('devBg'))+'"><input type="color" id="dev-fg" value="'+esc(d.fg||TH('devText'))+
         '"><button class="dev-x" id="dev-color-reset" title="Use default colours">↺</button></span></div>'+
+      '<p class="note" style="margin:6px 0 0">Box size <input type="number" id="dev-boxw" min="70" max="500" '+
+        'value="'+(d.boxW||'')+'" placeholder="auto" style="width:60px;background:var(--bg);color:var(--ink);'+
+        'border:1px solid var(--rule);border-radius:4px;padding:2px 5px;font-family:var(--mono)">'+
+        ' × <input type="number" id="dev-boxh" min="36" max="300" value="'+(d.boxH||'')+'" placeholder="auto" '+
+        'style="width:60px;background:var(--bg);color:var(--ink);border:1px solid var(--rule);border-radius:4px;'+
+        'padding:2px 5px;font-family:var(--mono)"> px, or drag the box\u2019s bottom-right corner on the map. '+
+        '<button class="btn tiny" id="dev-box-reset">Auto-size</button></p>'+
       '<div class="rt-form" style="margin-top:8px">'+
         '<select id="dev-zone"><option value="">no zone</option>'+
           groups().map(g=>'<option value="'+g.id+'"'+(d.groupId===g.id?' selected':'')+'>'+
@@ -4633,6 +4730,17 @@ function showDevice(d, opts){
   if(devFg) devFg.oninput=()=>{ d.fg=devFg.value; render(); autosave(); };
   const devColorReset=document.getElementById('dev-color-reset');
   if(devColorReset) devColorReset.onclick=()=>{ delete d.bg; delete d.fg; rebuild(); showDevice(d); };
+  const boxW=document.getElementById('dev-boxw'), boxH=document.getElementById('dev-boxh');
+  const applyBoxSize=()=>{
+    const w=parseInt(boxW.value,10), h=parseInt(boxH.value,10);
+    if(w) d.boxW=Math.max(70,w); else delete d.boxW;
+    if(h) d.boxH=Math.max(36,h); else delete d.boxH;
+    render(); autosave();
+  };
+  if(boxW) boxW.onchange=applyBoxSize;
+  if(boxH) boxH.onchange=applyBoxSize;
+  const boxReset=document.getElementById('dev-box-reset');
+  if(boxReset) boxReset.onclick=()=>{ delete d.boxW; delete d.boxH; render(); showDevice(d); autosave(); };
 
   const zoneSel=document.getElementById('dev-zone');
   if(zoneSel) zoneSel.onchange=()=>{ d.groupId=zoneSel.value||null; rebuild(); showDevice(d); };
@@ -5075,19 +5183,68 @@ document.getElementById('run').onclick=()=>{
   if(e.key==='Enter') runTrace();     // Enter always traces, never stops
 }));
 
+/* What each device is missing before it can be trusted for tracing:
+   a config to parse, a real routing table (vs. inferred), and CDP/LLDP for
+   any L2 story at all. */
+function deviceReadiness(devices){
+  const noConfig=[], noTable=[], noNeighbors=[];
+  for(const d of devices){
+    if(!(d.rawText||'').trim()) noConfig.push(d);
+    if(!d.manualRoutes || !d.manualRoutes.length) noTable.push(d);
+    if(!d.neighbors || !d.neighbors.length) noNeighbors.push(d);
+  }
+  return {noConfig, noTable, noNeighbors};
+}
+function renderHealth(){
+  const body=document.getElementById('health-body');
+  const countEl=document.getElementById('health-count');
+  if(!body) return;
+  const devs=STATE.devices||[];
+  if(!devs.length){
+    body.innerHTML='<p class="health-ok">No devices loaded yet.</p>';
+    if(countEl) countEl.textContent='';
+    return;
+  }
+  const r=deviceReadiness(devs);
+  const total=r.noConfig.length+r.noTable.length+r.noNeighbors.length;
+  if(countEl) countEl.textContent = total ? total+' item'+(total===1?'':'s') : 'all set';
+
+  const chips=(list)=>list.map(d=>'<span class="health-chip" data-hdev="'+esc(d.id)+'">'+esc(d.name)+'</span>').join('');
+  const group=(title, list, note)=> list.length
+    ? '<div class="health-group"><h3>'+esc(title)+' ('+list.length+')</h3><div class="health-chips">'+chips(list)+'</div></div>'
+    : '';
+
+  const html =
+    group('No config loaded', r.noConfig, '') +
+    group('No routing table imported — using inferred routes only', r.noTable, '') +
+    group('No CDP/LLDP neighbors — no layer 2 adjacency', r.noNeighbors, '');
+
+  body.innerHTML = html || '<p class="health-ok">Every device has a config, an imported routing table, and neighbor data.</p>';
+  body.querySelectorAll('[data-hdev]').forEach(el=>{
+    el.onclick=()=>{
+      const d=STATE.devices.find(x=>x.id===el.dataset.hdev);
+      if(d) showDevice(d);
+    };
+  });
+}
+
 /* ============================================================
    Panel sizing — drag the gutters, or collapse a panel entirely
    ============================================================ */
-const PANEL={left:290, right:400, leftMin:200, rightMin:280, max:640};
-STATE.ui = STATE.ui || {left:PANEL.left, right:PANEL.right, leftOpen:true, rightOpen:true};
+const PANEL={left:290, right:400, leftMin:200, rightMin:280, max:640,
+             bottom:220, bottomMin:90, bottomMax:520};
+STATE.ui = STATE.ui || {left:PANEL.left, right:PANEL.right, leftOpen:true, rightOpen:true,
+                        bottom:PANEL.bottom, bottomOpen:true};
 
 function applyPanels(){
   const u=STATE.ui;
   document.documentElement.style.setProperty('--left',  (u.leftOpen  ? u.left  : 0)+'px');
   document.documentElement.style.setProperty('--right', (u.rightOpen ? u.right : 0)+'px');
-  const l=document.getElementById('tog-l'), r=document.getElementById('tog-r');
+  document.documentElement.style.setProperty('--bottom', (u.bottomOpen ? (u.bottom||PANEL.bottom) : 0)+'px');
+  const l=document.getElementById('tog-l'), r=document.getElementById('tog-r'), b=document.getElementById('tog-b');
   if(l){ l.textContent = u.leftOpen?'‹':'›'; l.title = (u.leftOpen?'Hide':'Show')+' the left panel'; }
   if(r){ r.textContent = u.rightOpen?'›':'‹'; r.title = (u.rightOpen?'Hide':'Show')+' the right panel'; }
+  if(b){ b.textContent = u.bottomOpen?'▾':'▴'; b.title = (u.bottomOpen?'Minimize':'Show')+' device readiness'; }
   if(STATE.cy) STATE.cy.resize();
 }
 function openRight(){
@@ -5137,6 +5294,35 @@ function initPanels(){
   drag('gut-r','right');
   document.getElementById('tog-l').onclick=()=>{ STATE.ui.leftOpen=!STATE.ui.leftOpen; applyPanels(); autosave(); };
   document.getElementById('tog-r').onclick=()=>{ STATE.ui.rightOpen=!STATE.ui.rightOpen; applyPanels(); autosave(); };
+
+  const gb=document.getElementById('gut-b');
+  if(gb){
+    gb.addEventListener('mousedown', ev=>{
+      if(ev.target.classList.contains('pan-toggle-h')) return;
+      ev.preventDefault();
+      const startY=ev.clientY, start=STATE.ui.bottom||PANEL.bottom;
+      if(!STATE.ui.bottomOpen) STATE.ui.bottomOpen=true;
+      gb.classList.add('dragging'); document.body.classList.add('resizing-v');
+      let raf=null;
+      const move=(e)=>{
+        const delta = startY - e.clientY;                 // drag up to grow
+        STATE.ui.bottom = Math.max(PANEL.bottomMin, Math.min(PANEL.bottomMax, start+delta));
+        if(!raf) raf=requestAnimationFrame(()=>{ raf=null; applyPanels(); });
+      };
+      const up=()=>{
+        window.removeEventListener('mousemove',move); window.removeEventListener('mouseup',up);
+        gb.classList.remove('dragging'); document.body.classList.remove('resizing-v');
+        applyPanels(); autosave();
+      };
+      window.addEventListener('mousemove',move); window.addEventListener('mouseup',up);
+    });
+    gb.addEventListener('dblclick', ev=>{
+      if(ev.target.classList.contains('pan-toggle-h')) return;
+      STATE.ui.bottom=PANEL.bottom; STATE.ui.bottomOpen=true; applyPanels(); autosave();
+    });
+  }
+  document.getElementById('tog-b').onclick=()=>{ STATE.ui.bottomOpen=!STATE.ui.bottomOpen; applyPanels(); autosave(); };
+
   window.addEventListener('resize', ()=>{ if(STATE.cy) STATE.cy.resize(); });
 }
 
@@ -5197,6 +5383,7 @@ function projectObject(){
       show: d.show!==false,
       group: d.groupId||null,
       bg: d.bg||null, fg: d.fg||null, nopol: !!d.noPolicy,
+      boxW: d.boxW||null, boxH: d.boxH||null,
       nbrs: d.neighbors||[],
       bgp: d.bgpTable||[],
       auth:d.tableAuthoritative,
@@ -5238,6 +5425,8 @@ function loadProject(obj){
     d.show = pd.show!==false;
     d.groupId = pd.group||null;
     d.noPolicy = !!pd.nopol;
+    if(pd.boxW) d.boxW=pd.boxW;
+    if(pd.boxH) d.boxH=pd.boxH;
     if(pd.bg) d.bg=pd.bg;
     if(pd.fg) d.fg=pd.fg;
     d.neighbors = Array.isArray(pd.nbrs) ? pd.nbrs : [];
@@ -5411,6 +5600,11 @@ function initTheme(){
     bw.value=STATE.theme.boxBorderW||2;
     bw.oninput=()=>{ STATE.theme.boxBorderW=parseInt(bw.value,10)||2; applyTheme(); autosave(); };
   }
+  const gs=document.getElementById('th-gridStyle');
+  if(gs){
+    gs.value=STATE.theme.gridStyle||'dots';
+    gs.onchange=()=>{ STATE.theme.gridStyle=gs.value; applyTheme(); autosave(); };
+  }
   const boolMap={canvasGrid:'th-canvasGrid', zoneGrid:'th-zoneGrid'};
   for(const k in boolMap){
     const el=document.getElementById(boolMap[k]);
@@ -5423,6 +5617,7 @@ function initTheme(){
     for(const k in map) if(document.getElementById(map[k])) document.getElementById(map[k]).value=STATE.theme[k];
     for(const k in boolMap) if(document.getElementById(boolMap[k])) document.getElementById(boolMap[k]).checked=!!STATE.theme[k];
     if(bw) bw.value=STATE.theme.boxBorderW||2;
+    if(gs) gs.value=STATE.theme.gridStyle||'dots';
     applyTheme(); autosave();
   };
   document.getElementById('th-dark').onclick=()=>applyPreset(THEME_DEFAULT);
