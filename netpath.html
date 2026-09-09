@@ -666,7 +666,7 @@ function parseCidr(s){
    State
    ============================================================ */
 const STATE = { devices:[], model:null, cy:null, selected:null, lastTrace:null, devTab:'overview', devSubTab:'interfaces', editingConfig:false, pinFocusLine:null, traceMode:'after', renaming:false, clouds:[], fileName:null, fileHandle:null, bends:{}, lineWidths:{},
-  vrfInclude:new Set(), vsysInclude:new Set() };
+  vrfOff:new Set(), vsysOff:new Set() };
 let cloudSeq = 0;
 let devSeq = 0;
 
@@ -1667,13 +1667,18 @@ function buildModel(devices, opts){
     }
   }
 
-  // duplicate addresses on a segment
+  /* Duplicate addresses on a segment. The same address in two different VRFs,
+     or in two different firewall vsys, is normal — those are separate routing
+     tables and never see each other. Only flag a genuine clash: same address,
+     same context. */
+  const ctxOf=(m)=> (m.iface.vsys ? 'vsys:'+m.iface.vsys : 'vrf:'+(m.iface.vrf||'default'));
   for(const k in subnets){
     const seen={};
     for(const m of subnets[k].members){
-      const s=int2ip(m.addr.ip);
+      const s=int2ip(m.addr.ip)+'|'+ctxOf(m);
       if(seen[s] && seen[s].name!==m.dev.name)
-        warn(s+' is configured on both '+seen[s].name+' and '+m.dev.name+'.', m.dev.id, m.addr.line);
+        warn(int2ip(m.addr.ip)+' is configured on both '+seen[s].name+' and '+m.dev.name+
+             ' in the same '+(m.iface.vsys?'vsys':'VRF')+'.', m.dev.id, m.addr.line);
       seen[s]=m.dev;
     }
   }
@@ -2372,6 +2377,24 @@ const DEFAULT_ZONES=['Internet','DMZ','Internal','Bastion'];
 function groups(){ return STATE.groups = STATE.groups || []; }
 function groupById(id){ return groups().find(g=>g.id===id) || null; }
 function zoneOf(dev){ return dev.groupId ? groupById(dev.groupId) : null; }
+/* The top-level site a device sits in — a zone's parent, or the zone itself
+   if it has none. */
+function siteOf(dev){
+  let g=zoneOf(dev);
+  if(!g) return null;
+  while(g && g.parent){ const p=groupById(g.parent); if(!p) break; g=p; }
+  return g;
+}
+/* A firewall in one datacentre must not appear cabled to switches in another.
+   Two devices may share a subnet across sites in the configs, but drawing a
+   firewall straight onto a foreign DC's layer 2 is wrong, so those pairings
+   are dropped. Same site, or either side unplaced, is fine. */
+function crossSiteFw(a, b){
+  if(!isFirewall(a) && !isFirewall(b)) return false;
+  const sa=siteOf(a), sb=siteOf(b);
+  if(!sa || !sb) return false;                 // not placed in a site: no opinion
+  return sa.id!==sb.id;
+}
 
 /* Match a device against a search term: an address, a subnet, a VLAN or a VRF. */
 function findMatches(q){
@@ -2453,16 +2476,16 @@ function allVsysNames(){
    with one interface in a DR VRF and another in production is only partly in
    scope — so its production links must not be drawn just because the device
    qualified somewhere else. Exclusions always beat inclusions. */
-/* Scope is include-only. Nothing selected means everything shows; select a
-   VRF or VSYS and only what belongs to it shows. */
+/* Everything is in scope by default. Removing a VRF or VSYS pushes it to the
+   removed list, and only then does anything disappear. */
 function scopeSets(){
-  STATE.vrfInclude  = STATE.vrfInclude  || new Set();
-  STATE.vsysInclude = STATE.vsysInclude || new Set();
-  return {vi:STATE.vrfInclude, si:STATE.vsysInclude};
+  STATE.vrfOff  = STATE.vrfOff  || new Set();
+  STATE.vsysOff = STATE.vsysOff || new Set();
+  return {vo:STATE.vrfOff, so:STATE.vsysOff};
 }
 function scopeActive(){
   const s=scopeSets();
-  return !!(s.vi.size || s.si.size);
+  return !!(s.vo.size || s.so.size);
 }
 /* Explicit exclusion only — separate from the include test, because an
    the segment is the unit of scoping. */
@@ -2497,20 +2520,10 @@ function segmentVrf(sn){
   for(const m of sn.members){ const v=effVrf(m.iface); if(v && v!==UNMATCHED) return v; }
   return UNMATCHED;
 }
-/* The segment's VRF — taken from the switch — must be on the include list. */
+/* A segment survives while any of its ends does. */
 function segmentInScope(sn){
   if(!scopeActive() || !sn) return true;
-  const s=scopeSets();
-  if(s.vi.size){
-    const v=segmentVrf(sn);
-    if(!v || !s.vi.has(v)) return false;
-  }
-  if(s.si.size){
-    // a VSYS include only constrains segments that actually touch a firewall
-    const fwEnds=sn.members.filter(m=>isFirewall(m.dev));
-    if(fwEnds.length && !fwEnds.some(m=>m.iface.vsys && s.si.has(m.iface.vsys))) return false;
-  }
-  return true;
+  return sn.members.some(m=>ifaceInScope(m.iface));
 }
 function ifaceInScope(i){
   if(!scopeActive() || !i) return true;
@@ -2521,18 +2534,18 @@ function ifaceInScope(i){
   const s=scopeSets();
   const vsys=i.vsys || null;
 
-  if(s.vi.size){
+  if(s.vo.size){
     /* A firewall port can face several switches on the same VLAN and subnet,
-       each in its own VRF. It is in scope if any one of those is selected.
-       Everything else is judged on its single VRF. */
+       each in its own VRF. It stays as long as at least one of those VRFs has
+       not been removed. Everything else is judged on its single VRF. */
     const mine = (isFirewall(i.dev) && !STATE.scopeStrict)
-      ? (i.scopeVrfs && i.scopeVrfs.size ? [...i.scopeVrfs] : [])
+      ? (i.scopeVrfs && i.scopeVrfs.size ? [...i.scopeVrfs] : [effVrf(i)])
       : [effVrf(i)];
-    if(!mine.some(v=>v && s.vi.has(v))) return false;
+    if(mine.length && mine.every(v=>v && s.vo.has(v))) return false;
   }
+  if(s.so.size && vsys && s.so.has(vsys)) return false;
   /* VSYS only exists on firewalls, so a VSYS include must not disqualify
      routers and switches that have no vsys at all. */
-  if(s.si.size && vsys && !s.si.has(vsys)) return false;
   return true;
 }
 function routeInScope(r, dev){
@@ -2541,7 +2554,7 @@ function routeInScope(r, dev){
   if(isFirewall(dev) && !STATE.scopeStrict) return true;   // VR names are not VRFs; routes stay
   const s=scopeSets();
   const vrf=(r && r.vrf) || 'default';
-  if(s.vi.size && !s.vi.has(vrf)) return false;
+  if(s.vo.size && s.vo.has(vrf)) return false;
   return true;
 }
 function deviceInScope(d){
@@ -2572,6 +2585,7 @@ function portVlans(dev, portName){
   return out;
 }
 function l2InScope(model, L){
+  if(crossSiteFw(L.a.dev, L.b.dev)) return false;
   if(!scopeActive()) return true;
   const pa=effL2(L.a.dev, L.a.port), pb=effL2(L.b.dev, L.b.port);
   // a trunk only counts if a VLAN on it has an in-scope gateway
@@ -2609,18 +2623,21 @@ function renderVrfFilter(){
   const vrfs=allVrfNames(), vsyses=allVsysNames();
 
   const chip=(n,kind)=>{
-    const inc=(kind==='vrf'?s.vi:s.si).has(n);
-    return '<span class="sc'+(inc?' inc':'')+'" data-'+kind+'="'+esc(n)+'" '+
-      'title="Click to show only this">'+
-      '<span class="sig">'+(inc?'\u2713':'\u00b7')+'</span><span class="nm">'+esc(n)+'</span></span>';
+    const off=(kind==='vrf'?s.vo:s.so).has(n);
+    if(off) return '';                       // removed ones live in the right column
+    return '<span class="sc inc" data-'+kind+'="'+esc(n)+'" '+
+      'title="Click to remove from the diagram">'+
+      '<span class="sig">\u2713</span><span class="nm">'+esc(n)+'</span></span>';
   };
-  const list=(names,kind)=> names.length
-    ? names.map(n=>chip(n,kind)).join('')
-    : '<span class="scope-empty">none found</span>';
+  const list=(names,kind)=>{
+    const on=names.filter(n=>!(kind==='vrf'?s.vo:s.so).has(n));
+    return on.length ? on.map(n=>chip(n,kind)).join('')
+                     : '<span class="scope-empty">all removed</span>';
+  };
 
   const applied=[
-    ...[...s.vi].map(n=>({n,kind:'vrf'})),
-    ...[...s.si].map(n=>({n,kind:'vsys'}))
+    ...[...s.vo].map(n=>({n,kind:'vrf'})),
+    ...[...s.so].map(n=>({n,kind:'vsys'}))
   ];
   const inScope=STATE.devices.filter(deviceInScope).length;
 
@@ -2634,7 +2651,7 @@ function renderVrfFilter(){
         '<div class="scope-list" id="vrf-list">'+list(vrfs,'vrf')+'</div>'+
         '<div class="scope-wild">'+
           '<input id="vrf-wild" placeholder="*_DR_INT" spellcheck="false">'+
-          '<button class="btn" id="vrf-inc">Show these</button>'+
+          '<button class="btn danger" id="vrf-inc">Remove these</button>'+
         '</div>'+
       '</div>'+
 
@@ -2645,42 +2662,42 @@ function renderVrfFilter(){
         '<div class="scope-list" id="vsys-list">'+list(vsyses,'vsys')+'</div>'+
         '<div class="scope-wild">'+
           '<input id="vsys-wild" placeholder="*_DR_INT" spellcheck="false">'+
-          '<button class="btn" id="vsys-inc">Show these</button>'+
+          '<button class="btn danger" id="vsys-inc">Remove these</button>'+
         '</div>'+
       '</div>'+
 
       '<div class="scope-col">'+
-        '<h3 class="scope-h">Applied <span class="n">'+applied.length+'</span></h3>'+
+        '<h3 class="scope-h">Removed <span class="n">'+applied.length+'</span></h3>'+
         (applied.length
-          ? '<div class="scope-sum"><b>'+inScope+'</b> of '+STATE.devices.length+' devices in scope</div>'+
+          ? '<div class="scope-sum"><b>'+inScope+'</b> of '+STATE.devices.length+' devices still shown</div>'+
             '<div class="scope-list">'+applied.map(x=>
-              '<span class="sc inc" data-clear="'+esc(x.kind+'|'+x.n)+'" title="Click to remove">'+
-              '<span class="sig">\u2713</span>'+
-              '<span class="nm">'+esc(x.n)+'</span>\u00d7</span>').join('')+'</div>'
-          : '<div class="scope-empty">Nothing applied \u2014 the whole project is shown.</div>')+
+              '<span class="sc exc" data-clear="'+esc(x.kind+'|'+x.n)+'" title="Click to put it back">'+
+              '<span class="sig">\u2212</span>'+
+              '<span class="nm">'+esc(x.n)+'</span>\u21a9</span>').join('')+'</div>'
+          : '<div class="scope-empty">Nothing removed \u2014 the whole project is shown.</div>')+
         '<div class="scope-wild">'+
           '<button class="btn btn-go" id="vrf-view" style="flex:1">View filtered</button>'+
-          '<button class="btn" id="vrf-clear">Clear</button>'+
+          '<button class="btn" id="vrf-clear">Put all back</button>'+
         '</div>'+
-        '<p class="scope-hint">Nothing selected shows everything. Selecting a VRF shows only '+
-        'links in it \u2014 the VRF is read from the switch or router side, never from the '+
-        'firewall\u2019s zone or virtual router.</p>'+
+        '<p class="scope-hint">Everything is shown by default. Click a VRF to remove it; it '+
+        'moves here and can be put back. The VRF is read from the switch or router side, '+
+        'never from the firewall\u2019s zone or virtual router.</p>'+
       '</div>'+
 
     '</div>';
 
   const cntEl=document.getElementById('scope-count');
   if(cntEl) cntEl.textContent = applied.length
-    ? applied.length+' applied \u00b7 '+inScope+'/'+STATE.devices.length+' devices'
+    ? applied.length+' removed \u00b7 '+inScope+'/'+STATE.devices.length+' devices'
     : 'whole project';
 
   const refresh=()=>{ renderVrfFilter(); render(); autosave(); };
   const toggle=(n,set)=>{ set.has(n) ? set.delete(n) : set.add(n); };
-  box.querySelectorAll('[data-vrf]').forEach(el=>el.onclick=()=>{ toggle(el.dataset.vrf, s.vi); refresh(); });
-  box.querySelectorAll('[data-vsys]').forEach(el=>el.onclick=()=>{ toggle(el.dataset.vsys, s.si); refresh(); });
+  box.querySelectorAll('[data-vrf]').forEach(el=>el.onclick=()=>{ s.vo.add(el.dataset.vrf); refresh(); });
+  box.querySelectorAll('[data-vsys]').forEach(el=>el.onclick=()=>{ s.so.add(el.dataset.vsys); refresh(); });
   box.querySelectorAll('[data-clear]').forEach(el=>el.onclick=()=>{
     const [kind,name]=el.dataset.clear.split('|');
-    (kind==='vrf'?s.vi:s.si).delete(name); refresh();
+    (kind==='vrf'?s.vo:s.so).delete(name); refresh();
   });
   /* Narrow the visible chips as you type. Plain text matches anywhere in the
      name; a * makes it a wildcard. Purely visual — it changes nothing about
@@ -2736,10 +2753,10 @@ function renderVrfFilter(){
     refresh();
   };
   const bind=(id,fn)=>{ const e=document.getElementById(id); if(e) e.onclick=fn; };
-  bind('vrf-inc',  ()=>wild('vrf-wild',  'vrf-list',  vrfs,   s.vi));
-  bind('vsys-inc', ()=>wild('vsys-wild', 'vsys-list', vsyses, s.si));
+  bind('vrf-inc',  ()=>wild('vrf-wild',  'vrf-list',  vrfs,   s.vo));
+  bind('vsys-inc', ()=>wild('vsys-wild', 'vsys-list', vsyses, s.so));
   bind('vrf-view', ()=>setView('vrf'));
-  bind('vrf-clear',()=>{ s.vi.clear(); s.si.clear(); refresh(); });
+  bind('vrf-clear',()=>{ s.vo.clear(); s.so.clear(); refresh(); });
 }
 
 /* Rotate the current view's saved layout about its centre. */
@@ -3166,6 +3183,7 @@ function render(){
     const shared=[];
     for(const k in model.subnets){
       const sn=model.subnets[k];
+      if(crossSiteFw(a,b)) continue;
       const ma=sn.members.filter(x=>x.dev===a && !x.iface.tagOdd && ifaceInScope(x.iface)),
             mb=sn.members.filter(x=>x.dev===b && !x.iface.tagOdd && ifaceInScope(x.iface));
       if(ma.length && mb.length) shared.push({key:k, a:ma, b:mb});
@@ -3405,7 +3423,16 @@ function render(){
        several VRFs, and selecting one of them must not drag in the others.
        An interface whose VLAN tag disagrees with the rest is not on this
        link at all. */
-    const members=sn.members.filter(m=>vis(m.dev) && !m.iface.tagOdd && ifaceInScope(m.iface));
+    let members=sn.members.filter(m=>vis(m.dev) && !m.iface.tagOdd && ifaceInScope(m.iface));
+    /* A firewall stays on this segment only if something in its own site is
+       also on it. Otherwise the segment reaches into another datacentre and
+       drawing the firewall onto it would invent a cross-DC cable. */
+    members=members.filter(m=>{
+      if(!isFirewall(m.dev)) return true;
+      const others=members.filter(o=>o.dev!==m.dev);
+      if(!others.length) return true;
+      return others.some(o=>!crossSiteFw(m.dev, o.dev));
+    });
     if(!members.length) continue;
     if(isStub(k,sn)) continue;
     const devSet=new Set(members.map(m=>m.dev));
@@ -3485,7 +3512,11 @@ function render(){
 
   // search results and selections borrow the topology arrangement to read from,
   // but always write positions back into their own view
-  STATE.posNS = (view==='find'||view==='sel') ? 'simple|' : view+'|';
+  /* Filtering must not rearrange anything: a filtered diagram reads the same
+     saved positions as the topology, so devices stay exactly where they are
+     and simply come and go. */
+  STATE.posNS = (view==='find'||view==='sel'||view==='vrf'||scopeActive())
+    ? 'simple|' : view+'|';
   STATE.posWriteNS = view+'|';
   const keyOf = e => nodePosKey(e.data);
   const nodes = els.filter(e=>!e.data.source && e.data.kind!=='group');
@@ -4814,6 +4845,7 @@ function showLink(a,b){
   const shared=[];
   for(const k in m.subnets){
     const sn=m.subnets[k];
+    if(crossSiteFw(a,b)) continue;
     const ma=sn.members.filter(x=>x.dev===a && !x.iface.tagOdd && ifaceInScope(x.iface)),
           mb=sn.members.filter(x=>x.dev===b && !x.iface.tagOdd && ifaceInScope(x.iface));
     if(ma.length && mb.length) shared.push({key:k, a:ma, b:mb});
@@ -6279,8 +6311,8 @@ function projectObject(){
     lineWidths:STATE.lineWidths||{},
     scopeIgnoreFw: !!STATE.scopeIgnoreFw,
     scopeStrict: !!STATE.scopeStrict,
-    vrfInclude:[...(STATE.vrfInclude||[])],
-    vsysInclude:[...(STATE.vsysInclude||[])],
+    vrfOff:[...(STATE.vrfOff||[])],
+    vsysOff:[...(STATE.vsysOff||[])],
     clouds:STATE.clouds||[],
     groups:groups(),
     layer:document.getElementById('opt-layer').value,
@@ -6321,8 +6353,8 @@ function loadProject(obj){
   // older projects stored a single include-only list per facet
   STATE.scopeIgnoreFw = !!obj.scopeIgnoreFw;
   STATE.scopeStrict = !!obj.scopeStrict;
-  STATE.vrfInclude  = new Set(obj.vrfInclude  || obj.vrfFilter  || []);
-  STATE.vsysInclude = new Set(obj.vsysInclude || obj.vsysFilter || []);
+  STATE.vrfOff  = new Set(obj.vrfOff  || []);
+  STATE.vsysOff = new Set(obj.vsysOff || []);
   applyPanels();
   initTheme();
   const st=document.querySelector('.stage');
