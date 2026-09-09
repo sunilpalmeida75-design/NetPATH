@@ -666,7 +666,7 @@ function parseCidr(s){
    State
    ============================================================ */
 const STATE = { devices:[], model:null, cy:null, selected:null, lastTrace:null, devTab:'overview', devSubTab:'interfaces', editingConfig:false, pinFocusLine:null, traceMode:'after', renaming:false, clouds:[], fileName:null, fileHandle:null, bends:{}, lineWidths:{},
-  vrfInclude:new Set(), vrfExclude:new Set(), vsysInclude:new Set(), vsysExclude:new Set() };
+  vrfInclude:new Set(), vsysInclude:new Set() };
 let cloudSeq = 0;
 let devSeq = 0;
 
@@ -2404,11 +2404,15 @@ function globMatch(pattern, value){
   const re=new RegExp('^'+pattern.split('*').map(s=>s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('.*')+'$','i');
   return re.test(value);
 }
+/* Only switches and routers name VRFs. A firewall's zones and virtual routers
+   are never offered here — its interfaces inherit whatever VRF the switch VLAN
+   they match belongs to. */
 function allVrfNames(){
   const set=new Set();
   for(const d of STATE.devices){
-    for(const i of d.interfaces){ const v=effVrf(i); if(v) set.add(v); }
-    if(!isFirewall(d)) for(const r of (d.fib||[])) set.add(r.vrf||'default');
+    if(isFirewall(d)) continue;
+    for(const i of d.interfaces) set.add(i.vrf||'default');
+    for(const r of (d.fib||[])) set.add(r.vrf||'default');
   }
   return [...set].sort((a,b)=> a==='default'?-1 : b==='default'?1 : a.localeCompare(b));
 }
@@ -2423,20 +2427,19 @@ function allVsysNames(){
    with one interface in a DR VRF and another in production is only partly in
    scope — so its production links must not be drawn just because the device
    qualified somewhere else. Exclusions always beat inclusions. */
+/* Scope is include-only. Nothing selected means everything shows; select a
+   VRF or VSYS and only what belongs to it shows. */
 function scopeSets(){
   STATE.vrfInclude  = STATE.vrfInclude  || new Set();
-  STATE.vrfExclude  = STATE.vrfExclude  || new Set();
   STATE.vsysInclude = STATE.vsysInclude || new Set();
-  STATE.vsysExclude = STATE.vsysExclude || new Set();
-  return {vi:STATE.vrfInclude, ve:STATE.vrfExclude, si:STATE.vsysInclude, se:STATE.vsysExclude};
+  return {vi:STATE.vrfInclude, si:STATE.vsysInclude};
 }
 function scopeActive(){
   const s=scopeSets();
-  return !!(s.vi.size || s.ve.size || s.si.size || s.se.size);
+  return !!(s.vi.size || s.si.size);
 }
 /* Explicit exclusion only — separate from the include test, because an
-   exclusion is decisive: if either end of a link sits in an excluded VRF or
-   VSYS, the whole link goes, not just that end. */
+   the segment is the unit of scoping. */
 /* The VRF an interface is judged by. Switches and routers: their own. A
    firewall interface: the VRF of the switch VLAN it was matched to by tag and
    subnet — never its zone, never its virtual-router name. An unmatched
@@ -2447,20 +2450,10 @@ function effVrf(i){
   if(!i) return 'default';
   /* A firewall interface is judged by the switch VLAN it matched. If nothing
      matched it gets the name "(unmatched)" rather than nothing at all —
-     otherwise exclusions could never reach it, and "exclude every VRF but X"
-     would silently leave it on the map. It shows as a chip you can include or
-     exclude like any other. */
+     so an unmatched firewall port is simply never included, and never drawn
+     while a filter is active. */
   if(isFirewall(i.dev) && !STATE.scopeStrict) return i.scopeVrf || UNMATCHED;
   return i.vrf || 'default';
-}
-function ifaceExcluded(i){
-  if(!scopeActive() || !i) return false;
-  const s=scopeSets();
-  if(STATE.scopeIgnoreFw && isFirewall(i.dev)) return false;
-  const v=effVrf(i);
-  if(v && s.ve.has(v)) return true;
-  if(i.vsys && s.se.has(i.vsys)) return true;
-  return false;
 }
 /* A segment is judged as one unit, and the switch/router side is what names
    it. A firewall interface never decides a segment's VRF — it only ever
@@ -2478,18 +2471,9 @@ function segmentVrf(sn){
   for(const m of sn.members){ const v=effVrf(m.iface); if(v && v!==UNMATCHED) return v; }
   return UNMATCHED;
 }
-/* A segment is gone the moment any device on it is in an excluded VRF. */
-function segmentExcluded(sn){
-  if(!scopeActive() || !sn) return false;
-  const s=scopeSets();
-  const v=segmentVrf(sn);
-  if(v && s.ve.has(v)) return true;                    // the segment's own VRF is excluded
-  return sn.members.some(m=>ifaceExcluded(m.iface));   // or either end is
-}
-/* With an include list active, the segment's VRF must be on it. */
+/* The segment's VRF — taken from the switch — must be on the include list. */
 function segmentInScope(sn){
   if(!scopeActive() || !sn) return true;
-  if(segmentExcluded(sn)) return false;
   const s=scopeSets();
   if(s.vi.size){
     const v=segmentVrf(sn);
@@ -2512,9 +2496,7 @@ function ifaceInScope(i){
   const v=effVrf(i);
   const vsys=i.vsys || null;
 
-  if(v && s.ve.has(v)) return false;                    // excluded VRF wins
-  if(vsys && s.se.has(vsys)) return false;              // excluded VSYS wins
-  if(s.vi.size && !(v && s.vi.has(v))) return false;    // include set: must match
+  if(s.vi.size && !(v && s.vi.has(v))) return false;    // must be on the include list
   /* VSYS only exists on firewalls, so a VSYS include must not disqualify
      routers and switches that have no vsys at all. */
   if(s.si.size && vsys && !s.si.has(vsys)) return false;
@@ -2526,7 +2508,6 @@ function routeInScope(r, dev){
   if(isFirewall(dev) && !STATE.scopeStrict) return true;   // VR names are not VRFs; routes stay
   const s=scopeSets();
   const vrf=(r && r.vrf) || 'default';
-  if(s.ve.has(vrf)) return false;
   if(s.vi.size && !s.vi.has(vrf)) return false;
   return true;
 }
@@ -2561,13 +2542,12 @@ function portVlans(dev, portName){
 function l2InScope(model, L){
   if(!scopeActive()) return true;
   const pa=effL2(L.a.dev, L.a.port), pb=effL2(L.b.dev, L.b.port);
-  if(ifaceExcluded(pa) || ifaceExcluded(pb)) return false;   // either end excluded
-  // a trunk carrying any VLAN whose gateway is excluded goes too
+  // a trunk only counts if a VLAN on it has an in-scope gateway
   if(model && model.vlanReport){
     const vlans=new Set([...portVlans(L.a.dev,L.a.port), ...portVlans(L.b.dev,L.b.port)]);
     for(const v of vlans){
       const rep=model.vlanReport[v];
-      if(rep && rep.svi && ifaceExcluded(rep.svi.iface)) return false;
+      if(rep && rep.svi && !ifaceInScope(rep.svi.iface)) return false;
     }
   }
   // if either end is a routed interface, its own VRF/VSYS decides
@@ -2598,22 +2578,17 @@ function renderVrfFilter(){
 
   const chip=(n,kind)=>{
     const inc=(kind==='vrf'?s.vi:s.si).has(n);
-    const exc=(kind==='vrf'?s.ve:s.se).has(n);
-    const cls = 'sc'+(inc?' inc':'')+(exc?' exc':'');
-    const sig = inc?'+':exc?'\u2212':'\u00b7';
-    return '<span class="'+cls+'" data-'+kind+'="'+esc(n)+'" '+
-      'title="Click: include \u2192 exclude \u2192 off">'+
-      '<span class="sig">'+sig+'</span><span class="nm">'+esc(n)+'</span></span>';
+    return '<span class="sc'+(inc?' inc':'')+'" data-'+kind+'="'+esc(n)+'" '+
+      'title="Click to show only this">'+
+      '<span class="sig">'+(inc?'\u2713':'\u00b7')+'</span><span class="nm">'+esc(n)+'</span></span>';
   };
   const list=(names,kind)=> names.length
     ? names.map(n=>chip(n,kind)).join('')
     : '<span class="scope-empty">none found</span>';
 
   const applied=[
-    ...[...s.vi].map(n=>({n,kind:'vrf',mode:'include'})),
-    ...[...s.ve].map(n=>({n,kind:'vrf',mode:'exclude'})),
-    ...[...s.si].map(n=>({n,kind:'vsys',mode:'include'})),
-    ...[...s.se].map(n=>({n,kind:'vsys',mode:'exclude'}))
+    ...[...s.vi].map(n=>({n,kind:'vrf'})),
+    ...[...s.si].map(n=>({n,kind:'vsys'}))
   ];
   const inScope=STATE.devices.filter(deviceInScope).length;
 
@@ -2627,8 +2602,7 @@ function renderVrfFilter(){
         '<div class="scope-list" id="vrf-list">'+list(vrfs,'vrf')+'</div>'+
         '<div class="scope-wild">'+
           '<input id="vrf-wild" placeholder="*_DR_INT" spellcheck="false">'+
-          '<button class="btn" id="vrf-inc">Include</button>'+
-          '<button class="btn danger" id="vrf-exc">Exclude</button>'+
+          '<button class="btn" id="vrf-inc">Show these</button>'+
         '</div>'+
       '</div>'+
 
@@ -2639,8 +2613,7 @@ function renderVrfFilter(){
         '<div class="scope-list" id="vsys-list">'+list(vsyses,'vsys')+'</div>'+
         '<div class="scope-wild">'+
           '<input id="vsys-wild" placeholder="*_DR_INT" spellcheck="false">'+
-          '<button class="btn" id="vsys-inc">Include</button>'+
-          '<button class="btn danger" id="vsys-exc">Exclude</button>'+
+          '<button class="btn" id="vsys-inc">Show these</button>'+
         '</div>'+
       '</div>'+
 
@@ -2649,17 +2622,17 @@ function renderVrfFilter(){
         (applied.length
           ? '<div class="scope-sum"><b>'+inScope+'</b> of '+STATE.devices.length+' devices in scope</div>'+
             '<div class="scope-list">'+applied.map(x=>
-              '<span class="sc '+(x.mode==='include'?'inc':'exc')+'" '+
-              'data-clear="'+esc(x.kind+'|'+x.mode+'|'+x.n)+'" title="Click to remove">'+
-              '<span class="sig">'+(x.mode==='include'?'+':'\u2212')+'</span>'+
+              '<span class="sc inc" data-clear="'+esc(x.kind+'|'+x.n)+'" title="Click to remove">'+
+              '<span class="sig">\u2713</span>'+
               '<span class="nm">'+esc(x.n)+'</span>\u00d7</span>').join('')+'</div>'
           : '<div class="scope-empty">Nothing applied \u2014 the whole project is shown.</div>')+
         '<div class="scope-wild">'+
           '<button class="btn btn-go" id="vrf-view" style="flex:1">View filtered</button>'+
           '<button class="btn" id="vrf-clear">Clear</button>'+
         '</div>'+
-        '<p class="scope-hint">Only interfaces in scope are drawn. A device with a mix keeps '+
-        'its in-scope interfaces and links, and loses the rest.</p>'+
+        '<p class="scope-hint">Nothing selected shows everything. Selecting a VRF shows only '+
+        'links in it \u2014 the VRF is read from the switch or router side, never from the '+
+        'firewall\u2019s zone or virtual router.</p>'+
       '</div>'+
 
     '</div>';
@@ -2670,17 +2643,12 @@ function renderVrfFilter(){
     : 'whole project';
 
   const refresh=()=>{ renderVrfFilter(); render(); autosave(); };
-  const cycle=(n, incSet, excSet)=>{
-    if(incSet.has(n)){ incSet.delete(n); excSet.add(n); }
-    else if(excSet.has(n)){ excSet.delete(n); }
-    else incSet.add(n);
-  };
-  box.querySelectorAll('[data-vrf]').forEach(el=>el.onclick=()=>{ cycle(el.dataset.vrf, s.vi, s.ve); refresh(); });
-  box.querySelectorAll('[data-vsys]').forEach(el=>el.onclick=()=>{ cycle(el.dataset.vsys, s.si, s.se); refresh(); });
+  const toggle=(n,set)=>{ set.has(n) ? set.delete(n) : set.add(n); };
+  box.querySelectorAll('[data-vrf]').forEach(el=>el.onclick=()=>{ toggle(el.dataset.vrf, s.vi); refresh(); });
+  box.querySelectorAll('[data-vsys]').forEach(el=>el.onclick=()=>{ toggle(el.dataset.vsys, s.si); refresh(); });
   box.querySelectorAll('[data-clear]').forEach(el=>el.onclick=()=>{
-    const [kind,mode,name]=el.dataset.clear.split('|');
-    const set = kind==='vrf' ? (mode==='include'?s.vi:s.ve) : (mode==='include'?s.si:s.se);
-    set.delete(name); refresh();
+    const [kind,name]=el.dataset.clear.split('|');
+    (kind==='vrf'?s.vi:s.si).delete(name); refresh();
   });
   /* Narrow the visible chips as you type. Plain text matches anywhere in the
      name; a * makes it a wildcard. Purely visual — it changes nothing about
@@ -2737,11 +2705,9 @@ function renderVrfFilter(){
   };
   const bind=(id,fn)=>{ const e=document.getElementById(id); if(e) e.onclick=fn; };
   bind('vrf-inc',  ()=>wild('vrf-wild',  'vrf-list',  vrfs,   s.vi));
-  bind('vrf-exc',  ()=>wild('vrf-wild',  'vrf-list',  vrfs,   s.ve));
   bind('vsys-inc', ()=>wild('vsys-wild', 'vsys-list', vsyses, s.si));
-  bind('vsys-exc', ()=>wild('vsys-wild', 'vsys-list', vsyses, s.se));
   bind('vrf-view', ()=>setView('vrf'));
-  bind('vrf-clear',()=>{ s.vi.clear(); s.ve.clear(); s.si.clear(); s.se.clear(); refresh(); });
+  bind('vrf-clear',()=>{ s.vi.clear(); s.si.clear(); refresh(); });
 }
 
 /* Rotate the current view's saved layout about its centre. */
@@ -4791,7 +4757,7 @@ function ifaceCell(i){
 function routesAcross(from, to){
   const ips=new Set();
   for(const i of to.interfaces){
-    if(ifaceExcluded(i) || !ifaceInScope(i)) continue;
+    if(!ifaceInScope(i)) continue;
     for(const a of i.addrs) ips.add(a.ip);
   }
   const out={connected:0, static:0, table:0, igp:0, list:[]};
@@ -4919,11 +4885,11 @@ function showSegment(key){
       'so it is not treated as a link.</p><div id="warnbox"></div>';
     renderWarnings(); return;
   }
-  if(sn && segmentExcluded(sn)){
+  if(sn && !segmentInScope(sn)){
     STATE.selected=null; renderDevList();
     r.innerHTML='<h2 class="sec">'+esc(key)+'</h2>'+
-      '<p class="scope-note">This segment has a device in an excluded VRF or VSYS, '+
-      'so it is out of scope. Clear that exclusion to see it.</p><div id="warnbox"></div>';
+      '<p class="scope-note">This segment is in VRF '+esc(segmentVrf(sn)||'unknown')+
+      ', which is not on the VRF / VSYS include list.</p><div id="warnbox"></div>';
     renderWarnings(); return;
   }
   if(!sn){
@@ -5200,7 +5166,6 @@ function showDevice(d, opts){
      the VRF name lives on the switch. */
   const ifaceShown=(i)=>{
     if(!scopeOn) return true;
-    if(ifaceExcluded(i)) return false;
     if(ifaceInScope(i)) return true;
     const m=STATE.model;
     if(m) for(const k in m.subnets){
@@ -6290,9 +6255,7 @@ function projectObject(){
     scopeIgnoreFw: !!STATE.scopeIgnoreFw,
     scopeStrict: !!STATE.scopeStrict,
     vrfInclude:[...(STATE.vrfInclude||[])],
-    vrfExclude:[...(STATE.vrfExclude||[])],
     vsysInclude:[...(STATE.vsysInclude||[])],
-    vsysExclude:[...(STATE.vsysExclude||[])],
     clouds:STATE.clouds||[],
     groups:groups(),
     layer:document.getElementById('opt-layer').value,
@@ -6334,9 +6297,7 @@ function loadProject(obj){
   STATE.scopeIgnoreFw = !!obj.scopeIgnoreFw;
   STATE.scopeStrict = !!obj.scopeStrict;
   STATE.vrfInclude  = new Set(obj.vrfInclude  || obj.vrfFilter  || []);
-  STATE.vrfExclude  = new Set(obj.vrfExclude  || []);
   STATE.vsysInclude = new Set(obj.vsysInclude || obj.vsysFilter || []);
-  STATE.vsysExclude = new Set(obj.vsysExclude || []);
   applyPanels();
   initTheme();
   const st=document.querySelector('.stage');
