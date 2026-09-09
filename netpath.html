@@ -392,6 +392,7 @@ table.fib td:first-child{color:var(--ink)}
       <h2>VRF / VSYS scope</h2>
       <span class="count" id="scope-count"></span>
       <span class="spacer"></span>
+      <label class="toggle" style="padding:3px 8px" title="Judge every interface only by its own VRF or virtual router. Firewall sub-interfaces will not inherit the VRF of the segment they sit on."><input type="checkbox" id="scope-strict"> Strict</label>
       <label class="toggle" style="padding:3px 8px"><input type="checkbox" id="scope-nofw"> Firewalls exempt</label>
       <label class="toggle" style="padding:3px 8px"><input type="checkbox" id="top-auto" checked> Auto-hide</label>
       <button class="btn tiny" id="top-pin" title="Keep open">Pin</button>
@@ -2360,6 +2361,26 @@ function scopeActive(){
   return !!(s.vi.size || s.ve.size || s.si.size || s.se.size);
 }
 function isFirewall(d){ return !!d && d.vendor==='palo-alto'; }
+/* Explicit exclusion only — separate from the include test, because an
+   exclusion is decisive: if either end of a link sits in an excluded VRF or
+   VSYS, the whole link goes, not just that end. */
+function ifaceExcluded(i){
+  if(!scopeActive() || !i) return false;
+  const s=scopeSets();
+  if(STATE.scopeIgnoreFw && isFirewall(i.dev)) return false;
+  const own=i.vrf || 'default';
+  const vrfs = (own!=='default' || STATE.scopeStrict)
+    ? [own]
+    : [own, ...(i.linkedVrfs||[])];
+  for(const v of vrfs) if(s.ve.has(v)) return true;
+  if(i.vsys && s.se.has(i.vsys)) return true;
+  return false;
+}
+/* A segment is gone the moment any device on it is in an excluded VRF. */
+function segmentExcluded(sn){
+  if(!scopeActive() || !sn) return false;
+  return sn.members.some(m=>ifaceExcluded(m.iface));
+}
 function ifaceInScope(i){
   if(!scopeActive() || !i) return true;
   const dev=i.dev;
@@ -2375,7 +2396,7 @@ function ifaceInScope(i){
      called "default" no matter which VRF the segment belongs to. Without this
      guard, two different VRFs sharing a subnet would pull each other into
      scope. */
-  const vrfs = own!=='default'
+  const vrfs = (own!=='default' || STATE.scopeStrict)
     ? new Set([own])
     : new Set([own, ...(i.linkedVrfs||[])]);
 
@@ -2419,6 +2440,15 @@ function portVlans(dev, portName){
 function l2InScope(model, L){
   if(!scopeActive()) return true;
   const pa=effL2(L.a.dev, L.a.port), pb=effL2(L.b.dev, L.b.port);
+  if(ifaceExcluded(pa) || ifaceExcluded(pb)) return false;   // either end excluded
+  // a trunk carrying any VLAN whose gateway is excluded goes too
+  if(model && model.vlanReport){
+    const vlans=new Set([...portVlans(L.a.dev,L.a.port), ...portVlans(L.b.dev,L.b.port)]);
+    for(const v of vlans){
+      const rep=model.vlanReport[v];
+      if(rep && rep.svi && ifaceExcluded(rep.svi.iface)) return false;
+    }
+  }
   // if either end is a routed interface, its own VRF/VSYS decides
   const routed = (p)=>p && p.addrs && p.addrs.length;
   if(routed(pa) || routed(pb))
@@ -3017,6 +3047,7 @@ function render(){
     const shared=[];
     for(const k in model.subnets){
       const sn=model.subnets[k];
+      if(segmentExcluded(sn)) continue;
       const ma=sn.members.filter(x=>x.dev===a && ifaceInScope(x.iface)),
             mb=sn.members.filter(x=>x.dev===b && ifaceInScope(x.iface));
       if(ma.length && mb.length) shared.push({key:k, a:ma, b:mb});
@@ -3207,6 +3238,7 @@ function render(){
   const stubCount={};
   for(const k in model.subnets){
     const sn=model.subnets[k];
+    if(segmentExcluded(sn)) continue;
     const mem=sn.members.filter(m=>vis(m.dev) && ifaceInScope(m.iface));
     if(mem.length && isStub(k,sn)){
       const id=mem[0].dev.id;
@@ -3252,6 +3284,7 @@ function render(){
   const drawnSubnets=new Set();
   if(layer!=='l2') for(const k in model.subnets){
     const sn=model.subnets[k];
+    if(segmentExcluded(sn)) continue;        // one excluded end kills the segment
     const members=sn.members.filter(m=>vis(m.dev) && ifaceInScope(m.iface));
     if(!members.length) continue;
     if(isStub(k,sn)) continue;
@@ -4637,7 +4670,7 @@ function ifaceCell(i){
 function routesAcross(from, to){
   const ips=new Set();
   for(const i of to.interfaces){
-    if(!ifaceInScope(i)) continue;
+    if(ifaceExcluded(i) || !ifaceInScope(i)) continue;
     for(const a of i.addrs) ips.add(a.ip);
   }
   const out={connected:0, static:0, table:0, igp:0, list:[]};
@@ -4661,6 +4694,7 @@ function showLink(a,b){
   const shared=[];
   for(const k in m.subnets){
     const sn=m.subnets[k];
+    if(segmentExcluded(sn)) continue;
     const ma=sn.members.filter(x=>x.dev===a && ifaceInScope(x.iface)),
           mb=sn.members.filter(x=>x.dev===b && ifaceInScope(x.iface));
     if(ma.length && mb.length) shared.push({key:k, a:ma, b:mb});
@@ -4757,6 +4791,13 @@ function showSegment(key){
   openRight();
   const m=STATE.model, sn=m.subnets[key];
   const r=document.getElementById('result');
+  if(sn && segmentExcluded(sn)){
+    STATE.selected=null; renderDevList();
+    r.innerHTML='<h2 class="sec">'+esc(key)+'</h2>'+
+      '<p class="scope-note">This segment has a device in an excluded VRF or VSYS, '+
+      'so it is out of scope. Clear that exclusion to see it.</p><div id="warnbox"></div>';
+    renderWarnings(); return;
+  }
   if(!sn){
     r.innerHTML='<p class="note">That segment is not in the current model.</p><div id="warnbox"></div>';
     renderWarnings(); return;
@@ -4881,7 +4922,8 @@ function showSelection(devs){
     const a=devs[i], b=devs[j], nets=[], l2=[], cl=[];
     for(const k in m.subnets){
       const sn=m.subnets[k];
-      if(sn.members.some(x=>x.dev===a && ifaceInScope(x.iface)) &&
+      if(!segmentExcluded(sn) &&
+         sn.members.some(x=>x.dev===a && ifaceInScope(x.iface)) &&
          sn.members.some(x=>x.dev===b && ifaceInScope(x.iface))) nets.push({k, sn});
     }
     for(const k in (m.l2links||{})){
@@ -4897,6 +4939,7 @@ function showSelection(devs){
   const external=[];
   for(const k in m.subnets){
     const sn=m.subnets[k];
+    if(segmentExcluded(sn)) continue;
     const scopedMem=sn.members.filter(x=>ifaceInScope(x.iface));
     const inside=scopedMem.filter(x=>inSet.has(x.dev.id));
     const outside=scopedMem.filter(x=>!inSet.has(x.dev.id));
@@ -5070,7 +5113,7 @@ function showDevice(d, opts){
     for(const k in STATE.model.subnets){
       const sn=STATE.model.subnets[k];
       if(sn.members.length<2 && sn.members[0].dev===d &&
-         (!scopeOn || ifaceInScope(sn.members[0].iface)))
+         (!scopeOn || (!segmentExcluded(sn) && ifaceInScope(sn.members[0].iface))))
         stubs.push({key:k, iface:sn.members[0].iface.name});
     }
     stubs.sort((a,b)=>a.key.localeCompare(b.key));
@@ -6040,6 +6083,11 @@ function initPanels(){
     if(STATE.ui.topPinned) STATE.ui.topOpen=true;
     applyPanels(); autosave();
   };
+  const strictBox=document.getElementById('scope-strict');
+  if(strictBox){
+    strictBox.checked=!!STATE.scopeStrict;
+    strictBox.onchange=()=>{ STATE.scopeStrict=strictBox.checked; renderVrfFilter(); render(); autosave(); };
+  }
   const noFw=document.getElementById('scope-nofw');
   if(noFw){
     noFw.checked=!!STATE.scopeIgnoreFw;
@@ -6098,6 +6146,7 @@ function projectObject(){
     bends:STATE.bends||{},
     lineWidths:STATE.lineWidths||{},
     scopeIgnoreFw: !!STATE.scopeIgnoreFw,
+    scopeStrict: !!STATE.scopeStrict,
     vrfInclude:[...(STATE.vrfInclude||[])],
     vrfExclude:[...(STATE.vrfExclude||[])],
     vsysInclude:[...(STATE.vsysInclude||[])],
@@ -6141,6 +6190,7 @@ function loadProject(obj){
   STATE.lineWidths = obj.lineWidths || {};
   // older projects stored a single include-only list per facet
   STATE.scopeIgnoreFw = !!obj.scopeIgnoreFw;
+  STATE.scopeStrict = !!obj.scopeStrict;
   STATE.vrfInclude  = new Set(obj.vrfInclude  || obj.vrfFilter  || []);
   STATE.vrfExclude  = new Set(obj.vrfExclude  || []);
   STATE.vsysInclude = new Set(obj.vsysInclude || obj.vsysFilter || []);
