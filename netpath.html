@@ -253,6 +253,10 @@ ol.hops li::before{
 .moddot{width:7px; height:7px; border-radius:50%; background:var(--ink-faint); flex:none}
 .moddot.on{background:var(--amber)}
 .cfgpane-label{font-size:11px; font-weight:600; color:var(--ink-faint); margin:14px 0 5px; display:flex; justify-content:space-between}
+details.vrf-group{margin-bottom:4px}
+details.vrf-group summary{cursor:pointer; list-style:revert; margin:14px 0 5px}
+details.vrf-group summary::marker{color:var(--ink-faint)}
+details.vrf-group[open] summary{margin-bottom:8px}
 .codeblock{
   background:var(--bg); border:1px solid var(--rule); border-radius:5px; overflow:auto; max-height:280px;
   font-family:var(--mono); font-size:11.5px; line-height:1.65;
@@ -359,11 +363,15 @@ table.fib td:first-child{color:var(--ink)}
       </div>
 
       <h2 class="sec">Project</h2>
+      <p class="note" id="proj-file-label" style="margin:0 0 8px">No project file loaded yet.</p>
       <div class="rt-form" style="margin-top:0">
         <input id="proj-name" class="wide" placeholder="project name" spellcheck="false">
       </div>
       <div class="btn-row">
-        <button class="btn" id="save-proj">Save project</button>
+        <button class="btn" id="save-proj">Save</button>
+        <button class="btn" id="saveas-proj">Save As</button>
+      </div>
+      <div class="btn-row">
         <button class="btn" id="open-proj">Open project</button>
         <button class="btn" id="clear-all">Clear all</button>
       </div>
@@ -379,6 +387,9 @@ table.fib td:first-child{color:var(--ink)}
         <input id="find-q" class="wide" placeholder="IP, subnet, vlan 30, vrf CUST-A" spellcheck="false">
         <div class="wide"><button class="btn" id="find-go" style="width:100%">Search</button></div>
       </div>
+
+      <h2 class="sec">VRF / VSYS filter</h2>
+      <div id="vrfvsys-body"></div>
 
       <h2 class="sec">Sites and zones</h2>
       <ul class="devs" id="grouplist"></ul>
@@ -471,6 +482,7 @@ table.fib td:first-child{color:var(--ink)}
           <option value="link">Link detail</option>
           <option value="sel">Selected devices</option>
           <option value="find">Search results</option>
+          <option value="vrf">VRF / VSYS filter</option>
         </select>
       </label>
       <label class="toggle"><input type="checkbox" id="opt-focus"> Switch to path view after trace</label>
@@ -596,7 +608,7 @@ function parseCidr(s){
 /* ============================================================
    State
    ============================================================ */
-const STATE = { devices:[], model:null, cy:null, selected:null, lastTrace:null, devTab:'overview', devSubTab:'interfaces', editingConfig:false, pinFocusLine:null, traceMode:'after', renaming:false, clouds:[] };
+const STATE = { devices:[], model:null, cy:null, selected:null, lastTrace:null, devTab:'overview', devSubTab:'interfaces', editingConfig:false, pinFocusLine:null, traceMode:'after', renaming:false, clouds:[], fileName:null, fileHandle:null };
 let cloudSeq = 0;
 let devSeq = 0;
 
@@ -979,6 +991,9 @@ function parsePanSet(text, fname){
     if(!line || line[0]==='#') continue;
     if(!/^set\s/i.test(line)) continue;
     let tk = tokenizeSet(line).slice(1);
+    // capture which vsys this line belongs to before the container prefix is stripped
+    let lineVsys=null;
+    if(/^vsys$/i.test(tk[0]) && tk.length>1) lineVsys=String(tk[1]);
     // strip container prefixes
     while(tk.length>1 && /^(devices|vsys|template|template-stack|config|device-group|shared)$/i.test(tk[0])){
       if(/^shared$/i.test(tk[0])) tk = tk.slice(1); else tk = tk.slice(2);
@@ -1023,7 +1038,7 @@ function parsePanSet(text, fname){
     if(k[0]==='zone' && k[2]==='network'){
       const zname=String(k[1]);
       const members = flat(k[4]!==undefined && Array.isArray(k[4]) ? k[4] : k.slice(4));
-      for(const mname of members){ if(mname) iface(String(mname)).zone=zname; }
+      for(const mname of members){ if(mname){ const ifc=iface(String(mname)); ifc.zone=zname; ifc.vsys=lineVsys||ifc.vsys||'vsys1'; } }
       dev.zones.add(zname);
       continue;
     }
@@ -1334,17 +1349,28 @@ function parsePanCurly(text, fname){
     if(c) iface(key, node.line).desc=c;
   });
 
-  // zones, wherever the zone block sits
-  panWalk(root, (key, node)=>{
-    if(key!=='zone') return;
-    for(const z of pEntries(node)){
-      const l3=pKid(z.node,'network','layer3');
-      if(!l3) continue;
-      dev.zones.add(z.name);
-      for(const m of l3.vals) iface(m, z.node.line).zone=z.name;
-      for(const m of pEntries(l3)) iface(m.name, z.node.line).zone=z.name;
-    }
-  });
+  // zones, wherever the zone block sits — tag with the enclosing vsys, if any
+  function tagZonesIn(node, vsysName){
+    panWalk(node, (key, zn)=>{
+      if(key!=='zone') return;
+      for(const z of pEntries(zn)){
+        const l3=pKid(z.node,'network','layer3');
+        if(!l3) continue;
+        dev.zones.add(z.name);
+        const tag=(name)=>{ const ifc=iface(name, z.node.line); ifc.zone=z.name; if(vsysName) ifc.vsys=vsysName; };
+        for(const m of l3.vals) tag(m);
+        for(const m of pEntries(l3)) tag(m.name);
+      }
+    });
+  }
+  const vsysContainer = pKid(root,'vsys');
+  if(vsysContainer){
+    // walk each named vsys separately so zones in different vsys don't merge
+    for(const v of pEntries(vsysContainer)) tagZonesIn(v.node, v.name);
+  } else {
+    // no vsys concept in this config at all — single implicit vsys1
+    tagZonesIn(root, 'vsys1');
+  }
 
   // virtual routers and their static routes
   panWalk(root, (key, node)=>{
@@ -2216,6 +2242,101 @@ function findMatches(q){
   return out;
 }
 
+/* Wildcard match — *_DR_INT selects anything containing that pattern anywhere
+   it appears once the stars are expanded; no wildcard means an exact name. */
+function globMatch(pattern, value){
+  if(!pattern || !value) return false;
+  if(pattern.indexOf('*')<0) return pattern.toLowerCase()===value.toLowerCase();
+  const re=new RegExp('^'+pattern.split('*').map(s=>s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('.*')+'$','i');
+  return re.test(value);
+}
+function allVrfNames(){
+  const set=new Set();
+  for(const d of STATE.devices){
+    for(const i of d.interfaces) set.add(i.vrf||'default');
+    for(const r of (d.fib||[])) set.add(r.vrf||'default');
+  }
+  return [...set].sort((a,b)=> a==='default'?-1 : b==='default'?1 : a.localeCompare(b));
+}
+function allVsysNames(){
+  const set=new Set();
+  for(const d of STATE.devices) for(const i of d.interfaces) if(i.vsys) set.add(i.vsys);
+  return [...set].sort();
+}
+/* Does this device have anything in the selected VRFs/VSYS? Either facet with
+   nothing selected imposes no constraint; both together combine with AND. */
+function deviceInScope(d, vrfSet, vsysSet){
+  const vrfOk = !vrfSet.size || d.interfaces.some(i=>vrfSet.has(i.vrf||'default')) ||
+                (d.fib||[]).some(r=>vrfSet.has(r.vrf||'default'));
+  const vsysOk = !vsysSet.size || d.interfaces.some(i=>i.vsys && vsysSet.has(i.vsys));
+  return vrfOk && vsysOk;
+}
+
+function renderVrfFilter(){
+  const box=document.getElementById('vrfvsys-body');
+  if(!box) return;
+  STATE.vrfFilter = STATE.vrfFilter || new Set();
+  STATE.vsysFilter = STATE.vsysFilter || new Set();
+  const vrfs=allVrfNames(), vsyses=allVsysNames();
+  const chipList=(names, set, kind)=> names.length
+    ? names.map(n=>'<span class="health-chip" data-'+kind+'="'+esc(n)+'" style="'+
+        (set.has(n)?'border-color:var(--cyan);color:var(--ink)':'')+'">'+esc(n)+'</span>').join(' ')
+    : '<p class="health-ok">None found yet.</p>';
+  box.innerHTML =
+    '<h3 style="font-size:11.5px;color:var(--ink-faint);margin:2px 0 6px">VRF ('+STATE.vrfFilter.size+' selected)</h3>'+
+    '<div class="health-chips">'+chipList(vrfs, STATE.vrfFilter, 'vrf')+'</div>'+
+    '<div class="rt-form" style="margin-top:8px">'+
+      '<input id="vrf-wild" placeholder="*_DR_INT or exact name" spellcheck="false">'+
+      '<button class="btn tiny" id="vrf-wild-go">Select</button>'+
+    '</div>'+
+    '<h3 style="font-size:11.5px;color:var(--ink-faint);margin:14px 0 6px">VSYS ('+STATE.vsysFilter.size+' selected)</h3>'+
+    '<div class="health-chips">'+chipList(vsyses, STATE.vsysFilter, 'vsys')+'</div>'+
+    '<div class="rt-form" style="margin-top:8px">'+
+      '<input id="vsys-wild" placeholder="*_DR_INT or exact name" spellcheck="false">'+
+      '<button class="btn tiny" id="vsys-wild-go">Select</button>'+
+    '</div>'+
+    '<div class="btn-row" style="margin-top:10px">'+
+      '<button class="btn btn-go" id="vrf-view">View filtered</button>'+
+      '<button class="btn" id="vrf-clear">Clear</button>'+
+    '</div>';
+  box.querySelectorAll('[data-vrf]').forEach(el=>el.onclick=()=>{
+    const n=el.dataset.vrf;
+    STATE.vrfFilter.has(n) ? STATE.vrfFilter.delete(n) : STATE.vrfFilter.add(n);
+    renderVrfFilter();
+    if(document.getElementById('opt-view').value==='vrf') render();
+  });
+  box.querySelectorAll('[data-vsys]').forEach(el=>el.onclick=()=>{
+    const n=el.dataset.vsys;
+    STATE.vsysFilter.has(n) ? STATE.vsysFilter.delete(n) : STATE.vsysFilter.add(n);
+    renderVrfFilter();
+    if(document.getElementById('opt-view').value==='vrf') render();
+  });
+  const vrfGo=document.getElementById('vrf-wild-go');
+  if(vrfGo) vrfGo.onclick=()=>{
+    const p=document.getElementById('vrf-wild').value.trim();
+    if(!p) return;
+    for(const n of vrfs) if(globMatch(p,n)) STATE.vrfFilter.add(n);
+    renderVrfFilter();
+    if(document.getElementById('opt-view').value==='vrf') render();
+  };
+  const vsysGo=document.getElementById('vsys-wild-go');
+  if(vsysGo) vsysGo.onclick=()=>{
+    const p=document.getElementById('vsys-wild').value.trim();
+    if(!p) return;
+    for(const n of vsyses) if(globMatch(p,n)) STATE.vsysFilter.add(n);
+    renderVrfFilter();
+    if(document.getElementById('opt-view').value==='vrf') render();
+  };
+  const vrfView=document.getElementById('vrf-view');
+  if(vrfView) vrfView.onclick=()=>setView('vrf');
+  const vrfClear=document.getElementById('vrf-clear');
+  if(vrfClear) vrfClear.onclick=()=>{
+    STATE.vrfFilter=new Set(); STATE.vsysFilter=new Set();
+    renderVrfFilter();
+    if(document.getElementById('opt-view').value==='vrf') render();
+  };
+}
+
 /* Rotate the current view's saved layout about its centre. */
 function rotateView(deg){
   const ns=STATE.posNS||'simple|';
@@ -2453,8 +2574,10 @@ function render(){
   const sel = STATE.selectedDevs = STATE.selectedDevs || new Set();
   // "Selected devices" view narrows the whole map to the chosen devices
   const found = (view==='find') ? new Set((STATE.findResult||{devs:[]}).devs.map(x=>x.dev.id)) : null;
+  const vrfSet = STATE.vrfFilter||new Set(), vsysSet = STATE.vsysFilter||new Set();
   const vis = d => view==='sel' ? sel.has(d.id)
                  : view==='find' ? found.has(d.id)
+                 : view==='vrf' ? deviceInScope(d, vrfSet, vsysSet)
                  : d.show!==false;
 
   /* Traced path only: rebuild the scene from the trace itself rather than the
@@ -2784,6 +2907,12 @@ function render(){
     if(STATE.cy){ STATE.cy.destroy(); STATE.cy=null; }
     return;
   }
+  if(view==='vrf' && !vrfSet.size && !vsysSet.size){
+    el.style.display='flex';
+    el.innerHTML='<strong>No VRF or VSYS selected</strong><span>Pick one or more from VRF / VSYS filter in the left panel, then View filtered.</span>';
+    if(STATE.cy){ STATE.cy.destroy(); STATE.cy=null; }
+    return;
+  }
   if(view==='sel' && !sel.size){
     el.style.display='flex';
     el.innerHTML='<strong>No devices selected</strong><span>Turn on Select devices, tap the ones you want, then Analyse selected.</span>';
@@ -2866,7 +2995,7 @@ function render(){
     // on it. Two members give one link; a shared segment gives a small mesh so
     // every adjacency is still visible without a node in the middle.
     // "transit" keeps that behaviour only for true point-to-point links.
-    const pairOnly = (view==='simple' || view==='sel');   // one bare link per device pair
+    const pairOnly = (view==='simple' || view==='sel' || view==='vrf');   // one bare link per device pair
     const asEdges = devSet.size>=2 && members.length<=8 &&
       (view==='devices' || pairOnly || (members.length===2 && devSet.size===2));
     // the isolated map shows interconnection only — no local segments hanging off a device
@@ -2920,7 +3049,7 @@ function render(){
   }
 
   // WAN clouds joining sites we cannot see inside
-  if(model.clouds && layer!=='l2' && view!=='sel'){
+  if(model.clouds && layer!=='l2' && view!=='sel' && view!=='vrf'){
     for(const c of model.clouds){
       const mem=c.members.filter(m=>vis(m.dev));
       if(!mem.length) continue;
@@ -2995,7 +3124,7 @@ function render(){
   // VLAN correlation: a switch with no CDP/LLDP data still gets placed against
   // the L3 segments its VLANs belong to. Marked inferred — it shows membership,
   // not cabling.
-  if(model.vlanReport && view!=='simple' && view!=='sel' && layer!=='l3'){
+  if(model.vlanReport && view!=='simple' && view!=='sel' && view!=='vrf' && layer!=='l3'){
     const linked={};
     if(model.l2links) for(const k in model.l2links){
       linked[model.l2links[k].a.dev.id]=true; linked[model.l2links[k].b.dev.id]=true;
@@ -3984,6 +4113,7 @@ function rebuild(){
   renderProviders();
   renderClouds();
   renderHealth();
+  renderVrfFilter();
   render();
   renderWarnings();
   const sel=document.getElementById('startdev');
@@ -4571,8 +4701,10 @@ function showDevice(d, opts){
     return Object.keys(map).sort((a,b)=> a==='default'?-1 : b==='default'?1 : a.localeCompare(b))
       .map(v=>({vrf:v, items:map[v]}));
   }
-  function vrfHeading(vrf, count){
-    return '<div class="cfgpane-label"><span>VRF '+esc(vrf)+'</span><span>'+count+'</span></div>';
+  function vrfBlock(vrf, count, inner, openByDefault){
+    return '<details class="vrf-group" data-vrfgroup'+(openByDefault?' open':'')+'>'+
+      '<summary class="cfgpane-label"><span>VRF '+esc(vrf)+'</span><span>'+count+'</span></summary>'+
+      inner+'</details>';
   }
 
   const ROW_CAP=250;
@@ -4581,36 +4713,33 @@ function showDevice(d, opts){
   const rowQ=(f)=>[cidr(f.net,f.len), f.nextHop!=null?int2ip(f.nextHop):(f.iface||''), f.type, f.vrf]
     .join(' ').toLowerCase();
   const routeGroups = vrfGroups(fibShown, f=>f.vrf);
-  const rows = routeGroups.map(g=>
-    '<div class="vrf-group" data-vrfgroup>'+vrfHeading(g.vrf, g.items.length)+
+  const rows = routeGroups.map((g,i)=>vrfBlock(g.vrf, g.items.length,
     '<table class="fib rt-vrf-table"><tr><th>Prefix</th><th>Via</th><th>Source</th></tr>'+
     g.items.map(f=>'<tr data-q="'+esc(rowQ(f))+'"><td>'+cidr(f.net,f.len)+'</td>'+
       '<td>'+(f.nextHop!=null?int2ip(f.nextHop):(f.iface||'—'))+'</td>'+
       '<td><span class="tag '+f.type+'">'+f.type+'</span></td></tr>').join('')+
-    '</table></div>').join('');
+    '</table>', routeGroups.length===1)).join('');
   const rowsMore = fibSorted.length>ROW_CAP
     ? '<p class="note">Showing the first '+ROW_CAP+' of '+fibSorted.length+' routes.</p>' : '';
 
   const ifQ=(i)=>[i.name, i.addrs.map(a=>int2ip(a.ip)+'/'+a.len).join(' '), i.zone||'', i.vrf||'', vlanOfIface(i)||'']
     .join(' ').toLowerCase();
   const ifGroups = vrfGroups(d.interfaces, i=>i.vrf);
-  const ifs = ifGroups.map(g=>
-    '<div class="vrf-group" data-vrfgroup>'+vrfHeading(g.vrf, g.items.length)+
+  const ifs = ifGroups.map(g=>vrfBlock(g.vrf, g.items.length,
     '<table class="fib if-vrf-table"><tr><th>Interface</th><th>Address</th><th>Zone</th></tr>'+
     g.items.map(i=>'<tr data-q="'+esc(ifQ(i))+'"><td>'+esc(i.name)+'</td>'+
       '<td>'+(i.addrs.map(a=>int2ip(a.ip)+'/'+a.len).join(', ')||'—')+'</td>'+
       '<td>'+esc(i.zone||'—')+'</td></tr>').join('')+
-    '</table></div>').join('');
+    '</table>', ifGroups.length===1)).join('');
 
   const mrIndexed = d.manualRoutes.map((mr,idx)=>({mr, idx}));
   const mrGroups = vrfGroups(mrIndexed, x=>x.mr.vrf);
-  const mrows = d.manualRoutes.length ? mrGroups.map(g=>
-    '<div class="vrf-group" data-vrfgroup>'+vrfHeading(g.vrf, g.items.length)+
+  const mrows = d.manualRoutes.length ? mrGroups.map(g=>vrfBlock(g.vrf, g.items.length,
     '<table class="fib"><tr><th>Prefix</th><th>Via</th><th>Metric</th><th></th></tr>'+
     g.items.map(({mr,idx})=>'<tr><td>'+cidr(mr.net,mr.len)+'</td>'+
       '<td>'+(mr.nextHop!=null?int2ip(mr.nextHop):(mr.iface||'—'))+'</td><td>'+mr.ad+'</td>'+
       '<td style="text-align:right"><button class="dev-x" data-del="'+idx+'" title="Remove">×</button></td></tr>').join('')+
-    '</table></div>').join('') : '';
+    '</table>', mrGroups.length===1)).join('') : '';
 
   const stubs=[];
   if(STATE.model && STATE.model.subnets){
@@ -4635,14 +4764,18 @@ function showDevice(d, opts){
       if(m.devId===d.id) myAttach.push({cloud:c, iface:m.iface});
   const l3ifaces = d.interfaces.filter(i=>i.addrs.length);
   const wanHtml =
-    '<h2 class="sec">WAN / provider cloud</h2>'+
+    '<div class="rt-form"><input id="dev-search" class="wide" '+
+      'placeholder="Filter attached clouds..." spellcheck="false"></div>'+
+    '<h2 class="sec">WAN / provider cloud <span id="dev-search-count" style="color:var(--ink-faint);font-weight:400"></span></h2>'+
+    '<div class="search-scope">'+
     (myAttach.length
       ? '<table class="fib"><tr><th>Cloud</th><th>Interface</th><th></th></tr>'+
-        myAttach.map((a,idx)=>'<tr><td>'+esc(a.cloud.name)+'</td><td>'+esc(a.iface)+'</td>'+
+        myAttach.map((a,idx)=>'<tr data-q="'+esc((a.cloud.name+' '+a.iface).toLowerCase())+'"><td>'+esc(a.cloud.name)+'</td><td>'+esc(a.iface)+'</td>'+
           '<td style="text-align:right"><button class="dev-x" data-wandel="'+idx+'" title="Detach">×</button></td></tr>').join('')+
         '</table>'
       : '<p class="note" style="margin-top:0">Attach this device\'s WAN interface to a named cloud — MPLS, SD-WAN, a carrier service — '+
         'and traces will cross it to whichever site has the route.</p>')+
+    '</div>'+
     '<div class="rt-form">'+
       '<input id="wan-name" placeholder="cloud name, e.g. MPLS" spellcheck="false" list="wan-names">'+
       '<select id="wan-if">'+l3ifaces.map(i=>'<option value="'+esc(i.name)+'">'+esc(i.name)+'</option>').join('')+'</select>'+
@@ -4654,19 +4787,22 @@ function showDevice(d, opts){
   if(d.bgp){
     const nbs=Object.values(d.bgp.neighbors);
     bgpHtml =
-      '<h2 class="sec">BGP</h2>'+
+      '<div class="rt-form"><input id="dev-search" class="wide" '+
+        'placeholder="Filter neighbors and prefixes..." spellcheck="false"></div>'+
+      '<h2 class="sec">BGP <span id="dev-search-count" style="color:var(--ink-faint);font-weight:400"></span></h2>'+
       '<p class="note" style="margin-top:0">AS '+esc(d.bgp.asn)+
         (d.bgp.routerId?' · router-id '+esc(d.bgp.routerId):'')+
         ' · '+nbs.length+' neighbour'+(nbs.length===1?'':'s')+'</p>'+
-      (nbs.length?'<table class="fib"><tr><th>Neighbour</th><th>AS</th><th>Type</th><th>Options</th></tr>'+
+      (nbs.length?'<div class="search-scope"><table class="fib"><tr><th>Neighbour</th><th>AS</th><th>Type</th><th>Options</th></tr>'+
         nbs.map(n=>{
           const t=!n.remoteAs?'—':(n.remoteAs===d.bgp.asn?'iBGP':'eBGP');
           const opt=[n.updateSource?'src '+n.updateSource:'', n.nextHopSelf?'nh-self':'',
                      n.rrClient?'RR client':'', n.multihop?'multihop':'', n.shutdown?'shutdown':'']
                      .filter(Boolean).join(', ');
-          return '<tr><td>'+esc(n.ipStr)+'</td><td>'+esc(n.remoteAs||'—')+'</td>'+
+          const q=[n.ipStr,n.remoteAs||'',t,opt].join(' ').toLowerCase();
+          return '<tr data-q="'+esc(q)+'"><td>'+esc(n.ipStr)+'</td><td>'+esc(n.remoteAs||'—')+'</td>'+
                  '<td>'+t+'</td><td>'+esc(opt||'—')+'</td></tr>';
-        }).join('')+'</table>':'')+
+        }).join('')+'</table></div>':'')+
       (d.bgp.networks.length?'<div class="cfgpane-label"><span>advertised networks</span><span>'+
         d.bgp.networks.length+'</span></div><table class="fib">'+
         d.bgp.networks.map(n=>'<tr><td>'+cidr(n.net,n.len)+'</td></tr>').join('')+'</table>':'')+
@@ -4687,15 +4823,18 @@ function showDevice(d, opts){
         const paths=byPfx[k];
         const res=bgpBestPath(paths);
         const agree = res && paths.some(p=>p.best) ? (res.best.best===true) : null;
-        bgpHtml+='<div class="cfgpane-label"><span>'+esc(k)+'</span><span>'+
+        bgpHtml+='<div class="vrf-group search-scope" data-vrfgroup><div class="cfgpane-label"><span>'+esc(k)+'</span><span>'+
           (res?esc(res.reason):'')+(agree===false?' <span class="tag deny">differs from device</span>':'')+'</span></div>'+
           '<table class="fib"><tr><th>Next hop</th><th>W</th><th>LP</th><th>MED</th><th>AS path</th><th></th></tr>'+
-          paths.map(pth=>'<tr><td>'+esc(pth.nextHopStr)+'</td><td>'+pth.weight+'</td>'+
+          paths.map(pth=>{
+            const q=[k,pth.nextHopStr,pth.asPath.join(' '),pth.origin].join(' ').toLowerCase();
+            return '<tr data-q="'+esc(q)+'"><td>'+esc(pth.nextHopStr)+'</td><td>'+pth.weight+'</td>'+
             '<td>'+pth.localPref+'</td><td>'+(pth.med==null?'—':pth.med)+'</td>'+
             '<td>'+(pth.asPath.join(' ')||'—')+' '+pth.origin+'</td>'+
             '<td>'+(res&&res.best===pth?'<span class="tag allow">best</span>':
-                    (pth.best?'<span class="tag igp">device</span>':''))+'</td></tr>').join('')+
-          '</table>';
+                    (pth.best?'<span class="tag igp">device</span>':''))+'</td></tr>';
+          }).join('')+
+          '</table></div>';
       }
       if(keys.length>60) bgpHtml+='<p class="note">Showing 60 of '+keys.length+' prefixes.</p>';
       bgpHtml+='<p class="note">Selection follows Cisco order: weight, local preference, locally originated, '+
@@ -4710,26 +4849,34 @@ function showDevice(d, opts){
   const vrows = vlanIds.map(v=>{
     const r=rep[v]||{};
     const bad = (r.blocked||[]).some(b=>b.dev===d) || (r.isolated||[]).some(x=>x===d);
-    return '<tr><td>'+v+'</td><td>'+esc((d.vlans[v]&&d.vlans[v].name)||'—')+'</td>'+
+    const q=[v,(d.vlans[v]&&d.vlans[v].name)||'',r.svi?r.svi.dev.name:''].join(' ').toLowerCase();
+    return '<tr data-q="'+esc(q)+'"><td>'+v+'</td><td>'+esc((d.vlans[v]&&d.vlans[v].name)||'—')+'</td>'+
       '<td>'+(r.svi?esc(r.svi.dev.name):'no SVI')+'</td>'+
       '<td>'+(bad?'<span class="tag deny">blocked</span>':(r.hasLinks?'<span class="tag allow">ok</span>':'—'))+'</td></tr>';
   }).join('');
-  const prows = l2ports.map(i=>
-    '<tr><td>'+esc(i.name)+'</td><td>'+esc(i.mode||'—')+'</td>'+
+  const prows = l2ports.map(i=>{
+    const q=[i.name,i.mode||'',i.accessVlan||'',(i.allowed||[]).join(',')].join(' ').toLowerCase();
+    return '<tr data-q="'+esc(q)+'"><td>'+esc(i.name)+'</td><td>'+esc(i.mode||'—')+'</td>'+
     '<td>'+(i.mode==='access' ? (i.accessVlan||'—')
-          : (i.allowed===null||i.allowed===undefined ? 'all' : (i.allowed.length?i.allowed.join(','):'none')))+'</td></tr>').join('');
+          : (i.allowed===null||i.allowed===undefined ? 'all' : (i.allowed.length?i.allowed.join(','):'none')))+'</td></tr>';
+  }).join('');
   const nrows = (d.neighbors||[]).map((n,idx)=>
-    '<tr><td>'+esc(n.localPort)+'</td><td>'+esc(n.peerName)+'</td><td>'+esc(n.peerPort)+'</td>'+
+    '<tr data-q="'+esc((n.localPort+' '+n.peerName+' '+n.peerPort).toLowerCase())+'"><td>'+esc(n.localPort)+'</td><td>'+esc(n.peerName)+'</td><td>'+esc(n.peerPort)+'</td>'+
     '<td style="text-align:right"><button class="dev-x" data-nbdel="'+idx+'" title="Remove">×</button></td></tr>').join('');
 
   const l2Html =
-    (vlanIds.length ? '<h2 class="sec">VLANs</h2><table class="fib">'+
-       '<tr><th>VLAN</th><th>Name</th><th>Gateway</th><th>L2 path</th></tr>'+vrows+'</table>' : '')+
-    (l2ports.length ? '<h2 class="sec">Switch ports</h2><table class="fib">'+
-       '<tr><th>Port</th><th>Mode</th><th>VLANs</th></tr>'+prows+'</table>' : '')+
-    '<h2 class="sec">Layer 2 neighbors</h2>'+
+    '<div class="rt-form"><input id="dev-search" class="wide" '+
+      'placeholder="Filter VLANs, ports and neighbors..." spellcheck="false"></div>'+
+    '<h2 class="sec">Layer 2 <span id="dev-search-count" style="color:var(--ink-faint);font-weight:400"></span></h2>'+
+    (vlanIds.length ? '<div class="search-scope"><h3 style="font-size:11.5px;color:var(--ink-faint);margin:10px 0 4px">VLANs</h3>'+
+       '<table class="fib"><tr><th>VLAN</th><th>Name</th><th>Gateway</th><th>L2 path</th></tr>'+vrows+'</table></div>' : '')+
+    (l2ports.length ? '<div class="search-scope"><h3 style="font-size:11.5px;color:var(--ink-faint);margin:14px 0 4px">Switch ports</h3>'+
+       '<table class="fib"><tr><th>Port</th><th>Mode</th><th>VLANs</th></tr>'+prows+'</table></div>' : '')+
+    '<h3 style="font-size:11.5px;color:var(--ink-faint);margin:14px 0 4px">Neighbors</h3>'+
+    '<div class="search-scope">'+
     (nrows ? '<table class="fib"><tr><th>Local port</th><th>Neighbor</th><th>Their port</th><th></th></tr>'+nrows+'</table>'
            : '<p class="note" style="margin-top:0">Configs cannot show cabling. Paste this device\'s CDP or LLDP output to draw its layer 2 links.</p>')+
+    '</div>'+
     '<textarea class="rt-paste" id="nb-paste" placeholder="Paste show cdp neighbors, show cdp neighbors detail, or show lldp neighbors"></textarea>'+
     '<div class="btn-row" style="margin-top:8px">'+
       '<button class="btn" id="nb-import">Import neighbors</button>'+
@@ -4739,12 +4886,18 @@ function showDevice(d, opts){
   const ifTabHtml =
     '<div class="rt-form"><input id="dev-search" class="wide" '+
       'placeholder="Filter interfaces — name, address, vlan, zone..." spellcheck="false"></div>'+
-    '<h2 class="sec">Interfaces <span id="if-count" style="color:var(--ink-faint);font-weight:400"></span></h2>'+
+    '<h2 class="sec">Interfaces <span id="dev-search-count" style="color:var(--ink-faint);font-weight:400"></span></h2>'+
     '<div id="if-table">'+ifs+'</div>'+
     stubHtml;
 
   const routingTabHtml =
-    '<h2 class="sec">Routing table you added</h2>'+
+    '<div class="rt-form"><input id="dev-search" class="wide" '+
+      'placeholder="Filter routes — prefix, next hop, type, vrf..." spellcheck="false"></div>'+
+    '<h2 class="sec">Routing table <span id="dev-search-count" style="color:var(--ink-faint);font-weight:400"></span></h2>'+
+    '<p class="note" style="margin-top:0">What this device actually routes on — the table the trace engine uses.</p>'+
+    '<div id="rt-table">'+rows+'</div>'+
+    rowsMore+
+    '<h2 class="sec" style="margin-top:24px">Routing table you added</h2>'+
     (mrows ? mrows
            : '<p class="note" style="margin-top:0">Nothing added yet. Paste the device\'s real table below, or enter one route at a time.</p>')+
     '<div class="rt-form">'+
@@ -4762,12 +4915,7 @@ function showDevice(d, opts){
     '</div>'+
     '<input type="file" id="mr-file" class="hidden" accept=".txt,.log,.cfg,.out,.csv">'+
     '<label class="auth"><input type="checkbox" id="mr-auth"'+(d.tableAuthoritative?' checked':'')+'>'+
-      '<span>This table is complete — do not infer any routes for '+esc(d.name)+'.</span></label>'+
-    '<div class="rt-form" style="margin-top:14px"><input id="dev-search" class="wide" '+
-      'placeholder="Filter routes — prefix, next hop, type, vrf..." spellcheck="false"></div>'+
-    '<h2 class="sec">Routes in use <span id="rt-count" style="color:var(--ink-faint);font-weight:400"></span></h2>'+
-    '<div id="rt-table">'+rows+'</div>'+
-    rowsMore;
+      '<span>This table is complete — do not infer any routes for '+esc(d.name)+'.</span></label>';
 
   const subTabs=[['interfaces','Interfaces'],['routing','Routing table'],['l2','Layer 2']];
   if(d.bgp) subTabs.push(['bgp','BGP']);
@@ -4868,27 +5016,28 @@ function showDevice(d, opts){
   if(devSearch){
     devSearch.oninput=()=>{
       const q=devSearch.value.trim().toLowerCase();
-      let ifShown=0, rtShown=0;
-      const applyTo=(containerId)=>{
-        const container=document.getElementById(containerId);
-        if(!container) return 0;
-        let shown=0;
-        container.querySelectorAll('[data-vrfgroup]').forEach(grp=>{
-          let visibleInGroup=0;
-          grp.querySelectorAll('tr[data-q]').forEach(tr=>{
-            const hit=!q || tr.dataset.q.indexOf(q)>=0;
-            tr.style.display = hit ? '' : 'none';
-            if(hit){ visibleInGroup++; shown++; }
-          });
-          grp.style.display = visibleInGroup ? '' : 'none';
+      let total=0, shown=0;
+      r.querySelectorAll('[data-vrfgroup], .search-scope').forEach(grp=>{
+        let visibleInGroup=0;
+        grp.querySelectorAll('tr[data-q]').forEach(tr=>{
+          total++;
+          const hit=!q || tr.dataset.q.indexOf(q)>=0;
+          tr.style.display = hit ? '' : 'none';
+          if(hit){ visibleInGroup++; shown++; }
         });
-        return shown;
-      };
-      ifShown=applyTo('if-table');
-      rtShown=applyTo('rt-table');
-      const ic=document.getElementById('if-count'), rc=document.getElementById('rt-count');
-      if(ic) ic.textContent = q ? '('+ifShown+' of '+d.interfaces.length+')' : '';
-      if(rc) rc.textContent = q ? '('+rtShown+' of '+fibShown.length+')' : '';
+        grp.style.display = (visibleInGroup || !grp.hasAttribute('data-vrfgroup')) ? '' : 'none';
+        if(grp.tagName==='DETAILS' && q && visibleInGroup) grp.open=true;
+      });
+      // rows with no enclosing group (e.g. neighbor tables) still get filtered directly
+      r.querySelectorAll('tr[data-q]').forEach(tr=>{
+        if(tr.closest('[data-vrfgroup]') || tr.closest('.search-scope')) return;
+        total++;
+        const hit=!q || tr.dataset.q.indexOf(q)>=0;
+        tr.style.display = hit ? '' : 'none';
+        if(hit) shown++;
+      });
+      const cnt=document.getElementById('dev-search-count');
+      if(cnt) cnt.textContent = q ? '('+shown+' of '+total+')' : '';
     };
   }
   if(zoneSel) zoneSel.onchange=()=>{ d.groupId=zoneSel.value||null; rebuild(); showDevice(d); };
@@ -5531,6 +5680,8 @@ function projectObject(){
     theme:STATE.theme,
     bends:STATE.bends||{},
     lineWidths:STATE.lineWidths||{},
+    vrfFilter:[...(STATE.vrfFilter||[])],
+    vsysFilter:[...(STATE.vsysFilter||[])],
     clouds:STATE.clouds||[],
     groups:groups(),
     layer:document.getElementById('opt-layer').value,
@@ -5568,6 +5719,8 @@ function loadProject(obj){
   if(obj.theme) STATE.theme=Object.assign({}, THEME_DEFAULT, obj.theme);
   STATE.bends = obj.bends || {};
   STATE.lineWidths = obj.lineWidths || {};
+  STATE.vrfFilter = new Set(obj.vrfFilter||[]);
+  STATE.vsysFilter = new Set(obj.vsysFilter||[]);
   applyPanels();
   initTheme();
   const st=document.querySelector('.stage');
@@ -5639,18 +5792,85 @@ function restore(){
     return loadProject(JSON.parse(raw));
   }catch(e){ return false; }
 }
-document.getElementById('save-proj').onclick=()=>{
-  if(saveTimer){ clearTimeout(saveTimer); saveTimer=null; doAutosave(); }
+function suggestedFileName(){
+  const nm=(document.getElementById('proj-name').value||'').trim()
+    .replace(/[^\w .-]+/g,'').replace(/\s+/g,'-');
+  return (nm||'netpath')+'-'+new Date().toISOString().slice(0,10)+'.json';
+}
+function updateFileLabel(){
+  const el=document.getElementById('proj-file-label');
+  if(!el) return;
+  if(!STATE.fileName){ el.textContent='No project file loaded yet.'; return; }
+  el.textContent = STATE.fileHandle
+    ? STATE.fileName
+    : STATE.fileName+' — reopen with Open project to enable Save';
+}
+async function writeToHandle(handle){
+  const writable = await handle.createWritable();
+  await writable.write(JSON.stringify(projectObject(), null, 2));
+  await writable.close();
+}
+function legacyDownload(){
   const blob=new Blob([JSON.stringify(projectObject(),null,2)],{type:'application/json'});
   const a=document.createElement('a');
   a.href=URL.createObjectURL(blob);
-  const nm=(document.getElementById('proj-name').value||'').trim()
-    .replace(/[^\w .-]+/g,'').replace(/\s+/g,'-');
-  a.download=(nm||'netpath')+'-'+new Date().toISOString().slice(0,10)+'.json';
+  const nm=suggestedFileName();
+  a.download=nm;
   a.click();
   setTimeout(()=>URL.revokeObjectURL(a.href),2000);
-};
-document.getElementById('open-proj').onclick=()=>document.getElementById('projfile').click();
+  STATE.fileName=nm; STATE.fileHandle=null;
+  updateFileLabel();
+}
+/* Save writes straight back to the file that was opened or last saved to —
+   only Chrome/Edge can do that (the File System Access API). Firefox and
+   Safari have no such API, so there Save always behaves like Save As. */
+async function doSave(){
+  if(saveTimer){ clearTimeout(saveTimer); saveTimer=null; doAutosave(); }
+  if(STATE.fileHandle){
+    try{ await writeToHandle(STATE.fileHandle); updateFileLabel(); return; }
+    catch(e){ /* handle revoked or stale — fall through to Save As */ }
+  }
+  return doSaveAs();
+}
+async function doSaveAs(){
+  if(saveTimer){ clearTimeout(saveTimer); saveTimer=null; doAutosave(); }
+  if(window.showSaveFilePicker){
+    try{
+      const handle=await window.showSaveFilePicker({
+        suggestedName: suggestedFileName(),
+        types:[{description:'NetPath project', accept:{'application/json':['.json']}}]
+      });
+      await writeToHandle(handle);
+      STATE.fileHandle=handle; STATE.fileName=handle.name;
+      updateFileLabel();
+      return;
+    }catch(e){ if(e && e.name==='AbortError') return; }
+  }
+  legacyDownload();
+}
+async function doOpen(){
+  if(window.showOpenFilePicker){
+    try{
+      const [handle]=await window.showOpenFilePicker({
+        types:[{description:'NetPath project', accept:{'application/json':['.json']}}]
+      });
+      const file=await handle.getFile();
+      const text=await file.text();
+      if(!loadProject(JSON.parse(text))){
+        document.getElementById('autosave-note').textContent='That file is not a NetPath project.';
+        return;
+      }
+      STATE.fileHandle=handle; STATE.fileName=handle.name;
+      updateFileLabel();
+      return;
+    }catch(e){ if(e && e.name==='AbortError') return; }
+  }
+  document.getElementById('projfile').click();   // Firefox/Safari fallback
+}
+
+document.getElementById('save-proj').onclick=()=>doSave();
+document.getElementById('saveas-proj').onclick=()=>doSaveAs();
+document.getElementById('open-proj').onclick=()=>doOpen();
 document.getElementById('projfile').onchange=function(){
   const f=this.files[0]; if(!f) return;
   const rd=new FileReader();
@@ -5658,6 +5878,10 @@ document.getElementById('projfile').onchange=function(){
     try{
       if(!loadProject(JSON.parse(rd.result)))
         document.getElementById('autosave-note').textContent='That file is not a NetPath project.';
+      else{
+        STATE.fileName=f.name; STATE.fileHandle=null;   // no handle via this path — Save will prompt
+        updateFileLabel();
+      }
     }catch(e){ document.getElementById('autosave-note').textContent='That file could not be read.'; }
   };
   rd.readAsText(f);
