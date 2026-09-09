@@ -1793,11 +1793,20 @@ function buildModel(devices, opts){
      The VRF of that switch interface becomes the firewall interface's VRF for
      every scoping and grouping decision. No tag on the interface (a bare
      routed port) falls back to whichever single named VRF shares its subnet. */
-  const sameSubnet=(a,b)=>{
-    for(const x of (a.addrs||[])) for(const y of (b.addrs||[])){
-      if(x.len>=31 || y.len>=31 || x.len!==y.len) continue;
-      if(netOf(x.ip,x.len)===netOf(y.ip,y.len)) return true;
+  /* "Same subnet" must mean exactly what the rest of the tool means by it, or
+     a link can exist on the map while the tag match quietly fails and the
+     filter then hides it. So ask the subnet table, rather than redoing the
+     address arithmetic with a stricter rule. */
+  const subnetsOf=new Map();
+  for(const k in subnets)
+    for(const m of subnets[k].members){
+      if(!subnetsOf.has(m.iface)) subnetsOf.set(m.iface, new Set());
+      subnetsOf.get(m.iface).add(k);
     }
+  const sameSubnet=(a,b)=>{
+    const sa=subnetsOf.get(a), sb=subnetsOf.get(b);
+    if(!sa || !sb) return false;
+    for(const k of sa) if(sb.has(k)) return true;
     return false;
   };
   const byTag={};
@@ -1915,10 +1924,10 @@ function buildModel(devices, opts){
       warn('WAN cloud "'+c.name+'" has only one device attached, so nothing can be reached across it.', members[0].dev.id, null);
   }
 
-  /* A shared subnet is not a link unless the 802.1q tags on both ends are the
-     same number. ae1.271 facing Vlan1271 is a misconfiguration, not a
-     connection — the addresses happen to overlap but the frames are on
-     different VLANs. Exact match only: 271 is not 1271. */
+  /* A shared subnet is not a link unless the 802.1q tags agree. But a segment
+     can have several devices on it, and one odd interface must not destroy the
+     rest: keep the members whose tags agree with the majority and set the odd
+     ones aside, rather than dropping the segment wholesale. */
   for(const k in subnets){
     const sn=subnets[k];
     const tagged=sn.members
@@ -1926,12 +1935,23 @@ function buildModel(devices, opts){
       .filter(x=>x.t!=null && x.t!=='' && !isNaN(parseInt(x.t,10)))
       .map(x=>({m:x.m, t:parseInt(x.t,10)}));
     if(tagged.length<2) continue;
-    const tags=new Set(tagged.map(x=>x.t));
-    if(tags.size<2) continue;                    // all agree, or only one tagged end
-    sn.tagMismatch = tagged.map(x=>x.m.dev.name+' '+x.m.iface.name+' (vlan '+x.t+')');
-    warn('The two ends of '+k+' are on different VLANs: '+sn.tagMismatch.join(' and ')+
-         '. The addresses overlap but the tags do not match, so this is not drawn as a link. '+
-         'Correct the tag on one side.', tagged[0].m.dev.id, tagged[0].m.iface.line);
+    const groups={};
+    for(const x of tagged) (groups[x.t]=groups[x.t]||[]).push(x.m);
+    const tags=Object.keys(groups);
+    if(tags.length<2) continue;                  // everyone agrees
+    // the largest group wins; ties go to the lowest tag for determinism
+    tags.sort((a,b)=> groups[b].length-groups[a].length || (+a)-(+b));
+    const keep=tags[0];
+    const odd=[];
+    for(const t of tags.slice(1)) for(const m of groups[t]){
+      m.iface.tagOdd=true;                       // not on this VLAN: not on this link
+      odd.push(m.dev.name+' '+m.iface.name+' (vlan '+t+')');
+    }
+    if(odd.length)
+      warn('On '+k+' most interfaces are on VLAN '+keep+', but '+odd.join(', ')+
+           ' '+(odd.length===1?'is':'are')+' on a different VLAN. '+
+           (odd.length===1?'It is':'They are')+' not drawn as part of this link. '+
+           'Correct the tag, or the addressing.', groups[keep][0].dev.id, groups[keep][0].iface.line);
   }
 
   return {devices, subnets, adj, warnings, l2links, vlanReport, clouds, vips, haPairs};
@@ -2532,8 +2552,7 @@ function deviceInScope(d){
   const m=STATE.model;
   if(m) for(const k in m.subnets){
     const sn=m.subnets[k];
-    if(sn.tagMismatch) continue;
-    if(sn.members.some(x=>x.dev===d && ifaceInScope(x.iface))) return true;
+    if(sn.members.some(x=>x.dev===d && !x.iface.tagOdd && ifaceInScope(x.iface))) return true;
   }
   return false;
 }
@@ -3147,9 +3166,8 @@ function render(){
     const shared=[];
     for(const k in model.subnets){
       const sn=model.subnets[k];
-      if(sn.tagMismatch) continue;
-      const ma=sn.members.filter(x=>x.dev===a && ifaceInScope(x.iface)),
-            mb=sn.members.filter(x=>x.dev===b && ifaceInScope(x.iface));
+      const ma=sn.members.filter(x=>x.dev===a && !x.iface.tagOdd && ifaceInScope(x.iface)),
+            mb=sn.members.filter(x=>x.dev===b && !x.iface.tagOdd && ifaceInScope(x.iface));
       if(ma.length && mb.length) shared.push({key:k, a:ma, b:mb});
     }
     const l2=[];
@@ -3338,8 +3356,7 @@ function render(){
   const stubCount={};
   for(const k in model.subnets){
     const sn=model.subnets[k];
-    if(sn.tagMismatch) continue;
-    const mem=sn.members.filter(m=>vis(m.dev) && ifaceInScope(m.iface));
+    const mem=sn.members.filter(m=>vis(m.dev) && !m.iface.tagOdd && ifaceInScope(m.iface));
     if(mem.length && isStub(k,sn)){
       const id=mem[0].dev.id;
       stubCount[id]=(stubCount[id]||0)+1;
@@ -3384,10 +3401,11 @@ function render(){
   const drawnSubnets=new Set();
   if(layer!=='l2') for(const k in model.subnets){
     const sn=model.subnets[k];
-    if(sn.tagMismatch) continue;             // VLAN tags disagree: not a link
     /* Judge each end on its own VRF. A segment can carry switches from
-       several VRFs, and selecting one of them must not drag in the others. */
-    const members=sn.members.filter(m=>vis(m.dev) && ifaceInScope(m.iface));
+       several VRFs, and selecting one of them must not drag in the others.
+       An interface whose VLAN tag disagrees with the rest is not on this
+       link at all. */
+    const members=sn.members.filter(m=>vis(m.dev) && !m.iface.tagOdd && ifaceInScope(m.iface));
     if(!members.length) continue;
     if(isStub(k,sn)) continue;
     const devSet=new Set(members.map(m=>m.dev));
@@ -4796,9 +4814,8 @@ function showLink(a,b){
   const shared=[];
   for(const k in m.subnets){
     const sn=m.subnets[k];
-    if(sn.tagMismatch) continue;
-    const ma=sn.members.filter(x=>x.dev===a && ifaceInScope(x.iface)),
-          mb=sn.members.filter(x=>x.dev===b && ifaceInScope(x.iface));
+    const ma=sn.members.filter(x=>x.dev===a && !x.iface.tagOdd && ifaceInScope(x.iface)),
+          mb=sn.members.filter(x=>x.dev===b && !x.iface.tagOdd && ifaceInScope(x.iface));
     if(ma.length && mb.length) shared.push({key:k, a:ma, b:mb});
   }
   const l2=[];
@@ -4893,14 +4910,6 @@ function showSegment(key){
   openRight();
   const m=STATE.model, sn=m.subnets[key];
   const r=document.getElementById('result');
-  if(sn && sn.tagMismatch){
-    STATE.selected=null; renderDevList();
-    r.innerHTML='<h2 class="sec">'+esc(key)+'</h2>'+
-      '<p class="scope-note">The two ends of this subnet are on different VLANs \u2014 '+
-      esc(sn.tagMismatch.join(' and '))+'. The addresses overlap but the tags do not match, '+
-      'so it is not treated as a link.</p><div id="warnbox"></div>';
-    renderWarnings(); return;
-  }
   if(sn && scopeActive() && !sn.members.some(m=>ifaceInScope(m.iface))){
     STATE.selected=null; renderDevList();
     r.innerHTML='<h2 class="sec">'+esc(key)+'</h2>'+
@@ -5032,9 +5041,8 @@ function showSelection(devs){
     const a=devs[i], b=devs[j], nets=[], l2=[], cl=[];
     for(const k in m.subnets){
       const sn=m.subnets[k];
-      if(!sn.tagMismatch &&
-         sn.members.some(x=>x.dev===a && ifaceInScope(x.iface)) &&
-         sn.members.some(x=>x.dev===b && ifaceInScope(x.iface))) nets.push({k, sn});
+      if(sn.members.some(x=>x.dev===a && !x.iface.tagOdd && ifaceInScope(x.iface)) &&
+         sn.members.some(x=>x.dev===b && !x.iface.tagOdd && ifaceInScope(x.iface))) nets.push({k, sn});
     }
     for(const k in (m.l2links||{})){
       const L=m.l2links[k];
@@ -5049,8 +5057,7 @@ function showSelection(devs){
   const external=[];
   for(const k in m.subnets){
     const sn=m.subnets[k];
-    if(sn.tagMismatch) continue;
-    const scopedMem=sn.members.filter(x=>ifaceInScope(x.iface));
+    const scopedMem=sn.members.filter(x=>!x.iface.tagOdd && ifaceInScope(x.iface));
     if(!scopedMem.length) continue;
     const inside=scopedMem.filter(x=>inSet.has(x.dev.id));
     const outside=scopedMem.filter(x=>!inSet.has(x.dev.id));
@@ -5188,7 +5195,7 @@ function showDevice(d, opts){
     const m=STATE.model;
     if(m) for(const k in m.subnets){
       const sn=m.subnets[k];
-      if(sn.tagMismatch) continue;
+      if(i.tagOdd) continue;
       if(sn.members.some(x=>x.iface===i) && sn.members.some(x=>ifaceInScope(x.iface))) return true;
     }
     return false;
@@ -5238,7 +5245,7 @@ function showDevice(d, opts){
     for(const k in STATE.model.subnets){
       const sn=STATE.model.subnets[k];
       if(sn.members.length<2 && sn.members[0].dev===d &&
-         (!scopeOn || (!sn.tagMismatch && ifaceInScope(sn.members[0].iface))))
+         (!scopeOn || ifaceInScope(sn.members[0].iface)))
         stubs.push({key:k, iface:sn.members[0].iface.name});
     }
     stubs.sort((a,b)=>a.key.localeCompare(b.key));
