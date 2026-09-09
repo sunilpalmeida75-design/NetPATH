@@ -659,7 +659,8 @@ function parseCidr(s){
 /* ============================================================
    State
    ============================================================ */
-const STATE = { devices:[], model:null, cy:null, selected:null, lastTrace:null, devTab:'overview', devSubTab:'interfaces', editingConfig:false, pinFocusLine:null, traceMode:'after', renaming:false, clouds:[], fileName:null, fileHandle:null };
+const STATE = { devices:[], model:null, cy:null, selected:null, lastTrace:null, devTab:'overview', devSubTab:'interfaces', editingConfig:false, pinFocusLine:null, traceMode:'after', renaming:false, clouds:[], fileName:null, fileHandle:null, bends:{}, lineWidths:{},
+  vrfInclude:new Set(), vrfExclude:new Set(), vsysInclude:new Set(), vsysExclude:new Set() };
 let cloudSeq = 0;
 let devSeq = 0;
 
@@ -2961,7 +2962,7 @@ function render(){
     const l2=[];
     for(const k in (model.l2links||{})){
       const L=model.l2links[k];
-      if(((L.a.dev===a&&L.b.dev===b)||(L.a.dev===b&&L.b.dev===a)) && l2InScope(m, L)) l2.push(L);
+      if(((L.a.dev===a&&L.b.dev===b)||(L.a.dev===b&&L.b.dev===a)) && l2InScope(model, L)) l2.push(L);
     }
     const clouds=(model.clouds||[]).filter(c=>
       c.members.some(x=>x.dev===a) && c.members.some(x=>x.dev===b));
@@ -3043,7 +3044,7 @@ function render(){
           const mem=c.members.find(x=>x.dev===dev);
           const id='e'+(++e);
           els.push({data:{id, source:dev===a?a.id:cid, target:dev===a?cid:b.id,
-                          kind:'wanlink', label:mem?shortIf(mem.ifaceName):'', item:item.key}});
+                          kind:'wanlink', cloud:c.name, label:mem?shortIf(mem.ifaceName):'', item:item.key}});
           if(mem) edgeFor[dev.id+'::'+mem.ifaceName]=id;
         }
       }
@@ -4738,13 +4739,49 @@ function onEdgeTap(cy, edge){
   }
   if(segData){ showSegment(segData.net||segData.label); return; }
 
-  // device ↔ cloud edge
-  if(dev && ed.cloud){
-    const c=(STATE.model.clouds||[]).find(x=>x.name===ed.cloud);
-    const other=c && c.members.map(m=>m.dev).find(x=>x!==dev);
-    if(other){ openLink(dev, other, ed); return; }
+  // device ↔ cloud edge. The cloud name may come from the edge or from
+  // whichever end is the cloud node.
+  const cloudData = sd.kind==='wan' ? sd : (td.kind==='wan' ? td : null);
+  const cloudName = ed.cloud || (cloudData ? cloudData.label : null);
+  if(cloudName){
+    const c=(STATE.model.clouds||[]).find(x=>x.name===cloudName);
+    if(c && dev){
+      const other=c.members.map(m=>m.dev).find(x=>x!==dev);
+      if(other){ openLink(dev, other, {cloud:cloudName}); return; }
+      // a cloud with only this device on it — show the device's WAN tab
+      showDevice(dev, {tab:'overview', subTab:'wan'});
+      return;
+    }
+    if(c){ showCloud(c); return; }
   }
-  if(dev) showDevice(dev);
+  if(dev){ showDevice(dev); return; }
+  // nothing recognisable — say so rather than appearing to ignore the click
+  const r=document.getElementById('result');
+  if(r){
+    openRight();
+    r.innerHTML='<h2 class="sec">Link</h2><p class="note">This line joins '+
+      esc(sd.label||sd.kind||'?')+' and '+esc(td.label||td.kind||'?')+
+      ', which has no detail screen of its own.</p><div id="warnbox"></div>';
+    renderWarnings();
+  }
+}
+/* A cloud with a single attachment still deserves a screen. */
+function showCloud(c){
+  openRight();
+  const r=document.getElementById('result');
+  STATE.selected=null; renderDevList();
+  r.innerHTML='<h2 class="sec">'+esc(c.name)+'</h2>'+
+    '<p class="note" style="margin-top:0">Provider cloud · '+c.members.length+' attachment'+
+      (c.members.length===1?'':'s')+'</p>'+
+    '<table class="fib"><tr><th>Device</th><th>Interface</th></tr>'+
+    c.members.map((m,i)=>'<tr><td><a href="#" data-cl="'+i+'" style="color:var(--cyan);text-decoration:none">'+
+      esc(m.dev.name)+'</a></td><td>'+esc(m.ifaceName||'')+'</td></tr>').join('')+
+    '</table><div id="warnbox"></div>';
+  renderWarnings();
+  r.querySelectorAll('[data-cl]').forEach(el=>el.onclick=(ev)=>{
+    ev.preventDefault();
+    showDevice(c.members[parseInt(el.dataset.cl,10)].dev);
+  });
 }
 
 /* Open the link screen. If the tapped edge names one specific connection,
@@ -4902,6 +4939,7 @@ function showDevice(d, opts){
   opts = opts || {};
   openRight();
   if(STATE.selected !== d.id){ STATE.devTab='overview'; STATE.editingConfig=false; STATE.renaming=false; STATE.devSubTab='interfaces'; }
+  if(opts.subTab) STATE.devSubTab=opts.subTab;   // caller asked for a specific tab
   if(opts.tab) STATE.devTab=opts.tab;
   STATE.selected=d.id;
   STATE.pinFocusLine = opts.line!=null ? opts.line : null;
