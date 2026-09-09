@@ -37,9 +37,19 @@ body{
 button{font-family:inherit; font-size:13px; cursor:pointer}
 input,textarea,select{font-family:var(--mono); font-size:13px}
 
-:root{--left:290px; --right:400px; --bottom:220px}
+:root{--left:290px; --right:400px; --bottom:220px; --top:150px}
 .shell{display:grid; grid-template-columns:var(--left) 6px minmax(0,1fr) 6px var(--right);
-  grid-template-rows:minmax(0,1fr) 6px var(--bottom); height:100vh}
+  grid-template-rows:var(--top) 6px minmax(0,1fr) 6px var(--bottom); height:100vh}
+.top-panel{grid-column:1/-1; background:var(--panel-2); border-bottom:1px solid var(--rule);
+  overflow:auto; min-height:0; transition:none}
+.top-head{display:flex; align-items:center; gap:10px; padding:8px 16px;
+  border-bottom:1px solid var(--rule); position:sticky; top:0; background:var(--panel-2); z-index:2}
+.top-head h2{margin:0; font-size:12.5px; font-weight:600; color:var(--ink-dim)}
+.top-head .count{font-family:var(--mono); font-size:11px; color:var(--ink-faint)}
+.top-head .spacer{flex:1}
+.scope-cols{display:grid; grid-template-columns:1fr 1fr 1fr; gap:16px; padding:10px 16px 14px}
+@media (max-width:1100px){ .scope-cols{grid-template-columns:1fr} }
+.scope-h{font-size:11.5px; font-weight:600; color:var(--ink-faint); margin:0 0 6px}
 .gutter{
   position:relative; cursor:col-resize; background:var(--bg);
   border-left:1px solid var(--rule); border-right:1px solid var(--rule);
@@ -341,6 +351,18 @@ table.fib td:first-child{color:var(--ink)}
 </head>
 <body>
 <div class="shell">
+  <div class="top-panel" id="top-panel">
+    <div class="top-head">
+      <h2>VRF / VSYS scope</h2>
+      <span class="count" id="scope-count"></span>
+      <span class="spacer"></span>
+      <label class="toggle" style="padding:3px 8px"><input type="checkbox" id="top-auto" checked> Auto-hide</label>
+      <button class="btn tiny" id="top-pin" title="Keep open">Pin</button>
+      <button class="btn tiny" id="tog-t" title="Collapse">▴</button>
+    </div>
+    <div id="vrfvsys-body"></div>
+  </div>
+  <div class="gutter-h" id="gut-t"></div>
 
   <!-- ============ LEFT: config intake ============ -->
   <aside class="rail">
@@ -387,9 +409,6 @@ table.fib td:first-child{color:var(--ink)}
         <input id="find-q" class="wide" placeholder="IP, subnet, vlan 30, vrf CUST-A" spellcheck="false">
         <div class="wide"><button class="btn" id="find-go" style="width:100%">Search</button></div>
       </div>
-
-      <h2 class="sec">VRF / VSYS filter</h2>
-      <div id="vrfvsys-body"></div>
 
       <h2 class="sec">Sites and zones</h2>
       <ul class="devs" id="grouplist"></ul>
@@ -2265,76 +2284,139 @@ function allVsysNames(){
 }
 /* Does this device have anything in the selected VRFs/VSYS? Either facet with
    nothing selected imposes no constraint; both together combine with AND. */
-function deviceInScope(d, vrfSet, vsysSet){
-  const vrfOk = !vrfSet.size || d.interfaces.some(i=>vrfSet.has(i.vrf||'default')) ||
-                (d.fib||[]).some(r=>vrfSet.has(r.vrf||'default'));
-  const vsysOk = !vsysSet.size || d.interfaces.some(i=>i.vsys && vsysSet.has(i.vsys));
-  return vrfOk && vsysOk;
+/* Scope filtering works at the interface level, not the device level. A router
+   with one interface in a DR VRF and another in production is only partly in
+   scope — so its production links must not be drawn just because the device
+   qualified somewhere else. Exclusions always beat inclusions. */
+function scopeSets(){
+  STATE.vrfInclude  = STATE.vrfInclude  || new Set();
+  STATE.vrfExclude  = STATE.vrfExclude  || new Set();
+  STATE.vsysInclude = STATE.vsysInclude || new Set();
+  STATE.vsysExclude = STATE.vsysExclude || new Set();
+  return {vi:STATE.vrfInclude, ve:STATE.vrfExclude, si:STATE.vsysInclude, se:STATE.vsysExclude};
+}
+function scopeActive(){
+  const s=scopeSets();
+  return !!(s.vi.size || s.ve.size || s.si.size || s.se.size);
+}
+function ifaceInScope(i){
+  if(!scopeActive()) return true;
+  const s=scopeSets();
+  const vrf=(i && i.vrf) || 'default';
+  const vsys=(i && i.vsys) || null;
+  if(s.ve.has(vrf)) return false;                       // excluded VRF wins
+  if(vsys && s.se.has(vsys)) return false;              // excluded VSYS wins
+  if(s.vi.size && !s.vi.has(vrf)) return false;
+  if(s.si.size && (!vsys || !s.si.has(vsys))) return false;
+  return true;
+}
+function routeInScope(r){
+  if(!scopeActive()) return true;
+  const s=scopeSets();
+  const vrf=(r && r.vrf) || 'default';
+  if(s.ve.has(vrf)) return false;
+  if(s.vi.size && !s.vi.has(vrf)) return false;
+  return true;
+}
+function deviceInScope(d){
+  if(!scopeActive()) return true;
+  return d.interfaces.some(ifaceInScope);
 }
 
 function renderVrfFilter(){
   const box=document.getElementById('vrfvsys-body');
   if(!box) return;
-  STATE.vrfFilter = STATE.vrfFilter || new Set();
-  STATE.vsysFilter = STATE.vsysFilter || new Set();
+  const s=scopeSets();
   const vrfs=allVrfNames(), vsyses=allVsysNames();
-  const chipList=(names, set, kind)=> names.length
-    ? names.map(n=>'<span class="health-chip" data-'+kind+'="'+esc(n)+'" style="'+
-        (set.has(n)?'border-color:var(--cyan);color:var(--ink)':'')+'">'+esc(n)+'</span>').join(' ')
-    : '<p class="health-ok">None found yet.</p>';
+
+  const chip=(n,kind)=>{
+    const inc=(kind==='vrf'?s.vi:s.si).has(n);
+    const exc=(kind==='vrf'?s.ve:s.se).has(n);
+    const style = inc ? 'border-color:var(--green);color:var(--ink)'
+                : exc ? 'border-color:var(--red);color:var(--red);text-decoration:line-through'
+                : '';
+    const mark = inc ? '+ ' : exc ? '− ' : '';
+    return '<span class="health-chip" data-'+kind+'="'+esc(n)+'" style="'+style+'" '+
+      'title="Click to include, click again to exclude, again to clear">'+mark+esc(n)+'</span>';
+  };
+  const list=(names,kind)=> names.length
+    ? names.map(n=>chip(n,kind)).join(' ')
+    : '<span class="health-ok">None found yet.</span>';
+
+  const selected=[
+    ...[...s.vi].map(n=>({n,kind:'vrf',mode:'include'})),
+    ...[...s.ve].map(n=>({n,kind:'vrf',mode:'exclude'})),
+    ...[...s.si].map(n=>({n,kind:'vsys',mode:'include'})),
+    ...[...s.se].map(n=>({n,kind:'vsys',mode:'exclude'}))
+  ];
+
   box.innerHTML =
-    '<h3 style="font-size:11.5px;color:var(--ink-faint);margin:2px 0 6px">VRF ('+STATE.vrfFilter.size+' selected)</h3>'+
-    '<div class="health-chips">'+chipList(vrfs, STATE.vrfFilter, 'vrf')+'</div>'+
-    '<div class="rt-form" style="margin-top:8px">'+
-      '<input id="vrf-wild" placeholder="*_DR_INT or exact name" spellcheck="false">'+
-      '<button class="btn tiny" id="vrf-wild-go">Select</button>'+
-    '</div>'+
-    '<h3 style="font-size:11.5px;color:var(--ink-faint);margin:14px 0 6px">VSYS ('+STATE.vsysFilter.size+' selected)</h3>'+
-    '<div class="health-chips">'+chipList(vsyses, STATE.vsysFilter, 'vsys')+'</div>'+
-    '<div class="rt-form" style="margin-top:8px">'+
-      '<input id="vsys-wild" placeholder="*_DR_INT or exact name" spellcheck="false">'+
-      '<button class="btn tiny" id="vsys-wild-go">Select</button>'+
-    '</div>'+
-    '<div class="btn-row" style="margin-top:10px">'+
-      '<button class="btn btn-go" id="vrf-view">View filtered</button>'+
-      '<button class="btn" id="vrf-clear">Clear</button>'+
+    '<div class="scope-cols">'+
+      '<div>'+
+        '<h3 class="scope-h">VRF</h3>'+
+        '<div class="health-chips">'+list(vrfs,'vrf')+'</div>'+
+        '<div class="rt-form" style="margin-top:6px">'+
+          '<input id="vrf-wild" placeholder="*_DR_INT or exact" spellcheck="false">'+
+          '<button class="btn tiny" id="vrf-inc">Include</button>'+
+          '<button class="btn tiny danger" id="vrf-exc">Exclude</button>'+
+        '</div>'+
+      '</div>'+
+      '<div>'+
+        '<h3 class="scope-h">VSYS</h3>'+
+        '<div class="health-chips">'+list(vsyses,'vsys')+'</div>'+
+        '<div class="rt-form" style="margin-top:6px">'+
+          '<input id="vsys-wild" placeholder="*_DR_INT or exact" spellcheck="false">'+
+          '<button class="btn tiny" id="vsys-inc">Include</button>'+
+          '<button class="btn tiny danger" id="vsys-exc">Exclude</button>'+
+        '</div>'+
+      '</div>'+
+      '<div>'+
+        '<h3 class="scope-h">Applied ('+selected.length+')</h3>'+
+        (selected.length
+          ? '<div class="health-chips">'+selected.map(x=>
+              '<span class="health-chip" data-clear="'+esc(x.kind+'|'+x.mode+'|'+x.n)+'" '+
+              'style="'+(x.mode==='include'?'border-color:var(--green)':'border-color:var(--red);color:var(--red)')+'" '+
+              'title="Click to remove">'+(x.mode==='include'?'+ ':'− ')+esc(x.kind)+' '+esc(x.n)+' ×</span>').join(' ')+'</div>'
+          : '<span class="health-ok">Nothing applied — the whole project is shown.</span>')+
+        '<div class="btn-row" style="margin-top:8px">'+
+          '<button class="btn tiny btn-go" id="vrf-view">View filtered</button>'+
+          '<button class="btn tiny" id="vrf-clear">Clear all</button>'+
+        '</div>'+
+      '</div>'+
     '</div>';
-  box.querySelectorAll('[data-vrf]').forEach(el=>el.onclick=()=>{
-    const n=el.dataset.vrf;
-    STATE.vrfFilter.has(n) ? STATE.vrfFilter.delete(n) : STATE.vrfFilter.add(n);
-    renderVrfFilter();
-    if(document.getElementById('opt-view').value==='vrf') render();
+
+  const cntEl=document.getElementById('scope-count');
+  if(cntEl) cntEl.textContent = selected.length
+    ? selected.length+' applied · '+STATE.devices.filter(deviceInScope).length+' of '+STATE.devices.length+' devices'
+    : 'whole project';
+
+  const refresh=()=>{ renderVrfFilter(); render(); autosave(); };
+  // click cycles include -> exclude -> off
+  const cycle=(n, incSet, excSet)=>{
+    if(incSet.has(n)){ incSet.delete(n); excSet.add(n); }
+    else if(excSet.has(n)){ excSet.delete(n); }
+    else incSet.add(n);
+  };
+  box.querySelectorAll('[data-vrf]').forEach(el=>el.onclick=()=>{ cycle(el.dataset.vrf, s.vi, s.ve); refresh(); });
+  box.querySelectorAll('[data-vsys]').forEach(el=>el.onclick=()=>{ cycle(el.dataset.vsys, s.si, s.se); refresh(); });
+  box.querySelectorAll('[data-clear]').forEach(el=>el.onclick=()=>{
+    const [kind,mode,name]=el.dataset.clear.split('|');
+    const set = kind==='vrf' ? (mode==='include'?s.vi:s.ve) : (mode==='include'?s.si:s.se);
+    set.delete(name); refresh();
   });
-  box.querySelectorAll('[data-vsys]').forEach(el=>el.onclick=()=>{
-    const n=el.dataset.vsys;
-    STATE.vsysFilter.has(n) ? STATE.vsysFilter.delete(n) : STATE.vsysFilter.add(n);
-    renderVrfFilter();
-    if(document.getElementById('opt-view').value==='vrf') render();
-  });
-  const vrfGo=document.getElementById('vrf-wild-go');
-  if(vrfGo) vrfGo.onclick=()=>{
-    const p=document.getElementById('vrf-wild').value.trim();
+  const wild=(inputId, names, set)=>{
+    const p=(document.getElementById(inputId).value||'').trim();
     if(!p) return;
-    for(const n of vrfs) if(globMatch(p,n)) STATE.vrfFilter.add(n);
-    renderVrfFilter();
-    if(document.getElementById('opt-view').value==='vrf') render();
+    for(const n of names) if(globMatch(p,n)) set.add(n);
+    refresh();
   };
-  const vsysGo=document.getElementById('vsys-wild-go');
-  if(vsysGo) vsysGo.onclick=()=>{
-    const p=document.getElementById('vsys-wild').value.trim();
-    if(!p) return;
-    for(const n of vsyses) if(globMatch(p,n)) STATE.vsysFilter.add(n);
-    renderVrfFilter();
-    if(document.getElementById('opt-view').value==='vrf') render();
-  };
-  const vrfView=document.getElementById('vrf-view');
-  if(vrfView) vrfView.onclick=()=>setView('vrf');
-  const vrfClear=document.getElementById('vrf-clear');
-  if(vrfClear) vrfClear.onclick=()=>{
-    STATE.vrfFilter=new Set(); STATE.vsysFilter=new Set();
-    renderVrfFilter();
-    if(document.getElementById('opt-view').value==='vrf') render();
-  };
+  const bind=(id,fn)=>{ const e=document.getElementById(id); if(e) e.onclick=fn; };
+  bind('vrf-inc',  ()=>wild('vrf-wild',  vrfs,   s.vi));
+  bind('vrf-exc',  ()=>wild('vrf-wild',  vrfs,   s.ve));
+  bind('vsys-inc', ()=>wild('vsys-wild', vsyses, s.si));
+  bind('vsys-exc', ()=>wild('vsys-wild', vsyses, s.se));
+  bind('vrf-view', ()=>setView('vrf'));
+  bind('vrf-clear',()=>{ s.vi.clear(); s.ve.clear(); s.si.clear(); s.se.clear(); refresh(); });
 }
 
 /* Rotate the current view's saved layout about its centre. */
@@ -2574,11 +2656,12 @@ function render(){
   const sel = STATE.selectedDevs = STATE.selectedDevs || new Set();
   // "Selected devices" view narrows the whole map to the chosen devices
   const found = (view==='find') ? new Set((STATE.findResult||{devs:[]}).devs.map(x=>x.dev.id)) : null;
-  const vrfSet = STATE.vrfFilter||new Set(), vsysSet = STATE.vsysFilter||new Set();
-  const vis = d => view==='sel' ? sel.has(d.id)
-                 : view==='find' ? found.has(d.id)
-                 : view==='vrf' ? deviceInScope(d, vrfSet, vsysSet)
-                 : d.show!==false;
+  const baseVis = d => view==='sel' ? sel.has(d.id)
+                     : view==='find' ? found.has(d.id)
+                     : view==='vrf' ? true          // the scope filter alone decides here
+                     : d.show!==false;
+  // the VRF/VSYS scope narrows every view, not just the dedicated one
+  const vis = d => baseVis(d) && deviceInScope(d);
 
   /* Traced path only: rebuild the scene from the trace itself rather than the
      full model, so you get just the devices on the path with the interfaces
@@ -2907,7 +2990,7 @@ function render(){
     if(STATE.cy){ STATE.cy.destroy(); STATE.cy=null; }
     return;
   }
-  if(view==='vrf' && !vrfSet.size && !vsysSet.size){
+  if(view==='vrf' && !scopeActive()){
     el.style.display='flex';
     el.innerHTML='<strong>No VRF or VSYS selected</strong><span>Pick one or more from VRF / VSYS filter in the left panel, then View filtered.</span>';
     if(STATE.cy){ STATE.cy.destroy(); STATE.cy=null; }
@@ -2937,11 +3020,11 @@ function render(){
       }
     }
   }
-  const isStub = (k, sn)=> hideStubs && sn.members.filter(m=>vis(m.dev)).length<2 && !keepNets.has(k);
+  const isStub = (k, sn)=> hideStubs && sn.members.filter(m=>vis(m.dev) && ifaceInScope(m.iface)).length<2 && !keepNets.has(k);
   const stubCount={};
   for(const k in model.subnets){
     const sn=model.subnets[k];
-    const mem=sn.members.filter(m=>vis(m.dev));
+    const mem=sn.members.filter(m=>vis(m.dev) && ifaceInScope(m.iface));
     if(mem.length && isStub(k,sn)){
       const id=mem[0].dev.id;
       stubCount[id]=(stubCount[id]||0)+1;
@@ -3104,6 +3187,7 @@ function render(){
     for(const k in model.l2links){
       const L=model.l2links[k];
       if(!vis(L.a.dev) || !vis(L.b.dev)) continue;
+      if(!ifaceInScope(effL2(L.a.dev,L.a.port)) || !ifaceInScope(effL2(L.b.dev,L.b.port))) continue;
       if(view==='simple' || view==='sel'){
         // L3 and L2 are different kinds of connectivity — collapse repeats of
         // each kind to one line, but never let one hide the other.
@@ -5532,9 +5616,11 @@ function renderHealth(){
    Panel sizing — drag the gutters, or collapse a panel entirely
    ============================================================ */
 const PANEL={left:290, right:400, leftMin:200, rightMin:280, minStage:120,
-             bottom:220, bottomMin:90, bottomMax:520};
+             bottom:220, bottomMin:90, bottomMax:520,
+             top:150, topMin:80, topMax:420, topCollapsed:34};
 STATE.ui = STATE.ui || {left:PANEL.left, right:PANEL.right, leftOpen:true, rightOpen:true,
-                        bottom:PANEL.bottom, bottomOpen:true};
+                        bottom:PANEL.bottom, bottomOpen:true,
+                        top:PANEL.top, topOpen:true, topPinned:false, topAuto:true};
 
 function applyPanels(){
   const u=STATE.ui;
@@ -5547,7 +5633,14 @@ function applyPanels(){
   document.documentElement.style.setProperty('--left',  (u.leftOpen  ? u.left  : 0)+'px');
   document.documentElement.style.setProperty('--right', (u.rightOpen ? u.right : 0)+'px');
   document.documentElement.style.setProperty('--bottom', (u.bottomOpen ? (u.bottom||PANEL.bottom) : 0)+'px');
-  const l=document.getElementById('tog-l'), r=document.getElementById('tog-r'), b=document.getElementById('tog-b');
+  // collapsed still shows the header strip, so there is always something to grab
+  document.documentElement.style.setProperty('--top',
+    (u.topOpen ? (u.top||PANEL.top) : PANEL.topCollapsed)+'px');
+  const l=document.getElementById('tog-l'), r=document.getElementById('tog-r'),
+        b=document.getElementById('tog-b'), t=document.getElementById('tog-t');
+  if(t){ t.textContent = u.topOpen?'▴':'▾'; t.title = (u.topOpen?'Collapse':'Expand')+' the scope panel'; }
+  const pin=document.getElementById('top-pin');
+  if(pin){ pin.textContent = u.topPinned?'Pinned':'Pin'; pin.classList.toggle('btn-go', !!u.topPinned); }
   if(l){ l.textContent = u.leftOpen?'‹':'›'; l.title = (u.leftOpen?'Hide':'Show')+' the left panel'; }
   if(r){ r.textContent = u.rightOpen?'›':'‹'; r.title = (u.rightOpen?'Hide':'Show')+' the right panel'; }
   if(b){ b.textContent = u.bottomOpen?'▾':'▴'; b.title = (u.bottomOpen?'Minimize':'Show')+' device readiness'; }
@@ -5634,6 +5727,62 @@ function initPanels(){
   }
   document.getElementById('tog-b').onclick=()=>{ STATE.ui.bottomOpen=!STATE.ui.bottomOpen; applyPanels(); autosave(); };
 
+  /* Top scope panel: drag its gutter to resize, and by default it slides shut
+     once the pointer leaves so it does not eat diagram space. Pin holds it
+     open; expanding it by hand also counts as pinning for that session. */
+  const gt=document.getElementById('gut-t');
+  if(gt){
+    gt.addEventListener('mousedown', ev=>{
+      ev.preventDefault();
+      const startY=ev.clientY, start=STATE.ui.top||PANEL.top;
+      STATE.ui.topOpen=true; STATE.ui.topPinned=true;
+      gt.classList.add('dragging'); document.body.classList.add('resizing-v');
+      let raf=null;
+      const move=(e)=>{
+        const delta=e.clientY-startY;                       // drag down to grow
+        STATE.ui.top=Math.max(PANEL.topMin, Math.min(PANEL.topMax, start+delta));
+        if(!raf) raf=requestAnimationFrame(()=>{ raf=null; applyPanels(); });
+      };
+      const up=()=>{
+        window.removeEventListener('mousemove',move); window.removeEventListener('mouseup',up);
+        gt.classList.remove('dragging'); document.body.classList.remove('resizing-v');
+        applyPanels(); autosave();
+      };
+      window.addEventListener('mousemove',move); window.addEventListener('mouseup',up);
+    });
+    gt.addEventListener('dblclick', ()=>{
+      STATE.ui.top=PANEL.top; STATE.ui.topOpen=true; applyPanels(); autosave();
+    });
+  }
+  const topPanel=document.getElementById('top-panel');
+  if(topPanel){
+    topPanel.addEventListener('mouseenter', ()=>{
+      if(!STATE.ui.topAuto || STATE.ui.topPinned) return;
+      if(!STATE.ui.topOpen){ STATE.ui.topOpen=true; applyPanels(); }
+    });
+    topPanel.addEventListener('mouseleave', ()=>{
+      if(!STATE.ui.topAuto || STATE.ui.topPinned) return;
+      if(STATE.ui.topOpen){ STATE.ui.topOpen=false; applyPanels(); }
+    });
+  }
+  const togT=document.getElementById('tog-t');
+  if(togT) togT.onclick=()=>{
+    STATE.ui.topOpen=!STATE.ui.topOpen;
+    if(STATE.ui.topOpen) STATE.ui.topPinned=true;    // opening by hand means keep it
+    applyPanels(); autosave();
+  };
+  const pinBtn=document.getElementById('top-pin');
+  if(pinBtn) pinBtn.onclick=()=>{
+    STATE.ui.topPinned=!STATE.ui.topPinned;
+    if(STATE.ui.topPinned) STATE.ui.topOpen=true;
+    applyPanels(); autosave();
+  };
+  const autoBox=document.getElementById('top-auto');
+  if(autoBox){
+    autoBox.checked = STATE.ui.topAuto!==false;
+    autoBox.onchange=()=>{ STATE.ui.topAuto=autoBox.checked; autosave(); };
+  }
+
   window.addEventListener('resize', ()=>{ if(STATE.cy) STATE.cy.resize(); });
 }
 
@@ -5680,8 +5829,10 @@ function projectObject(){
     theme:STATE.theme,
     bends:STATE.bends||{},
     lineWidths:STATE.lineWidths||{},
-    vrfFilter:[...(STATE.vrfFilter||[])],
-    vsysFilter:[...(STATE.vsysFilter||[])],
+    vrfInclude:[...(STATE.vrfInclude||[])],
+    vrfExclude:[...(STATE.vrfExclude||[])],
+    vsysInclude:[...(STATE.vsysInclude||[])],
+    vsysExclude:[...(STATE.vsysExclude||[])],
     clouds:STATE.clouds||[],
     groups:groups(),
     layer:document.getElementById('opt-layer').value,
@@ -5719,8 +5870,11 @@ function loadProject(obj){
   if(obj.theme) STATE.theme=Object.assign({}, THEME_DEFAULT, obj.theme);
   STATE.bends = obj.bends || {};
   STATE.lineWidths = obj.lineWidths || {};
-  STATE.vrfFilter = new Set(obj.vrfFilter||[]);
-  STATE.vsysFilter = new Set(obj.vsysFilter||[]);
+  // older projects stored a single include-only list per facet
+  STATE.vrfInclude  = new Set(obj.vrfInclude  || obj.vrfFilter  || []);
+  STATE.vrfExclude  = new Set(obj.vrfExclude  || []);
+  STATE.vsysInclude = new Set(obj.vsysInclude || obj.vsysFilter || []);
+  STATE.vsysExclude = new Set(obj.vsysExclude || []);
   applyPanels();
   initTheme();
   const st=document.querySelector('.stage');
