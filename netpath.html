@@ -596,7 +596,7 @@ function parseCidr(s){
 /* ============================================================
    State
    ============================================================ */
-const STATE = { devices:[], model:null, cy:null, selected:null, lastTrace:null, devTab:'overview', editingConfig:false, pinFocusLine:null, traceMode:'after', renaming:false, clouds:[] };
+const STATE = { devices:[], model:null, cy:null, selected:null, lastTrace:null, devTab:'overview', devSubTab:'interfaces', editingConfig:false, pinFocusLine:null, traceMode:'after', renaming:false, clouds:[] };
 let cloudSeq = 0;
 let devSeq = 0;
 
@@ -4556,32 +4556,61 @@ function showFind(){
 function showDevice(d, opts){
   opts = opts || {};
   openRight();
-  if(STATE.selected !== d.id){ STATE.devTab='overview'; STATE.editingConfig=false; STATE.renaming=false; }
+  if(STATE.selected !== d.id){ STATE.devTab='overview'; STATE.editingConfig=false; STATE.renaming=false; STATE.devSubTab='interfaces'; }
   if(opts.tab) STATE.devTab=opts.tab;
   STATE.selected=d.id;
   STATE.pinFocusLine = opts.line!=null ? opts.line : null;
   renderDevList();
   const r=document.getElementById('result');
 
+  /* Group by VRF — the fastest way to spot a route or interface that ended
+     up in the wrong routing instance, which routing faults usually are. */
+  function vrfGroups(items, vrfOf){
+    const map={};
+    for(const it of items){ const v=vrfOf(it)||'default'; (map[v]=map[v]||[]).push(it); }
+    return Object.keys(map).sort((a,b)=> a==='default'?-1 : b==='default'?1 : a.localeCompare(b))
+      .map(v=>({vrf:v, items:map[v]}));
+  }
+  function vrfHeading(vrf, count){
+    return '<div class="cfgpane-label"><span>VRF '+esc(vrf)+'</span><span>'+count+'</span></div>';
+  }
+
   const ROW_CAP=250;
   const fibSorted = d.fib.slice().sort((a,b)=>a.net-b.net||a.len-b.len);
   const fibShown = fibSorted.slice(0, ROW_CAP);
   const rowQ=(f)=>[cidr(f.net,f.len), f.nextHop!=null?int2ip(f.nextHop):(f.iface||''), f.type, f.vrf]
     .join(' ').toLowerCase();
-  const rows = fibShown.map(f=>
-    '<tr data-q="'+esc(rowQ(f))+'"><td>'+cidr(f.net,f.len)+'</td><td>'+(f.nextHop!=null?int2ip(f.nextHop):(f.iface||'—'))+'</td>'+
-    '<td><span class="tag '+f.type+'">'+f.type+'</span></td><td>'+esc(f.vrf)+'</td></tr>').join('');
+  const routeGroups = vrfGroups(fibShown, f=>f.vrf);
+  const rows = routeGroups.map(g=>
+    '<div class="vrf-group" data-vrfgroup>'+vrfHeading(g.vrf, g.items.length)+
+    '<table class="fib rt-vrf-table"><tr><th>Prefix</th><th>Via</th><th>Source</th></tr>'+
+    g.items.map(f=>'<tr data-q="'+esc(rowQ(f))+'"><td>'+cidr(f.net,f.len)+'</td>'+
+      '<td>'+(f.nextHop!=null?int2ip(f.nextHop):(f.iface||'—'))+'</td>'+
+      '<td><span class="tag '+f.type+'">'+f.type+'</span></td></tr>').join('')+
+    '</table></div>').join('');
   const rowsMore = fibSorted.length>ROW_CAP
     ? '<p class="note">Showing the first '+ROW_CAP+' of '+fibSorted.length+' routes.</p>' : '';
+
   const ifQ=(i)=>[i.name, i.addrs.map(a=>int2ip(a.ip)+'/'+a.len).join(' '), i.zone||'', i.vrf||'', vlanOfIface(i)||'']
     .join(' ').toLowerCase();
-  const ifs = d.interfaces.map(i=>
-    '<tr data-q="'+esc(ifQ(i))+'"><td>'+esc(i.name)+'</td><td>'+(i.addrs.map(a=>int2ip(a.ip)+'/'+a.len).join(', ')||'—')+'</td>'+
-    '<td>'+esc(i.zone||i.vrf)+'</td></tr>').join('');
-  const mrows = d.manualRoutes.length ? d.manualRoutes.map((mr,idx)=>
-    '<tr><td>'+cidr(mr.net,mr.len)+'</td><td>'+(mr.nextHop!=null?int2ip(mr.nextHop):(mr.iface||'—'))+'</td>'+
-    '<td>'+mr.ad+'</td><td>'+esc(mr.vrf)+'</td>'+
-    '<td style="text-align:right"><button class="dev-x" data-del="'+idx+'" title="Remove">×</button></td></tr>').join('') : '';
+  const ifGroups = vrfGroups(d.interfaces, i=>i.vrf);
+  const ifs = ifGroups.map(g=>
+    '<div class="vrf-group" data-vrfgroup>'+vrfHeading(g.vrf, g.items.length)+
+    '<table class="fib if-vrf-table"><tr><th>Interface</th><th>Address</th><th>Zone</th></tr>'+
+    g.items.map(i=>'<tr data-q="'+esc(ifQ(i))+'"><td>'+esc(i.name)+'</td>'+
+      '<td>'+(i.addrs.map(a=>int2ip(a.ip)+'/'+a.len).join(', ')||'—')+'</td>'+
+      '<td>'+esc(i.zone||'—')+'</td></tr>').join('')+
+    '</table></div>').join('');
+
+  const mrIndexed = d.manualRoutes.map((mr,idx)=>({mr, idx}));
+  const mrGroups = vrfGroups(mrIndexed, x=>x.mr.vrf);
+  const mrows = d.manualRoutes.length ? mrGroups.map(g=>
+    '<div class="vrf-group" data-vrfgroup>'+vrfHeading(g.vrf, g.items.length)+
+    '<table class="fib"><tr><th>Prefix</th><th>Via</th><th>Metric</th><th></th></tr>'+
+    g.items.map(({mr,idx})=>'<tr><td>'+cidr(mr.net,mr.len)+'</td>'+
+      '<td>'+(mr.nextHop!=null?int2ip(mr.nextHop):(mr.iface||'—'))+'</td><td>'+mr.ad+'</td>'+
+      '<td style="text-align:right"><button class="dev-x" data-del="'+idx+'" title="Remove">×</button></td></tr>').join('')+
+    '</table></div>').join('') : '';
 
   const stubs=[];
   if(STATE.model && STATE.model.subnets){
@@ -4707,9 +4736,16 @@ function showDevice(d, opts){
       (nrows?'<button class="btn danger" id="nb-clear">Delete neighbors</button>':'')+
     '</div>';
 
-  const overviewHtml =
+  const ifTabHtml =
+    '<div class="rt-form"><input id="dev-search" class="wide" '+
+      'placeholder="Filter interfaces — name, address, vlan, zone..." spellcheck="false"></div>'+
+    '<h2 class="sec">Interfaces <span id="if-count" style="color:var(--ink-faint);font-weight:400"></span></h2>'+
+    '<div id="if-table">'+ifs+'</div>'+
+    stubHtml;
+
+  const routingTabHtml =
     '<h2 class="sec">Routing table you added</h2>'+
-    (mrows ? '<table class="fib"><tr><th>Prefix</th><th>Via</th><th>Metric</th><th>VRF</th><th></th></tr>'+mrows+'</table>'
+    (mrows ? mrows
            : '<p class="note" style="margin-top:0">Nothing added yet. Paste the device\'s real table below, or enter one route at a time.</p>')+
     '<div class="rt-form">'+
       '<input id="mr-prefix" placeholder="10.20.0.0/16" spellcheck="false">'+
@@ -4728,16 +4764,27 @@ function showDevice(d, opts){
     '<label class="auth"><input type="checkbox" id="mr-auth"'+(d.tableAuthoritative?' checked':'')+'>'+
       '<span>This table is complete — do not infer any routes for '+esc(d.name)+'.</span></label>'+
     '<div class="rt-form" style="margin-top:14px"><input id="dev-search" class="wide" '+
-      'placeholder="Filter interfaces and routes — name, address, vlan, type..." spellcheck="false"></div>'+
-    '<h2 class="sec">Interfaces <span id="if-count" style="color:var(--ink-faint);font-weight:400"></span></h2>'+
-    '<table class="fib" id="if-table"><tr><th>Interface</th><th>Address</th><th>Zone / VRF</th></tr>'+ifs+'</table>'+
+      'placeholder="Filter routes — prefix, next hop, type, vrf..." spellcheck="false"></div>'+
     '<h2 class="sec">Routes in use <span id="rt-count" style="color:var(--ink-faint);font-weight:400"></span></h2>'+
-    '<table class="fib" id="rt-table"><tr><th>Prefix</th><th>Via</th><th>Source</th><th>VRF</th></tr>'+rows+'</table>'+
-    rowsMore+
-    stubHtml+
-    bgpHtml+
-    wanHtml+
-    l2Html;
+    '<div id="rt-table">'+rows+'</div>'+
+    rowsMore;
+
+  const subTabs=[['interfaces','Interfaces'],['routing','Routing table'],['l2','Layer 2']];
+  if(d.bgp) subTabs.push(['bgp','BGP']);
+  subTabs.push(['wan','WAN']);
+  if(!subTabs.some(t=>t[0]===STATE.devSubTab)) STATE.devSubTab='interfaces';
+  const subTabHtml = STATE.devSubTab==='routing' ? routingTabHtml
+                    : STATE.devSubTab==='l2'      ? l2Html
+                    : STATE.devSubTab==='bgp'      ? bgpHtml
+                    : STATE.devSubTab==='wan'      ? wanHtml
+                    :                                ifTabHtml;
+
+  const overviewHtml =
+    '<div class="tabs" style="margin-top:-4px">'+
+      subTabs.map(([id,label])=>'<button class="tabbtn'+(STATE.devSubTab===id?' on':'')+'" data-subtab="'+id+'">'+
+        esc(label)+'</button>').join('')+
+    '</div>'+
+    subTabHtml;
 
   const modified = isModified(d);
   const headHtml = STATE.renaming
@@ -4822,16 +4869,23 @@ function showDevice(d, opts){
     devSearch.oninput=()=>{
       const q=devSearch.value.trim().toLowerCase();
       let ifShown=0, rtShown=0;
-      document.querySelectorAll('#if-table tr[data-q]').forEach(tr=>{
-        const hit=!q || tr.dataset.q.indexOf(q)>=0;
-        tr.style.display = hit ? '' : 'none';
-        if(hit) ifShown++;
-      });
-      document.querySelectorAll('#rt-table tr[data-q]').forEach(tr=>{
-        const hit=!q || tr.dataset.q.indexOf(q)>=0;
-        tr.style.display = hit ? '' : 'none';
-        if(hit) rtShown++;
-      });
+      const applyTo=(containerId)=>{
+        const container=document.getElementById(containerId);
+        if(!container) return 0;
+        let shown=0;
+        container.querySelectorAll('[data-vrfgroup]').forEach(grp=>{
+          let visibleInGroup=0;
+          grp.querySelectorAll('tr[data-q]').forEach(tr=>{
+            const hit=!q || tr.dataset.q.indexOf(q)>=0;
+            tr.style.display = hit ? '' : 'none';
+            if(hit){ visibleInGroup++; shown++; }
+          });
+          grp.style.display = visibleInGroup ? '' : 'none';
+        });
+        return shown;
+      };
+      ifShown=applyTo('if-table');
+      rtShown=applyTo('rt-table');
       const ic=document.getElementById('if-count'), rc=document.getElementById('rt-count');
       if(ic) ic.textContent = q ? '('+ifShown+' of '+d.interfaces.length+')' : '';
       if(rc) rc.textContent = q ? '('+rtShown+' of '+fibShown.length+')' : '';
@@ -4854,6 +4908,9 @@ function showDevice(d, opts){
   };
 
   document.getElementById('tab-overview').onclick=()=>{ STATE.editingConfig=false; showDevice(d,{tab:'overview'}); };
+  r.querySelectorAll('[data-subtab]').forEach(btn=>{
+    btn.onclick=()=>{ STATE.devSubTab=btn.dataset.subtab; showDevice(d,{tab:'overview'}); };
+  });
   document.getElementById('tab-config').onclick=()=>{ showDevice(d,{tab:'config'}); };
 
   if(STATE.devTab==='config' && !STATE.editingConfig && STATE.pinFocusLine){
@@ -5325,13 +5382,19 @@ function renderHealth(){
 /* ============================================================
    Panel sizing — drag the gutters, or collapse a panel entirely
    ============================================================ */
-const PANEL={left:290, right:400, leftMin:200, rightMin:280, max:640,
+const PANEL={left:290, right:400, leftMin:200, rightMin:280, minStage:120,
              bottom:220, bottomMin:90, bottomMax:520};
 STATE.ui = STATE.ui || {left:PANEL.left, right:PANEL.right, leftOpen:true, rightOpen:true,
                         bottom:PANEL.bottom, bottomOpen:true};
 
 function applyPanels(){
   const u=STATE.ui;
+  // a width saved on a wider screen must not overflow a narrower one
+  const avail = window.innerWidth - 12 - PANEL.minStage;
+  if(u.leftOpen && u.rightOpen && u.left+u.right>avail){
+    const over=(u.left+u.right)-avail;
+    u.right = Math.max(PANEL.rightMin, u.right-over);
+  }
   document.documentElement.style.setProperty('--left',  (u.leftOpen  ? u.left  : 0)+'px');
   document.documentElement.style.setProperty('--right', (u.rightOpen ? u.right : 0)+'px');
   document.documentElement.style.setProperty('--bottom', (u.bottomOpen ? (u.bottom||PANEL.bottom) : 0)+'px');
@@ -5363,7 +5426,12 @@ function initPanels(){
       const move=(e)=>{
         const delta = side==='left' ? (e.clientX-startX) : (startX-e.clientX);
         const min = side==='left' ? PANEL.leftMin : PANEL.rightMin;
-        STATE.ui[side]=Math.max(min, Math.min(PANEL.max, start+delta));
+        // the panel can grow until only a sliver of stage plus the other
+        // panel and the two gutters (~12px) are left — never past that
+        const other = side==='left' ? (STATE.ui.rightOpen?STATE.ui.right:0)
+                                     : (STATE.ui.leftOpen?STATE.ui.left:0);
+        const max = Math.max(min, window.innerWidth - other - 12 - PANEL.minStage);
+        STATE.ui[side]=Math.max(min, Math.min(max, start+delta));
         if(!raf) raf=requestAnimationFrame(()=>{ raf=null; applyPanels(); });
       };
       const up=()=>{
