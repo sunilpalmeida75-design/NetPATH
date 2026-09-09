@@ -387,6 +387,7 @@ table.fib td:first-child{color:var(--ink)}
       <h2>VRF / VSYS scope</h2>
       <span class="count" id="scope-count"></span>
       <span class="spacer"></span>
+      <label class="toggle" style="padding:3px 8px"><input type="checkbox" id="scope-nofw"> Firewalls exempt</label>
       <label class="toggle" style="padding:3px 8px"><input type="checkbox" id="top-auto" checked> Auto-hide</label>
       <button class="btn tiny" id="top-pin" title="Keep open">Pin</button>
       <button class="btn tiny" id="tog-t" title="Collapse">▴</button>
@@ -2330,19 +2331,28 @@ function scopeActive(){
   const s=scopeSets();
   return !!(s.vi.size || s.ve.size || s.si.size || s.se.size);
 }
+function isFirewall(d){ return !!d && d.vendor==='palo-alto'; }
 function ifaceInScope(i){
-  if(!scopeActive()) return true;
+  if(!scopeActive() || !i) return true;
+  const dev=i.dev;
+  // firewalls can be exempted entirely — useful when the VRF names on the
+  // routing side mean nothing to the firewall's own virtual routers
+  if(STATE.scopeIgnoreFw && isFirewall(dev)) return true;
   const s=scopeSets();
-  const vrf=(i && i.vrf) || 'default';
-  const vsys=(i && i.vsys) || null;
+  const vrf=i.vrf || 'default';
+  const vsys=i.vsys || null;
+
   if(s.ve.has(vrf)) return false;                       // excluded VRF wins
   if(vsys && s.se.has(vsys)) return false;              // excluded VSYS wins
   if(s.vi.size && !s.vi.has(vrf)) return false;
-  if(s.si.size && (!vsys || !s.si.has(vsys))) return false;
+  /* VSYS only exists on firewalls, so a VSYS include must not disqualify
+     routers and switches that have no vsys at all. */
+  if(s.si.size && vsys && !s.si.has(vsys)) return false;
   return true;
 }
-function routeInScope(r){
+function routeInScope(r, dev){
   if(!scopeActive()) return true;
+  if(STATE.scopeIgnoreFw && isFirewall(dev)) return true;
   const s=scopeSets();
   const vrf=(r && r.vrf) || 'default';
   if(s.ve.has(vrf)) return false;
@@ -2351,6 +2361,7 @@ function routeInScope(r){
 }
 function deviceInScope(d){
   if(!scopeActive()) return true;
+  if(STATE.scopeIgnoreFw && isFirewall(d)) return true;
   return d.interfaces.some(ifaceInScope);
 }
 
@@ -4837,7 +4848,7 @@ function showDevice(d, opts){
 
   const ROW_CAP=250;
   const fibAll = d.fib.slice().sort((a,b)=>a.net-b.net||a.len-b.len);
-  const fibSorted = scopeOn ? fibAll.filter(routeInScope) : fibAll;
+  const fibSorted = scopeOn ? fibAll.filter(r=>routeInScope(r,d)) : fibAll;
   const hiddenRoutes = fibAll.length - fibSorted.length;
   const fibShown = fibSorted.slice(0, ROW_CAP);
   const rowQ=(f)=>[cidr(f.net,f.len), f.nextHop!=null?int2ip(f.nextHop):(f.iface||''), f.type, f.vrf]
@@ -4863,7 +4874,7 @@ function showDevice(d, opts){
     '</table>', ifGroups.length===1)).join('');
 
   const mrIndexed = d.manualRoutes.map((mr,idx)=>({mr, idx}))
-    .filter(x=>!scopeOn || routeInScope(x.mr));
+    .filter(x=>!scopeOn || routeInScope(x.mr,d));
   const mrGroups = vrfGroups(mrIndexed, x=>x.mr.vrf);
   const mrows = d.manualRoutes.length ? mrGroups.map(g=>vrfBlock(g.vrf, g.items.length,
     '<table class="fib"><tr><th>Prefix</th><th>Via</th><th>Metric</th><th></th></tr>'+
@@ -5829,6 +5840,11 @@ function initPanels(){
     if(STATE.ui.topPinned) STATE.ui.topOpen=true;
     applyPanels(); autosave();
   };
+  const noFw=document.getElementById('scope-nofw');
+  if(noFw){
+    noFw.checked=!!STATE.scopeIgnoreFw;
+    noFw.onchange=()=>{ STATE.scopeIgnoreFw=noFw.checked; renderVrfFilter(); render(); autosave(); };
+  }
   const autoBox=document.getElementById('top-auto');
   if(autoBox){
     autoBox.checked = STATE.ui.topAuto!==false;
@@ -5881,6 +5897,7 @@ function projectObject(){
     theme:STATE.theme,
     bends:STATE.bends||{},
     lineWidths:STATE.lineWidths||{},
+    scopeIgnoreFw: !!STATE.scopeIgnoreFw,
     vrfInclude:[...(STATE.vrfInclude||[])],
     vrfExclude:[...(STATE.vrfExclude||[])],
     vsysInclude:[...(STATE.vsysInclude||[])],
@@ -5923,6 +5940,7 @@ function loadProject(obj){
   STATE.bends = obj.bends || {};
   STATE.lineWidths = obj.lineWidths || {};
   // older projects stored a single include-only list per facet
+  STATE.scopeIgnoreFw = !!obj.scopeIgnoreFw;
   STATE.vrfInclude  = new Set(obj.vrfInclude  || obj.vrfFilter  || []);
   STATE.vrfExclude  = new Set(obj.vrfExclude  || []);
   STATE.vsysInclude = new Set(obj.vsysInclude || obj.vsysFilter || []);
