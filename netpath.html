@@ -2462,10 +2462,45 @@ function ifaceExcluded(i){
   if(i.vsys && s.se.has(i.vsys)) return true;
   return false;
 }
+/* A segment is judged as one unit, and the switch/router side is what names
+   it. A firewall interface never decides a segment's VRF — it only ever
+   borrows the VLAN's. So a link either shows whole or not at all. */
+function segmentVrf(sn){
+  if(!sn) return null;
+  // prefer a real switch/router interface with a named VRF
+  for(const m of sn.members)
+    if(!isFirewall(m.dev)){
+      const v=m.iface.vrf;
+      if(v && v!=='default') return v;
+    }
+  for(const m of sn.members) if(!isFirewall(m.dev)) return 'default';
+  // firewall-only segment: fall back to whatever the firewall ends matched
+  for(const m of sn.members){ const v=effVrf(m.iface); if(v && v!==UNMATCHED) return v; }
+  return UNMATCHED;
+}
 /* A segment is gone the moment any device on it is in an excluded VRF. */
 function segmentExcluded(sn){
   if(!scopeActive() || !sn) return false;
-  return sn.members.some(m=>ifaceExcluded(m.iface));
+  const s=scopeSets();
+  const v=segmentVrf(sn);
+  if(v && s.ve.has(v)) return true;                    // the segment's own VRF is excluded
+  return sn.members.some(m=>ifaceExcluded(m.iface));   // or either end is
+}
+/* With an include list active, the segment's VRF must be on it. */
+function segmentInScope(sn){
+  if(!scopeActive() || !sn) return true;
+  if(segmentExcluded(sn)) return false;
+  const s=scopeSets();
+  if(s.vi.size){
+    const v=segmentVrf(sn);
+    if(!v || !s.vi.has(v)) return false;
+  }
+  if(s.si.size){
+    // a VSYS include only constrains segments that actually touch a firewall
+    const fwEnds=sn.members.filter(m=>isFirewall(m.dev));
+    if(fwEnds.length && !fwEnds.some(m=>m.iface.vsys && s.si.has(m.iface.vsys))) return false;
+  }
+  return true;
 }
 function ifaceInScope(i){
   if(!scopeActive() || !i) return true;
@@ -2498,7 +2533,15 @@ function routeInScope(r, dev){
 function deviceInScope(d){
   if(!scopeActive()) return true;
   if(STATE.scopeIgnoreFw && isFirewall(d)) return true;
-  return d.interfaces.some(ifaceInScope);
+  if(d.interfaces.some(ifaceInScope)) return true;
+  // or if it sits on any segment that is in scope as a whole
+  const m=STATE.model;
+  if(m) for(const k in m.subnets){
+    const sn=m.subnets[k];
+    if(sn.tagMismatch) continue;
+    if(sn.members.some(x=>x.dev===d) && segmentInScope(sn)) return true;
+  }
+  return false;
 }
 /* An L2 port carries no VRF of its own, so judging it directly would let every
    switch-to-firewall trunk through a VRF exclusion. Judge it by the VLANs it
@@ -3125,9 +3168,8 @@ function render(){
     const shared=[];
     for(const k in model.subnets){
       const sn=model.subnets[k];
-      if(sn.tagMismatch || segmentExcluded(sn)) continue;
-      const ma=sn.members.filter(x=>x.dev===a && ifaceInScope(x.iface)),
-            mb=sn.members.filter(x=>x.dev===b && ifaceInScope(x.iface));
+      if(sn.tagMismatch || !segmentInScope(sn)) continue;
+      const ma=sn.members.filter(x=>x.dev===a), mb=sn.members.filter(x=>x.dev===b);
       if(ma.length && mb.length) shared.push({key:k, a:ma, b:mb});
     }
     const l2=[];
@@ -3312,12 +3354,12 @@ function render(){
       }
     }
   }
-  const isStub = (k, sn)=> hideStubs && sn.members.filter(m=>vis(m.dev) && ifaceInScope(m.iface)).length<2 && !keepNets.has(k);
+  const isStub = (k, sn)=> hideStubs && sn.members.filter(m=>vis(m.dev)).length<2 && !keepNets.has(k);
   const stubCount={};
   for(const k in model.subnets){
     const sn=model.subnets[k];
-    if(sn.tagMismatch || segmentExcluded(sn)) continue;
-    const mem=sn.members.filter(m=>vis(m.dev) && ifaceInScope(m.iface));
+    if(sn.tagMismatch || !segmentInScope(sn)) continue;
+    const mem=sn.members.filter(m=>vis(m.dev));
     if(mem.length && isStub(k,sn)){
       const id=mem[0].dev.id;
       stubCount[id]=(stubCount[id]||0)+1;
@@ -3363,8 +3405,8 @@ function render(){
   if(layer!=='l2') for(const k in model.subnets){
     const sn=model.subnets[k];
     if(sn.tagMismatch) continue;             // VLAN tags disagree: not a link
-    if(segmentExcluded(sn)) continue;        // one excluded end kills the segment
-    const members=sn.members.filter(m=>vis(m.dev) && ifaceInScope(m.iface));
+    if(!segmentInScope(sn)) continue;        // the segment's VRF decides, whole or nothing
+    const members=sn.members.filter(m=>vis(m.dev));
     if(!members.length) continue;
     if(isStub(k,sn)) continue;
     const devSet=new Set(members.map(m=>m.dev));
@@ -4773,9 +4815,8 @@ function showLink(a,b){
   const shared=[];
   for(const k in m.subnets){
     const sn=m.subnets[k];
-    if(sn.tagMismatch || segmentExcluded(sn)) continue;
-    const ma=sn.members.filter(x=>x.dev===a && ifaceInScope(x.iface)),
-          mb=sn.members.filter(x=>x.dev===b && ifaceInScope(x.iface));
+    if(sn.tagMismatch || !segmentInScope(sn)) continue;
+    const ma=sn.members.filter(x=>x.dev===a), mb=sn.members.filter(x=>x.dev===b);
     if(ma.length && mb.length) shared.push({key:k, a:ma, b:mb});
   }
   const l2=[];
@@ -5009,9 +5050,8 @@ function showSelection(devs){
     const a=devs[i], b=devs[j], nets=[], l2=[], cl=[];
     for(const k in m.subnets){
       const sn=m.subnets[k];
-      if(!sn.tagMismatch && !segmentExcluded(sn) &&
-         sn.members.some(x=>x.dev===a && ifaceInScope(x.iface)) &&
-         sn.members.some(x=>x.dev===b && ifaceInScope(x.iface))) nets.push({k, sn});
+      if(!sn.tagMismatch && segmentInScope(sn) &&
+         sn.members.some(x=>x.dev===a) && sn.members.some(x=>x.dev===b)) nets.push({k, sn});
     }
     for(const k in (m.l2links||{})){
       const L=m.l2links[k];
@@ -5026,8 +5066,8 @@ function showSelection(devs){
   const external=[];
   for(const k in m.subnets){
     const sn=m.subnets[k];
-    if(sn.tagMismatch || segmentExcluded(sn)) continue;
-    const scopedMem=sn.members.filter(x=>ifaceInScope(x.iface));
+    if(sn.tagMismatch || !segmentInScope(sn)) continue;
+    const scopedMem=sn.members;
     const inside=scopedMem.filter(x=>inSet.has(x.dev.id));
     const outside=scopedMem.filter(x=>!inSet.has(x.dev.id));
     if(inside.length && outside.length) external.push({k, outside});
@@ -5155,7 +5195,22 @@ function showDevice(d, opts){
   /* When a VRF/VSYS scope is active the detail panel shows only what is in
      scope, so it matches what the diagram is drawing. */
   const scopeOn = scopeActive();
-  const scopedIfaces = scopeOn ? d.interfaces.filter(ifaceInScope) : d.interfaces;
+  /* An interface is listed if it is in scope itself, or if the segment it
+     sits on is — so a firewall port on an included VLAN is shown even though
+     the VRF name lives on the switch. */
+  const ifaceShown=(i)=>{
+    if(!scopeOn) return true;
+    if(ifaceExcluded(i)) return false;
+    if(ifaceInScope(i)) return true;
+    const m=STATE.model;
+    if(m) for(const k in m.subnets){
+      const sn=m.subnets[k];
+      if(sn.tagMismatch) continue;
+      if(sn.members.some(x=>x.iface===i) && segmentInScope(sn)) return true;
+    }
+    return false;
+  };
+  const scopedIfaces = scopeOn ? d.interfaces.filter(ifaceShown) : d.interfaces;
   const hiddenIfaces = d.interfaces.length - scopedIfaces.length;
 
   const ROW_CAP=250;
@@ -5200,7 +5255,7 @@ function showDevice(d, opts){
     for(const k in STATE.model.subnets){
       const sn=STATE.model.subnets[k];
       if(sn.members.length<2 && sn.members[0].dev===d &&
-         (!scopeOn || (!segmentExcluded(sn) && ifaceInScope(sn.members[0].iface))))
+         (!scopeOn || (!sn.tagMismatch && segmentInScope(sn))))
         stubs.push({key:k, iface:sn.members[0].iface.name});
     }
     stubs.sort((a,b)=>a.key.localeCompare(b.key));
