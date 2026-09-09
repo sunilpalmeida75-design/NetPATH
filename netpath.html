@@ -1828,13 +1828,32 @@ function buildModel(devices, opts){
                'or the same VLAN ID is reused for two different segments.', d.id, i.line);
         }
       }
-      if(!i.scopeVrf){
-        // bare routed port: the segment decides, if it is unambiguous
+      if(!i.scopeVrf && !t){
+        /* Only a genuinely untagged routed port falls back to its segment.
+           An interface that HAS a tag but found no switch VLAN with that
+           number stays unmatched on purpose — ae1.271 is not Vlan1271, and
+           guessing from the subnet would quietly undo the rule. */
         const seen=new Set();
         for(const k in subnets) for(const m of subnets[k].members)
           if(m.iface===i) for(const o of subnets[k].members)
             if(o.iface!==i && !isFirewall(o.dev) && o.iface.vrf && o.iface.vrf!=='default') seen.add(o.iface.vrf);
         if(seen.size===1) i.scopeVrf=[...seen][0];
+      }
+      if(!i.scopeVrf && t){
+        // tag present, no switch VLAN with that number anywhere
+        const near=[];
+        for(const k in subnets) for(const m of subnets[k].members)
+          if(m.iface===i) for(const o of subnets[k].members)
+            if(o.iface!==i && !isFirewall(o.dev)){
+              const ot=vlanOfIface(o.iface);
+              if(ot && String(parseInt(ot,10))!==String(parseInt(t,10)))
+                near.push(o.dev.name+' '+o.iface.name+' (vlan '+ot+')');
+            }
+        if(near.length)
+          warn(d.name+' '+i.name+' is tagged VLAN '+t+', but the other side of its subnet is '+
+               near.join(', ')+'. The tags do not match, so this interface has no VRF and is '+
+               'filtered as "(unmatched)". Fix the tag on one side, or use Strict mode.',
+               d.id, i.line);
       }
     }
   }
@@ -2404,9 +2423,15 @@ function scopeActive(){
    subnet — never its zone, never its virtual-router name. An unmatched
    firewall interface has no VRF at all. Strict mode judges everything by its
    own name, firewalls included. */
+const UNMATCHED='(unmatched)';
 function effVrf(i){
   if(!i) return 'default';
-  if(isFirewall(i.dev) && !STATE.scopeStrict) return i.scopeVrf || null;
+  /* A firewall interface is judged by the switch VLAN it matched. If nothing
+     matched it gets the name "(unmatched)" rather than nothing at all —
+     otherwise exclusions could never reach it, and "exclude every VRF but X"
+     would silently leave it on the map. It shows as a chip you can include or
+     exclude like any other. */
+  if(isFirewall(i.dev) && !STATE.scopeStrict) return i.scopeVrf || UNMATCHED;
   return i.vrf || 'default';
 }
 function ifaceExcluded(i){
