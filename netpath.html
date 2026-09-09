@@ -69,6 +69,11 @@ input,textarea,select{font-family:var(--mono); font-size:13px}
 .sc.exc{border-color:var(--red); color:#e9908e}
 .sc.exc .sig{color:var(--red)}
 .sc.exc .nm{text-decoration:line-through; opacity:.8}
+.scope-find{width:100%; box-sizing:border-box; background:var(--bg); border:1px solid var(--rule);
+  color:var(--ink); border-radius:4px; padding:4px 8px; margin-bottom:7px;
+  font-family:var(--mono); font-size:11.5px}
+.scope-find:focus{outline:none; border-color:var(--cyan)}
+.scope-find::placeholder{color:var(--ink-faint); font-style:italic}
 .scope-wild{display:flex; gap:5px; margin-top:8px}
 .scope-wild input{flex:1; min-width:0; background:var(--bg); border:1px solid var(--rule);
   color:var(--ink); border-radius:4px; padding:4px 7px; font-family:var(--mono); font-size:11.5px}
@@ -2364,9 +2369,15 @@ function ifaceInScope(i){
   const s=scopeSets();
   const own=i.vrf || 'default';
   const vsys=i.vsys || null;
-  // every VRF this interface effectively belongs to: its own, plus whatever
-  // it is wired to on its segment or VLAN
-  const vrfs=new Set([own, ...(i.linkedVrfs||[])]);
+  /* An interface that sits in a *named* VRF is judged on that name alone.
+     Inheriting from the segment is only for interfaces with nothing useful of
+     their own — chiefly firewall sub-interfaces, which sit in a virtual router
+     called "default" no matter which VRF the segment belongs to. Without this
+     guard, two different VRFs sharing a subnet would pull each other into
+     scope. */
+  const vrfs = own!=='default'
+    ? new Set([own])
+    : new Set([own, ...(i.linkedVrfs||[])]);
 
   for(const v of vrfs) if(s.ve.has(v)) return false;   // any excluded VRF wins
   if(vsys && s.se.has(vsys)) return false;              // excluded VSYS wins
@@ -2459,8 +2470,10 @@ function renderVrfFilter(){
     '<div class="scope-cols">'+
 
       '<div class="scope-col">'+
-        '<h3 class="scope-h">VRF <span class="n">'+vrfs.length+'</span></h3>'+
-        '<div class="scope-list">'+list(vrfs,'vrf')+'</div>'+
+        '<h3 class="scope-h">VRF <span class="n" id="vrf-shown">'+vrfs.length+'</span></h3>'+
+        '<input class="scope-find" id="vrf-find" placeholder="type to narrow the list…" '+
+          'spellcheck="false" value="'+esc(STATE.vrfFind||'')+'">'+
+        '<div class="scope-list" id="vrf-list">'+list(vrfs,'vrf')+'</div>'+
         '<div class="scope-wild">'+
           '<input id="vrf-wild" placeholder="*_DR_INT" spellcheck="false">'+
           '<button class="btn" id="vrf-inc">Include</button>'+
@@ -2469,8 +2482,10 @@ function renderVrfFilter(){
       '</div>'+
 
       '<div class="scope-col">'+
-        '<h3 class="scope-h">VSYS <span class="n">'+vsyses.length+'</span></h3>'+
-        '<div class="scope-list">'+list(vsyses,'vsys')+'</div>'+
+        '<h3 class="scope-h">VSYS <span class="n" id="vsys-shown">'+vsyses.length+'</span></h3>'+
+        '<input class="scope-find" id="vsys-find" placeholder="type to narrow the list…" '+
+          'spellcheck="false" value="'+esc(STATE.vsysFind||'')+'">'+
+        '<div class="scope-list" id="vsys-list">'+list(vsyses,'vsys')+'</div>'+
         '<div class="scope-wild">'+
           '<input id="vsys-wild" placeholder="*_DR_INT" spellcheck="false">'+
           '<button class="btn" id="vsys-inc">Include</button>'+
@@ -2516,17 +2531,64 @@ function renderVrfFilter(){
     const set = kind==='vrf' ? (mode==='include'?s.vi:s.ve) : (mode==='include'?s.si:s.se);
     set.delete(name); refresh();
   });
-  const wild=(inputId, names, set)=>{
+  /* Narrow the visible chips as you type. Plain text matches anywhere in the
+     name; a * makes it a wildcard. Purely visual — it changes nothing about
+     what is applied. */
+  const narrow=(findId, listId, shownId, names, stateKey)=>{
+    const inp=document.getElementById(findId), box=document.getElementById(listId);
+    if(!inp || !box) return;
+    const apply=()=>{
+      const q=(inp.value||'').trim();
+      STATE[stateKey]=q;
+      const ql=q.toLowerCase();
+      let shown=0;
+      box.querySelectorAll('.sc').forEach(chipEl=>{
+        const nm=(chipEl.querySelector('.nm')||{}).textContent||'';
+        const hit = !q || (q.indexOf('*')>=0 ? globMatch(q,nm) : nm.toLowerCase().indexOf(ql)>=0);
+        chipEl.style.display = hit ? '' : 'none';
+        if(hit) shown++;
+      });
+      const sh=document.getElementById(shownId);
+      if(sh) sh.textContent = q ? shown+' of '+names.length : String(names.length);
+    };
+    inp.oninput=apply;
+    inp.onkeydown=(ev)=>{ if(ev.key==='Escape'){ inp.value=''; apply(); } };
+    apply();                                   // re-apply after a re-render
+  };
+  narrow('vrf-find','vrf-list','vrf-shown', vrfs, 'vrfFind');
+  narrow('vsys-find','vsys-list','vsys-shown', vsyses, 'vsysFind');
+
+  /* The wildcard box acts on whatever the narrow box has left visible, so
+     "narrow, eyeball it, then apply" works as one motion. */
+  const visibleNames=(listId, names)=>{
+    const box=document.getElementById(listId);
+    if(!box) return names;
+    const out=[];
+    box.querySelectorAll('.sc').forEach(chipEl=>{
+      if(chipEl.style.display==='none') return;
+      const nm=(chipEl.querySelector('.nm')||{}).textContent||'';
+      if(nm) out.push(nm);
+    });
+    return out.length?out:names;
+  };
+  const wild=(inputId, listId, names, set)=>{
     const p=(document.getElementById(inputId).value||'').trim();
-    if(!p) return;
-    for(const n of names) if(globMatch(p,n)) set.add(n);
+    const pool=visibleNames(listId, names);
+    if(!p){
+      // no pattern typed: apply to everything the narrow box is showing
+      const narrowed=(document.getElementById(inputId==='vrf-wild'?'vrf-find':'vsys-find')||{}).value||'';
+      if(!narrowed.trim()) return;
+      for(const n of pool) set.add(n);
+      refresh(); return;
+    }
+    for(const n of pool) if(globMatch(p,n)) set.add(n);
     refresh();
   };
   const bind=(id,fn)=>{ const e=document.getElementById(id); if(e) e.onclick=fn; };
-  bind('vrf-inc',  ()=>wild('vrf-wild',  vrfs,   s.vi));
-  bind('vrf-exc',  ()=>wild('vrf-wild',  vrfs,   s.ve));
-  bind('vsys-inc', ()=>wild('vsys-wild', vsyses, s.si));
-  bind('vsys-exc', ()=>wild('vsys-wild', vsyses, s.se));
+  bind('vrf-inc',  ()=>wild('vrf-wild',  'vrf-list',  vrfs,   s.vi));
+  bind('vrf-exc',  ()=>wild('vrf-wild',  'vrf-list',  vrfs,   s.ve));
+  bind('vsys-inc', ()=>wild('vsys-wild', 'vsys-list', vsyses, s.si));
+  bind('vsys-exc', ()=>wild('vsys-wild', 'vsys-list', vsyses, s.se));
   bind('vrf-view', ()=>setView('vrf'));
   bind('vrf-clear',()=>{ s.vi.clear(); s.ve.clear(); s.si.clear(); s.se.clear(); refresh(); });
 }
