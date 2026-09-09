@@ -49,7 +49,38 @@ input,textarea,select{font-family:var(--mono); font-size:13px}
 .top-head .spacer{flex:1}
 .scope-cols{display:grid; grid-template-columns:1fr 1fr 1fr; gap:16px; padding:10px 16px 14px}
 @media (max-width:1100px){ .scope-cols{grid-template-columns:1fr} }
-.scope-h{font-size:11.5px; font-weight:600; color:var(--ink-faint); margin:0 0 6px}
+.scope-h{font-size:11px; font-weight:600; color:var(--ink-faint); margin:0 0 7px;
+  display:flex; align-items:center; gap:7px; letter-spacing:.02em}
+.scope-h .n{font-family:var(--mono); font-weight:400; color:var(--ink-faint); opacity:.75}
+.scope-col{min-width:0; border-left:1px solid var(--rule); padding-left:14px}
+.scope-col:first-child{border-left:none; padding-left:0}
+.scope-list{max-height:120px; overflow:auto; display:flex; flex-wrap:wrap; gap:5px;
+  align-content:flex-start; padding-right:4px}
+.sc{
+  font-family:var(--mono); font-size:11.5px; line-height:1;
+  color:var(--ink-dim); background:var(--panel); border:1px solid var(--rule);
+  border-radius:4px; padding:4px 8px; cursor:pointer; user-select:none;
+  display:inline-flex; align-items:center; gap:5px; transition:border-color .12s, color .12s;
+}
+.sc:hover{border-color:var(--ink-faint); color:var(--ink)}
+.sc .sig{font-weight:700; font-size:11px; width:7px; text-align:center; opacity:.9}
+.sc.inc{border-color:var(--green); color:#9fe0bd}
+.sc.inc .sig{color:var(--green)}
+.sc.exc{border-color:var(--red); color:#e9908e}
+.sc.exc .sig{color:var(--red)}
+.sc.exc .nm{text-decoration:line-through; opacity:.8}
+.scope-wild{display:flex; gap:5px; margin-top:8px}
+.scope-wild input{flex:1; min-width:0; background:var(--bg); border:1px solid var(--rule);
+  color:var(--ink); border-radius:4px; padding:4px 7px; font-family:var(--mono); font-size:11.5px}
+.scope-wild input:focus{outline:none; border-color:var(--cyan)}
+.scope-wild button{padding:4px 8px; font-size:11px}
+.scope-empty{font-size:11.5px; color:var(--ink-faint); font-style:italic}
+.scope-hint{font-size:10.5px; color:var(--ink-faint); margin:7px 0 0; line-height:1.45}
+.scope-note{font-size:11.5px; color:var(--ink-faint); border-left:2px solid var(--cyan);
+  padding:3px 0 3px 9px; margin:0 0 8px}
+.scope-sum{display:flex; align-items:baseline; gap:6px; font-family:var(--mono);
+  font-size:11.5px; color:var(--ink-dim); margin-bottom:8px}
+.scope-sum b{color:var(--cyan); font-weight:600}
 .gutter{
   position:relative; cursor:col-resize; background:var(--bg);
   border-left:1px solid var(--rule); border-right:1px solid var(--rule);
@@ -2332,66 +2363,73 @@ function renderVrfFilter(){
   const chip=(n,kind)=>{
     const inc=(kind==='vrf'?s.vi:s.si).has(n);
     const exc=(kind==='vrf'?s.ve:s.se).has(n);
-    const style = inc ? 'border-color:var(--green);color:var(--ink)'
-                : exc ? 'border-color:var(--red);color:var(--red);text-decoration:line-through'
-                : '';
-    const mark = inc ? '+ ' : exc ? '− ' : '';
-    return '<span class="health-chip" data-'+kind+'="'+esc(n)+'" style="'+style+'" '+
-      'title="Click to include, click again to exclude, again to clear">'+mark+esc(n)+'</span>';
+    const cls = 'sc'+(inc?' inc':'')+(exc?' exc':'');
+    const sig = inc?'+':exc?'\u2212':'\u00b7';
+    return '<span class="'+cls+'" data-'+kind+'="'+esc(n)+'" '+
+      'title="Click: include \u2192 exclude \u2192 off">'+
+      '<span class="sig">'+sig+'</span><span class="nm">'+esc(n)+'</span></span>';
   };
   const list=(names,kind)=> names.length
-    ? names.map(n=>chip(n,kind)).join(' ')
-    : '<span class="health-ok">None found yet.</span>';
+    ? names.map(n=>chip(n,kind)).join('')
+    : '<span class="scope-empty">none found</span>';
 
-  const selected=[
+  const applied=[
     ...[...s.vi].map(n=>({n,kind:'vrf',mode:'include'})),
     ...[...s.ve].map(n=>({n,kind:'vrf',mode:'exclude'})),
     ...[...s.si].map(n=>({n,kind:'vsys',mode:'include'})),
     ...[...s.se].map(n=>({n,kind:'vsys',mode:'exclude'}))
   ];
+  const inScope=STATE.devices.filter(deviceInScope).length;
 
   box.innerHTML =
     '<div class="scope-cols">'+
-      '<div>'+
-        '<h3 class="scope-h">VRF</h3>'+
-        '<div class="health-chips">'+list(vrfs,'vrf')+'</div>'+
-        '<div class="rt-form" style="margin-top:6px">'+
-          '<input id="vrf-wild" placeholder="*_DR_INT or exact" spellcheck="false">'+
-          '<button class="btn tiny" id="vrf-inc">Include</button>'+
-          '<button class="btn tiny danger" id="vrf-exc">Exclude</button>'+
+
+      '<div class="scope-col">'+
+        '<h3 class="scope-h">VRF <span class="n">'+vrfs.length+'</span></h3>'+
+        '<div class="scope-list">'+list(vrfs,'vrf')+'</div>'+
+        '<div class="scope-wild">'+
+          '<input id="vrf-wild" placeholder="*_DR_INT" spellcheck="false">'+
+          '<button class="btn" id="vrf-inc">Include</button>'+
+          '<button class="btn danger" id="vrf-exc">Exclude</button>'+
         '</div>'+
       '</div>'+
-      '<div>'+
-        '<h3 class="scope-h">VSYS</h3>'+
-        '<div class="health-chips">'+list(vsyses,'vsys')+'</div>'+
-        '<div class="rt-form" style="margin-top:6px">'+
-          '<input id="vsys-wild" placeholder="*_DR_INT or exact" spellcheck="false">'+
-          '<button class="btn tiny" id="vsys-inc">Include</button>'+
-          '<button class="btn tiny danger" id="vsys-exc">Exclude</button>'+
+
+      '<div class="scope-col">'+
+        '<h3 class="scope-h">VSYS <span class="n">'+vsyses.length+'</span></h3>'+
+        '<div class="scope-list">'+list(vsyses,'vsys')+'</div>'+
+        '<div class="scope-wild">'+
+          '<input id="vsys-wild" placeholder="*_DR_INT" spellcheck="false">'+
+          '<button class="btn" id="vsys-inc">Include</button>'+
+          '<button class="btn danger" id="vsys-exc">Exclude</button>'+
         '</div>'+
       '</div>'+
-      '<div>'+
-        '<h3 class="scope-h">Applied ('+selected.length+')</h3>'+
-        (selected.length
-          ? '<div class="health-chips">'+selected.map(x=>
-              '<span class="health-chip" data-clear="'+esc(x.kind+'|'+x.mode+'|'+x.n)+'" '+
-              'style="'+(x.mode==='include'?'border-color:var(--green)':'border-color:var(--red);color:var(--red)')+'" '+
-              'title="Click to remove">'+(x.mode==='include'?'+ ':'− ')+esc(x.kind)+' '+esc(x.n)+' ×</span>').join(' ')+'</div>'
-          : '<span class="health-ok">Nothing applied — the whole project is shown.</span>')+
-        '<div class="btn-row" style="margin-top:8px">'+
-          '<button class="btn tiny btn-go" id="vrf-view">View filtered</button>'+
-          '<button class="btn tiny" id="vrf-clear">Clear all</button>'+
+
+      '<div class="scope-col">'+
+        '<h3 class="scope-h">Applied <span class="n">'+applied.length+'</span></h3>'+
+        (applied.length
+          ? '<div class="scope-sum"><b>'+inScope+'</b> of '+STATE.devices.length+' devices in scope</div>'+
+            '<div class="scope-list">'+applied.map(x=>
+              '<span class="sc '+(x.mode==='include'?'inc':'exc')+'" '+
+              'data-clear="'+esc(x.kind+'|'+x.mode+'|'+x.n)+'" title="Click to remove">'+
+              '<span class="sig">'+(x.mode==='include'?'+':'\u2212')+'</span>'+
+              '<span class="nm">'+esc(x.n)+'</span>\u00d7</span>').join('')+'</div>'
+          : '<div class="scope-empty">Nothing applied \u2014 the whole project is shown.</div>')+
+        '<div class="scope-wild">'+
+          '<button class="btn btn-go" id="vrf-view" style="flex:1">View filtered</button>'+
+          '<button class="btn" id="vrf-clear">Clear</button>'+
         '</div>'+
+        '<p class="scope-hint">Only interfaces in scope are drawn. A device with a mix keeps '+
+        'its in-scope interfaces and links, and loses the rest.</p>'+
       '</div>'+
+
     '</div>';
 
   const cntEl=document.getElementById('scope-count');
-  if(cntEl) cntEl.textContent = selected.length
-    ? selected.length+' applied · '+STATE.devices.filter(deviceInScope).length+' of '+STATE.devices.length+' devices'
+  if(cntEl) cntEl.textContent = applied.length
+    ? applied.length+' applied \u00b7 '+inScope+'/'+STATE.devices.length+' devices'
     : 'whole project';
 
   const refresh=()=>{ renderVrfFilter(); render(); autosave(); };
-  // click cycles include -> exclude -> off
   const cycle=(n, incSet, excSet)=>{
     if(incSet.has(n)){ incSet.delete(n); excSet.add(n); }
     else if(excSet.has(n)){ excSet.delete(n); }
@@ -4791,8 +4829,16 @@ function showDevice(d, opts){
       inner+'</details>';
   }
 
+  /* When a VRF/VSYS scope is active the detail panel shows only what is in
+     scope, so it matches what the diagram is drawing. */
+  const scopeOn = scopeActive();
+  const scopedIfaces = scopeOn ? d.interfaces.filter(ifaceInScope) : d.interfaces;
+  const hiddenIfaces = d.interfaces.length - scopedIfaces.length;
+
   const ROW_CAP=250;
-  const fibSorted = d.fib.slice().sort((a,b)=>a.net-b.net||a.len-b.len);
+  const fibAll = d.fib.slice().sort((a,b)=>a.net-b.net||a.len-b.len);
+  const fibSorted = scopeOn ? fibAll.filter(routeInScope) : fibAll;
+  const hiddenRoutes = fibAll.length - fibSorted.length;
   const fibShown = fibSorted.slice(0, ROW_CAP);
   const rowQ=(f)=>[cidr(f.net,f.len), f.nextHop!=null?int2ip(f.nextHop):(f.iface||''), f.type, f.vrf]
     .join(' ').toLowerCase();
@@ -4808,7 +4854,7 @@ function showDevice(d, opts){
 
   const ifQ=(i)=>[i.name, i.addrs.map(a=>int2ip(a.ip)+'/'+a.len).join(' '), i.zone||'', i.vrf||'', vlanOfIface(i)||'']
     .join(' ').toLowerCase();
-  const ifGroups = vrfGroups(d.interfaces, i=>i.vrf);
+  const ifGroups = vrfGroups(scopedIfaces, i=>i.vrf);
   const ifs = ifGroups.map(g=>vrfBlock(g.vrf, g.items.length,
     '<table class="fib if-vrf-table"><tr><th>Interface</th><th>Address</th><th>Zone</th></tr>'+
     g.items.map(i=>'<tr data-q="'+esc(ifQ(i))+'"><td>'+esc(i.name)+'</td>'+
@@ -4816,7 +4862,8 @@ function showDevice(d, opts){
       '<td>'+esc(i.zone||'—')+'</td></tr>').join('')+
     '</table>', ifGroups.length===1)).join('');
 
-  const mrIndexed = d.manualRoutes.map((mr,idx)=>({mr, idx}));
+  const mrIndexed = d.manualRoutes.map((mr,idx)=>({mr, idx}))
+    .filter(x=>!scopeOn || routeInScope(x.mr));
   const mrGroups = vrfGroups(mrIndexed, x=>x.mr.vrf);
   const mrows = d.manualRoutes.length ? mrGroups.map(g=>vrfBlock(g.vrf, g.items.length,
     '<table class="fib"><tr><th>Prefix</th><th>Via</th><th>Metric</th><th></th></tr>'+
@@ -4829,7 +4876,8 @@ function showDevice(d, opts){
   if(STATE.model && STATE.model.subnets){
     for(const k in STATE.model.subnets){
       const sn=STATE.model.subnets[k];
-      if(sn.members.length<2 && sn.members[0].dev===d)
+      if(sn.members.length<2 && sn.members[0].dev===d &&
+         (!scopeOn || ifaceInScope(sn.members[0].iface)))
         stubs.push({key:k, iface:sn.members[0].iface.name});
     }
     stubs.sort((a,b)=>a.key.localeCompare(b.key));
@@ -4846,7 +4894,7 @@ function showDevice(d, opts){
   for(const c of clouds)
     for(const m of (c.members||[]))
       if(m.devId===d.id) myAttach.push({cloud:c, iface:m.iface});
-  const l3ifaces = d.interfaces.filter(i=>i.addrs.length);
+  const l3ifaces = scopedIfaces.filter(i=>i.addrs.length);
   const wanHtml =
     '<div class="rt-form"><input id="dev-search" class="wide" '+
       'placeholder="Filter attached clouds..." spellcheck="false"></div>'+
@@ -4927,7 +4975,7 @@ function showDevice(d, opts){
     }
   }
 
-  const l2ports = d.interfaces.filter(i=>i.l2);
+  const l2ports = scopedIfaces.filter(i=>i.l2);
   const vlanIds = Object.keys(d.vlans||{}).map(Number).sort((a,b)=>a-b);
   const rep = (STATE.model && STATE.model.vlanReport) || {};
   const vrows = vlanIds.map(v=>{
@@ -4971,6 +5019,8 @@ function showDevice(d, opts){
     '<div class="rt-form"><input id="dev-search" class="wide" '+
       'placeholder="Filter interfaces — name, address, vlan, zone..." spellcheck="false"></div>'+
     '<h2 class="sec">Interfaces <span id="dev-search-count" style="color:var(--ink-faint);font-weight:400"></span></h2>'+
+    (hiddenIfaces ? '<p class="scope-note">'+hiddenIfaces+' interface'+(hiddenIfaces===1?'':'s')+
+      ' hidden by the VRF / VSYS scope.</p>' : '')+
     '<div id="if-table">'+ifs+'</div>'+
     stubHtml;
 
@@ -4979,6 +5029,8 @@ function showDevice(d, opts){
       'placeholder="Filter routes — prefix, next hop, type, vrf..." spellcheck="false"></div>'+
     '<h2 class="sec">Routing table <span id="dev-search-count" style="color:var(--ink-faint);font-weight:400"></span></h2>'+
     '<p class="note" style="margin-top:0">What this device actually routes on — the table the trace engine uses.</p>'+
+    (hiddenRoutes ? '<p class="scope-note">'+hiddenRoutes+' route'+(hiddenRoutes===1?'':'s')+
+      ' hidden by the VRF / VSYS scope.</p>' : '')+
     '<div id="rt-table">'+rows+'</div>'+
     rowsMore+
     '<h2 class="sec" style="margin-top:24px">Routing table you added</h2>'+
