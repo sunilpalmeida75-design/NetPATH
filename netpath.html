@@ -2260,6 +2260,7 @@ function findMatches(q){
     const why=[];
     let owner=false;
     for(const i of d.interfaces){
+      if(!ifaceInScope(i)) continue;
       for(const a of i.addrs){
         if(ipQ!=null && a.ip===ipQ){ why.push('owns '+raw+' on '+i.name); owner=true; }
         else if(ipQ!=null && a.len<32 && inNet(ipQ,netOf(a.ip,a.len),a.len))
@@ -2279,14 +2280,15 @@ function findMatches(q){
     if(vlanQ && d.vlans && d.vlans[vlanQ[1]]) why.push('vlan '+vlanQ[1]+' defined');
     if(cidrQ || ipQ!=null){
       for(const r of d.fib){
+        if(!routeInScope(r,d)) continue;
         if(cidrQ && r.net===cidrQ.net && r.len===cidrQ.len){ why.push('route '+raw+' ('+r.type+')'); break; }
         if(ipQ!=null && r.len>0 && inNet(ipQ,r.net,r.len)){ why.push('route '+cidr(r.net,r.len)+' ('+r.type+')'); break; }
       }
     }
     if(vrfQ){
-      for(const r of d.fib) if(r.vrf && r.vrf.toLowerCase()===vrfQ[1].toLowerCase()){ why.push('routes in vrf '+r.vrf); break; }
+      for(const r of d.fib) if(routeInScope(r,d) && r.vrf && r.vrf.toLowerCase()===vrfQ[1].toLowerCase()){ why.push('routes in vrf '+r.vrf); break; }
     }
-    if(why.length) out.push({dev:d, why:[...new Set(why)].slice(0,6), owner});
+    if(why.length && deviceInScope(d)) out.push({dev:d, why:[...new Set(why)].slice(0,6), owner});
   }
   // whoever actually owns the address comes first
   out.sort((a,b)=>(b.owner?1:0)-(a.owner?1:0));
@@ -2892,13 +2894,15 @@ function render(){
     const shared=[];
     for(const k in model.subnets){
       const sn=model.subnets[k];
-      const ma=sn.members.filter(x=>x.dev===a), mb=sn.members.filter(x=>x.dev===b);
+      const ma=sn.members.filter(x=>x.dev===a && ifaceInScope(x.iface)),
+            mb=sn.members.filter(x=>x.dev===b && ifaceInScope(x.iface));
       if(ma.length && mb.length) shared.push({key:k, a:ma, b:mb});
     }
     const l2=[];
     for(const k in (model.l2links||{})){
       const L=model.l2links[k];
-      if((L.a.dev===a&&L.b.dev===b)||(L.a.dev===b&&L.b.dev===a)) l2.push(L);
+      if(((L.a.dev===a&&L.b.dev===b)||(L.a.dev===b&&L.b.dev===a)) &&
+       ifaceInScope(effL2(L.a.dev,L.a.port)) && ifaceInScope(effL2(L.b.dev,L.b.port))) l2.push(L);
     }
     const clouds=(model.clouds||[]).filter(c=>
       c.members.some(x=>x.dev===a) && c.members.some(x=>x.dev===b));
@@ -2908,7 +2912,9 @@ function render(){
     for(const c of clouds) mid.push({type:'cloud', key:'cloud:'+c.name, c});
     for(const k in (model.l2links||{})){
       const L=model.l2links[k];
-      if((L.a.dev===a&&L.b.dev===b)||(L.a.dev===b&&L.b.dev===a)) mid.push({type:'l2', key:'l2:'+k, L});
+      if(((L.a.dev===a&&L.b.dev===b)||(L.a.dev===b&&L.b.dev===a)) &&
+         ifaceInScope(effL2(L.a.dev,L.a.port)) && ifaceInScope(effL2(L.b.dev,L.b.port)))
+        mid.push({type:'l2', key:'l2:'+k, L});
     }
 
     // clicking one connection isolates it; "Show all links" brings them back
@@ -2998,6 +3004,13 @@ function render(){
         label:shortIf(first.port)+(vl(pa)?'\n'+vl(pa):'')+'\n↔\n'+shortIf(second.port)+(vl(pb)?'\n'+vl(pb):'')}});
     }
 
+    if(!shownMid.length && scopeActive()){
+      el.style.display='flex';
+      el.innerHTML='<strong>Nothing in scope joins these two</strong><span>'+esc(a.name)+' and '+esc(b.name)+
+        ' are connected, but every link between them is outside the current VRF / VSYS scope.</span>';
+      if(STATE.cy){ STATE.cy.destroy(); STATE.cy=null; }
+      return;
+    }
     if(!shownMid.length){
       el.style.display='flex';
       el.innerHTML='<strong>Nothing joins these two</strong><span>'+esc(a.name)+' and '+esc(b.name)+
@@ -4501,9 +4514,13 @@ function ifaceCell(i){
 }
 function routesAcross(from, to){
   const ips=new Set();
-  for(const i of to.interfaces) for(const a of i.addrs) ips.add(a.ip);
+  for(const i of to.interfaces){
+    if(!ifaceInScope(i)) continue;
+    for(const a of i.addrs) ips.add(a.ip);
+  }
   const out={connected:0, static:0, table:0, igp:0, list:[]};
   for(const r of from.fib){
+    if(!routeInScope(r, from)) continue;
     if(r.nextHop==null || !ips.has(r.nextHop)) continue;
     out[r.type]=(out[r.type]||0)+1;
     if(r.type!=='igp' && out.list.length<12) out.list.push(r);
@@ -4522,13 +4539,15 @@ function showLink(a,b){
   const shared=[];
   for(const k in m.subnets){
     const sn=m.subnets[k];
-    const ma=sn.members.filter(x=>x.dev===a), mb=sn.members.filter(x=>x.dev===b);
+    const ma=sn.members.filter(x=>x.dev===a && ifaceInScope(x.iface)),
+          mb=sn.members.filter(x=>x.dev===b && ifaceInScope(x.iface));
     if(ma.length && mb.length) shared.push({key:k, a:ma, b:mb});
   }
   const l2=[];
   for(const k in (m.l2links||{})){
     const L=m.l2links[k];
-    if((L.a.dev===a&&L.b.dev===b)||(L.a.dev===b&&L.b.dev===a)) l2.push(L);
+    if(((L.a.dev===a&&L.b.dev===b)||(L.a.dev===b&&L.b.dev===a)) &&
+       ifaceInScope(effL2(L.a.dev,L.a.port)) && ifaceInScope(effL2(L.b.dev,L.b.port))) l2.push(L);
   }
   const clouds=(m.clouds||[]).filter(c=>
     c.members.some(x=>x.dev===a) && c.members.some(x=>x.dev===b));
@@ -4622,17 +4641,20 @@ function showSegment(key){
     renderWarnings(); return;
   }
   STATE.selected=null; renderDevList();
+  const segMembers=sn.members.filter(x=>ifaceInScope(x.iface));
+  const segHidden=sn.members.length-segMembers.length;
   r.innerHTML='<h2 class="sec">'+esc(key)+'</h2>'+
-    '<p class="note" style="margin-top:0">'+sn.members.length+' device'+(sn.members.length===1?'':'s')+
-    ' on this segment'+(sn.members.length<2?' — endpoint subnet':'')+'</p>'+
+    '<p class="note" style="margin-top:0">'+segMembers.length+' device'+(segMembers.length===1?'':'s')+
+    ' on this segment'+(segMembers.length<2?' — endpoint subnet':'')+'</p>'+
+    (segHidden ? '<p class="scope-note">'+segHidden+' more hidden by the VRF / VSYS scope.</p>' : '')+
     '<table class="fib"><tr><th>Device</th><th>Interface</th><th>Address</th></tr>'+
-    sn.members.map((x,i)=>'<tr><td><a href="#" data-seg="'+i+'" style="color:var(--cyan);text-decoration:none">'+
+    segMembers.map((x,i)=>'<tr><td><a href="#" data-seg="'+i+'" style="color:var(--cyan);text-decoration:none">'+
       esc(x.dev.name)+'</a></td><td>'+ifaceCell(x.iface)+'</td><td>'+int2ip(x.addr.ip)+'/'+x.addr.len+'</td></tr>').join('')+
     '</table><div id="warnbox"></div>';
   renderWarnings();
   r.querySelectorAll('[data-seg]').forEach(el=>el.onclick=(ev)=>{
     ev.preventDefault();
-    showDevice(sn.members[parseInt(el.dataset.seg,10)].dev);
+    showDevice(segMembers[parseInt(el.dataset.seg,10)].dev);
   });
 }
 
@@ -4702,11 +4724,13 @@ function showSelection(devs){
     const a=devs[i], b=devs[j], nets=[], l2=[], cl=[];
     for(const k in m.subnets){
       const sn=m.subnets[k];
-      if(sn.members.some(x=>x.dev===a) && sn.members.some(x=>x.dev===b)) nets.push({k, sn});
+      if(sn.members.some(x=>x.dev===a && ifaceInScope(x.iface)) &&
+         sn.members.some(x=>x.dev===b && ifaceInScope(x.iface))) nets.push({k, sn});
     }
     for(const k in (m.l2links||{})){
       const L=m.l2links[k];
-      if((L.a.dev===a&&L.b.dev===b)||(L.a.dev===b&&L.b.dev===a)) l2.push(L);
+      if(((L.a.dev===a&&L.b.dev===b)||(L.a.dev===b&&L.b.dev===a)) &&
+       ifaceInScope(effL2(L.a.dev,L.a.port)) && ifaceInScope(effL2(L.b.dev,L.b.port))) l2.push(L);
     }
     for(const c of (m.clouds||[]))
       if(c.members.some(x=>x.dev===a)&&c.members.some(x=>x.dev===b)) cl.push(c);
@@ -4717,8 +4741,9 @@ function showSelection(devs){
   const external=[];
   for(const k in m.subnets){
     const sn=m.subnets[k];
-    const inside=sn.members.filter(x=>inSet.has(x.dev.id));
-    const outside=sn.members.filter(x=>!inSet.has(x.dev.id));
+    const scopedMem=sn.members.filter(x=>ifaceInScope(x.iface));
+    const inside=scopedMem.filter(x=>inSet.has(x.dev.id));
+    const outside=scopedMem.filter(x=>!inSet.has(x.dev.id));
     if(inside.length && outside.length) external.push({k, outside});
   }
   const vlanCount={};
