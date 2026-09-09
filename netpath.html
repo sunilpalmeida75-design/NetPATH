@@ -2366,6 +2366,43 @@ function deviceInScope(d){
   if(STATE.scopeIgnoreFw && isFirewall(d)) return true;
   return d.interfaces.some(ifaceInScope);
 }
+/* An L2 port carries no VRF of its own, so judging it directly would let every
+   switch-to-firewall trunk through a VRF exclusion. Judge it by the VLANs it
+   carries instead: the link is in scope if any VLAN on it is served by an
+   in-scope gateway. */
+function portVlans(dev, portName){
+  const p=effL2(dev, portName);
+  const out=new Set();
+  if(!p) return out;
+  const own=vlanOfIface(p);
+  if(own) out.add(parseInt(own,10));
+  if(p.mode==='access' && p.accessVlan) out.add(p.accessVlan);
+  if(Array.isArray(p.allowed)) for(const v of p.allowed) out.add(v);
+  if(p.native) out.add(p.native);
+  return out;
+}
+function l2InScope(model, L){
+  if(!scopeActive()) return true;
+  const pa=effL2(L.a.dev, L.a.port), pb=effL2(L.b.dev, L.b.port);
+  // if either end is a routed interface, its own VRF/VSYS decides
+  const routed = (p)=>p && p.addrs && p.addrs.length;
+  if(routed(pa) || routed(pb))
+    return (!routed(pa) || ifaceInScope(pa)) && (!routed(pb) || ifaceInScope(pb));
+
+  const vlans=new Set([...portVlans(L.a.dev,L.a.port), ...portVlans(L.b.dev,L.b.port)]);
+  if(vlans.size && model && model.vlanReport){
+    let sawGateway=false;
+    for(const v of vlans){
+      const rep=model.vlanReport[v];
+      if(!rep || !rep.svi) continue;
+      sawGateway=true;
+      if(ifaceInScope(rep.svi.iface)) return true;      // one in-scope VLAN is enough
+    }
+    if(sawGateway) return false;                         // every VLAN's gateway was out of scope
+  }
+  // nothing to judge by — fall back to the devices themselves
+  return deviceInScope(L.a.dev) && deviceInScope(L.b.dev);
+}
 
 function renderVrfFilter(){
   const box=document.getElementById('vrfvsys-body');
@@ -2901,8 +2938,7 @@ function render(){
     const l2=[];
     for(const k in (model.l2links||{})){
       const L=model.l2links[k];
-      if(((L.a.dev===a&&L.b.dev===b)||(L.a.dev===b&&L.b.dev===a)) &&
-       ifaceInScope(effL2(L.a.dev,L.a.port)) && ifaceInScope(effL2(L.b.dev,L.b.port))) l2.push(L);
+      if(((L.a.dev===a&&L.b.dev===b)||(L.a.dev===b&&L.b.dev===a)) && l2InScope(m, L)) l2.push(L);
     }
     const clouds=(model.clouds||[]).filter(c=>
       c.members.some(x=>x.dev===a) && c.members.some(x=>x.dev===b));
@@ -2912,8 +2948,7 @@ function render(){
     for(const c of clouds) mid.push({type:'cloud', key:'cloud:'+c.name, c});
     for(const k in (model.l2links||{})){
       const L=model.l2links[k];
-      if(((L.a.dev===a&&L.b.dev===b)||(L.a.dev===b&&L.b.dev===a)) &&
-         ifaceInScope(effL2(L.a.dev,L.a.port)) && ifaceInScope(effL2(L.b.dev,L.b.port)))
+      if(((L.a.dev===a&&L.b.dev===b)||(L.a.dev===b&&L.b.dev===a)) && l2InScope(model, L))
         mid.push({type:'l2', key:'l2:'+k, L});
     }
 
@@ -3249,7 +3284,7 @@ function render(){
     for(const k in model.l2links){
       const L=model.l2links[k];
       if(!vis(L.a.dev) || !vis(L.b.dev)) continue;
-      if(!ifaceInScope(effL2(L.a.dev,L.a.port)) || !ifaceInScope(effL2(L.b.dev,L.b.port))) continue;
+      if(!l2InScope(model, L)) continue;
       if(view==='simple' || view==='sel'){
         // L3 and L2 are different kinds of connectivity — collapse repeats of
         // each kind to one line, but never let one hide the other.
@@ -3282,6 +3317,7 @@ function render(){
         const r=model.vlanReport[v];
         if(!r || !r.svi || r.svi.dev===d) continue;
         if(!vis(r.svi.dev)) continue;   // never point at a device outside the current set
+        if(!ifaceInScope(r.svi.iface)) continue;   // nor at a gateway outside the scope
         const a=r.svi.iface.addrs.find(x=>x.len<32);
         if(!a) continue;
         const sid='s_'+cidr(netOf(a.ip,a.len), a.len).replace(/[^\w]/g,'_');
@@ -4546,8 +4582,7 @@ function showLink(a,b){
   const l2=[];
   for(const k in (m.l2links||{})){
     const L=m.l2links[k];
-    if(((L.a.dev===a&&L.b.dev===b)||(L.a.dev===b&&L.b.dev===a)) &&
-       ifaceInScope(effL2(L.a.dev,L.a.port)) && ifaceInScope(effL2(L.b.dev,L.b.port))) l2.push(L);
+    if(((L.a.dev===a&&L.b.dev===b)||(L.a.dev===b&&L.b.dev===a)) && l2InScope(m, L)) l2.push(L);
   }
   const clouds=(m.clouds||[]).filter(c=>
     c.members.some(x=>x.dev===a) && c.members.some(x=>x.dev===b));
@@ -4729,8 +4764,7 @@ function showSelection(devs){
     }
     for(const k in (m.l2links||{})){
       const L=m.l2links[k];
-      if(((L.a.dev===a&&L.b.dev===b)||(L.a.dev===b&&L.b.dev===a)) &&
-       ifaceInScope(effL2(L.a.dev,L.a.port)) && ifaceInScope(effL2(L.b.dev,L.b.port))) l2.push(L);
+      if(((L.a.dev===a&&L.b.dev===b)||(L.a.dev===b&&L.b.dev===a)) && l2InScope(m, L)) l2.push(L);
     }
     for(const c of (m.clouds||[]))
       if(c.members.some(x=>x.dev===a)&&c.members.some(x=>x.dev===b)) cl.push(c);
@@ -5012,8 +5046,14 @@ function showDevice(d, opts){
   }
 
   const l2ports = scopedIfaces.filter(i=>i.l2);
-  const vlanIds = Object.keys(d.vlans||{}).map(Number).sort((a,b)=>a-b);
   const rep = (STATE.model && STATE.model.vlanReport) || {};
+  const vlanIds = Object.keys(d.vlans||{}).map(Number).sort((a,b)=>a-b)
+    .filter(v=>{
+      if(!scopeOn) return true;
+      const r=rep[v];
+      if(!r || !r.svi) return true;          // no gateway known — cannot judge, keep it
+      return ifaceInScope(r.svi.iface);
+    });
   const vrows = vlanIds.map(v=>{
     const r=rep[v]||{};
     const bad = (r.blocked||[]).some(b=>b.dev===d) || (r.isolated||[]).some(x=>x===d);
@@ -5028,7 +5068,19 @@ function showDevice(d, opts){
     '<td>'+(i.mode==='access' ? (i.accessVlan||'—')
           : (i.allowed===null||i.allowed===undefined ? 'all' : (i.allowed.length?i.allowed.join(','):'none')))+'</td></tr>';
   }).join('');
-  const nrows = (d.neighbors||[]).map((n,idx)=>
+  const nbInScope=(n)=>{
+    if(!scopeOn) return true;
+    const m=STATE.model;
+    if(!m || !m.l2links) return true;
+    for(const k in m.l2links){
+      const L=m.l2links[k];
+      const mine = (L.a.dev===d && normPort(L.a.port)===normPort(n.localPort)) ||
+                   (L.b.dev===d && normPort(L.b.port)===normPort(n.localPort));
+      if(mine) return l2InScope(m, L);
+    }
+    return true;   // neighbour not resolved to a modelled link — leave it visible
+  };
+  const nrows = (d.neighbors||[]).map((n,idx)=>({n,idx})).filter(x=>nbInScope(x.n)).map(({n,idx})=>
     '<tr data-q="'+esc((n.localPort+' '+n.peerName+' '+n.peerPort).toLowerCase())+'"><td>'+esc(n.localPort)+'</td><td>'+esc(n.peerName)+'</td><td>'+esc(n.peerPort)+'</td>'+
     '<td style="text-align:right"><button class="dev-x" data-nbdel="'+idx+'" title="Remove">×</button></td></tr>').join('');
 
