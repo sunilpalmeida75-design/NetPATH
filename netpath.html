@@ -366,7 +366,13 @@ table.fib td:first-child{color:var(--ink)}
         <label>Device text <input type="color" id="th-devText"></label>
         <label>Zone box <input type="color" id="th-zoneBg"></label>
         <label>Zone text <input type="color" id="th-zoneText"></label>
+        <label>Zone border <input type="color" id="th-zoneBorder"></label>
+        <label>Router <input type="color" id="th-roleRouter"></label>
+        <label>Switch <input type="color" id="th-roleSwitch"></label>
+        <label>Firewall <input type="color" id="th-roleFirewall"></label>
       </div>
+      <label class="auth" style="margin-top:6px">Border thickness
+        <input type="range" id="th-borderW" min="1" max="6" step="1" style="flex:1;accent-color:var(--cyan)"></label>
       <div class="btn-row" style="margin-top:0;margin-bottom:8px">
         <button class="btn tiny" id="th-dark">Dark</button>
         <button class="btn tiny" id="th-visio">Visio white</button>
@@ -427,6 +433,7 @@ table.fib td:first-child{color:var(--ink)}
           <option value="l2">L2 only</option>
         </select>
       </label>
+      <label class="toggle"><input type="checkbox" id="opt-nopolicy"> Ignore policy</label>
       <label class="toggle"><input type="checkbox" id="opt-nolinks"> Hide links</label>
       <label class="toggle"><input type="checkbox" id="opt-select"> Select devices</label>
       <button class="btn" id="analyse" style="display:none">Analyse selected</button>
@@ -1845,7 +1852,7 @@ function evalPolicy(dev, inZone, outZone, src, dst){
 /* ============================================================
    Trace
    ============================================================ */
-function trace(model, srcStr, dstStr, startId){
+function trace(model, srcStr, dstStr, startId, opts){
   const src=ip2int(srcStr), dst=ip2int(dstStr);
   if(src===null) return {error:'Source is not a valid IPv4 address.'};
   if(dst===null) return {error:'Destination is not a valid IPv4 address.'};
@@ -1896,10 +1903,12 @@ function trace(model, srcStr, dstStr, startId){
       outIf = cur.interfaces.find(i=>i.addrs.some(a=>netOf(a.ip,a.len)===route.net && a.len===route.len)) || null;
     }
 
-    const pol = cur.vendor==='palo-alto'
+    const bypass = (opts && opts.noPolicy) || cur.noPolicy;
+    const pol = (cur.vendor==='palo-alto' && !bypass)
       ? evalPolicy(cur, inIf?inIf.zone:null, outIf?outIf.zone:null, src, dst) : null;
 
     const hop={dev:cur, inIf, outIf, route, pol, nextHop:route.nextHop};
+    if(bypass && cur.vendor==='palo-alto') hop.policyBypassed=true;
     hops.push(hop);
 
     if(pol && pol.action && /deny|drop|reset/i.test(pol.action)){
@@ -2022,6 +2031,37 @@ function labelSize(label, font, padX, padY, minW){
     h: Math.round(lines.length*font*1.35)+padY
   };
 }
+/* A stable identity for an edge so a bend the user set survives re-renders. */
+function edgeKey(d){
+  if(d.net)    return 'net:'+d.net+'|'+d.source+'|'+d.target;
+  if(d.l2key)  return 'l2:'+d.l2key;
+  if(d.cloud)  return 'cloud:'+d.cloud+'|'+d.source;
+  return (d.kind||'e')+':'+d.source+'|'+d.target+'|'+(d.label||'');
+}
+/* Apply saved bends and fan out any remaining overlaps, so parallel links and
+   their labels do not sit on top of each other. */
+function applyBends(els){
+  STATE.bends = STATE.bends || {};
+  const groups={};
+  for(const el of els){
+    if(!el.data.source) continue;
+    el.data.ekey = edgeKey(el.data);
+    const pair=[el.data.source, el.data.target].sort().join('|');
+    (groups[pair]=groups[pair]||[]).push(el);
+  }
+  for(const pair in groups){
+    const list=groups[pair];
+    list.forEach((el, idx)=>{
+      const saved=STATE.bends[el.data.ekey];
+      if(saved!=null){ el.data.bend=saved; return; }
+      // default fan: 0, +55, -55, +110, -110 ...
+      const step=Math.ceil((idx)/2)*55;
+      el.data.bend = list.length===1 ? 0 : (idx%2 ? step : -step);
+    });
+  }
+  return els;
+}
+
 function sizeNodes(els){
   for(const el of els){
     if(el.data.source) continue;                 // edges
@@ -2078,9 +2118,10 @@ function findMatches(q){
 
   for(const d of STATE.devices){
     const why=[];
+    let owner=false;
     for(const i of d.interfaces){
       for(const a of i.addrs){
-        if(ipQ!=null && a.ip===ipQ) why.push(i.name+' has '+raw);
+        if(ipQ!=null && a.ip===ipQ){ why.push('owns '+raw+' on '+i.name); owner=true; }
         else if(ipQ!=null && a.len<32 && inNet(ipQ,netOf(a.ip,a.len),a.len))
           why.push(i.name+' covers '+raw+' ('+cidr(netOf(a.ip,a.len),a.len)+')');
         if(cidrQ && netOf(a.ip,a.len)===cidrQ.net && a.len===cidrQ.len)
@@ -2105,8 +2146,10 @@ function findMatches(q){
     if(vrfQ){
       for(const r of d.fib) if(r.vrf && r.vrf.toLowerCase()===vrfQ[1].toLowerCase()){ why.push('routes in vrf '+r.vrf); break; }
     }
-    if(why.length) out.push({dev:d, why:[...new Set(why)].slice(0,6)});
+    if(why.length) out.push({dev:d, why:[...new Set(why)].slice(0,6), owner});
   }
+  // whoever actually owns the address comes first
+  out.sort((a,b)=>(b.owner?1:0)-(a.owner?1:0));
   return out;
 }
 
@@ -2136,14 +2179,20 @@ function l2IsTrunk(L){
 const THEME_DEFAULT={
   canvasBg:'#0e1621', canvasGrid:false,
   devBg:'#1c2c3e', devText:'#d3dfec',
-  zoneBg:'#16202e', zoneText:'#7f93aa', zoneGrid:false,
+  roleRouter:'#3a5273', roleSwitch:'#3f7a63', roleFirewall:'#8a6a2e',
+  zoneBg:'#16202e', zoneText:'#7f93aa', zoneBorder:'#33485f', zoneGrid:false,
+  boxBorderW:2,
   netText:'#4fc3d9', linkText:'#61799a'
 };
+/* Visio look: everything white, boxes outlined in green, grid on the canvas
+   only — never inside a box. */
 const THEME_VISIO={
   canvasBg:'#ffffff', canvasGrid:true,
-  devBg:'#eef3fa', devText:'#1f2b3a',
-  zoneBg:'#f4f6f9', zoneText:'#5a6b80', zoneGrid:false,
-  netText:'#1f6fb2', linkText:'#4a5b6e'
+  devBg:'#ffffff', devText:'#14304a',
+  roleRouter:'#1f7a4d', roleSwitch:'#1f7a4d', roleFirewall:'#1f7a4d',
+  zoneBg:'#ffffff', zoneText:'#4a6b80', zoneBorder:'#1f7a4d', zoneGrid:false,
+  boxBorderW:3,
+  netText:'#12628f', linkText:'#3d5568'
 };
 STATE.theme = Object.assign({}, THEME_DEFAULT);
 function TH(k){ return (STATE.theme && STATE.theme[k]) || THEME_DEFAULT[k]; }
@@ -2160,13 +2209,25 @@ function shade(hex, amt){
   r=Math.max(0,Math.min(255,mix(r))); g=Math.max(0,Math.min(255,mix(g))); b=Math.max(0,Math.min(255,mix(b)));
   return '#'+[r,g,b].map(x=>x.toString(16).padStart(2,'0')).join('');
 }
-function deviceColor(d){
+function roleOf(d){
+  if(!d) return 'router';
+  if(d.vendor==='palo-alto') return 'firewall';
+  const routes = d.fib && d.fib.some(f=>f.type!=='connected');
+  if(d.isSwitch && !routes && !d.interfaces.some(i=>i.addrs.length && !/^vlan/i.test(i.name))) return 'switch';
+  return 'router';
+}
+function roleColor(role){
+  return role==='firewall' ? TH('roleFirewall')
+       : role==='switch'   ? TH('roleSwitch')
+       :                     TH('roleRouter');
+}
+function deviceColor(d, role){
   const bg=(d&&d.bg)||TH('devBg'), fg=(d&&d.fg)||TH('devText');
-  return {bg, fg, bd:shade(bg,0.28)};
+  return {bg, fg, bd:(d&&d.bd)||roleColor(role||roleOf(d))};
 }
 function zoneColor(g){
   const bg=(g&&g.bg)||TH('zoneBg'), fg=(g&&g.fg)||TH('zoneText');
-  return {bg, fg, bd:shade(bg,0.28)};
+  return {bg, fg, bd:(g&&g.bd)||TH('zoneBorder')};
 }
 
 /* 0 = black, 1 = white */
@@ -2196,13 +2257,12 @@ function graphStyle(){
   return [
       {selector:'node[kind="device"]', style:{
         'shape':'round-rectangle','width':'data(w)','height':'data(h)',
-        'background-color':'data(bg)','border-width':2,'border-color':'data(bd)',
+        'background-color':'data(bg)','border-width':TH('boxBorderW'),'border-color':'data(bd)',
         'label':'data(label)','color':'data(fg)','font-family':'IBM Plex Mono, monospace',
         'font-size':13,'font-weight':600,'text-valign':'center','text-halign':'center',
         'text-wrap':'wrap'
       }},
-      {selector:'node[vendor="palo-alto"]', style:{'border-color':'#8a6a2e','background-color':'#2a2416'}},
-      {selector:'node[role="switch"]', style:{'border-color':'#3f7a63','background-color':'#16241e','shape':'round-rectangle'}},
+
       {selector:'edge[kind="vlanmap"]', style:{
         'line-color':'#4a6b5e','line-style':'dotted','width':1.2,
         'color':'#4a6b5e','font-size':8.5,'z-index':1,'opacity':0.85}},
@@ -2219,7 +2279,9 @@ function graphStyle(){
         'text-background-color':TH('canvasBg'),'text-background-opacity':0.92,'text-background-padding':3
       }},
       {selector:'edge', style:{
-        'width':1.4,'line-color':'#33485f','curve-style':'bezier',
+        'width':1.4,'line-color':'#33485f',
+        'curve-style':'unbundled-bezier',
+        'control-point-distances':'data(bend)','control-point-weights':0.5,
         'label':'data(label)','color':'#61799a','font-size':9
       }},
       {selector:'edge', style:{'color':TH('linkText'),'font-family':'IBM Plex Mono, monospace',
@@ -2247,7 +2309,7 @@ function graphStyle(){
         'border-width':3,'border-color':'rgba(232,161,58,.28)','z-index':40,'events':'no','label':''}},
       {selector:'node[kind="group"]', style:{
         'shape':'round-rectangle','background-color':'data(bg)','background-opacity':TH('zoneGrid')?0.55:1,
-        'border-width':1,'border-color':'data(bd)','border-style':'dashed','padding':'26px',
+        'border-width':TH('boxBorderW'),'border-color':'data(bd)','border-style':'dashed','padding':'26px',
         'label':'data(label)','color':'data(fg)','font-family':'Inter, system-ui, sans-serif',
         'font-size':12,'font-weight':600,'text-valign':'top','text-halign':'center',
         'text-margin-y':-6,'z-index':0}},
@@ -2256,7 +2318,7 @@ function graphStyle(){
         'line-color':'#8a6a2e','line-style':'dotted','width':2,'curve-style':'bezier',
         'color':'#c49a4e','font-size':9,'text-wrap':'wrap','z-index':2}},
       {selector:'node[kind="group"].hot', style:{
-        'border-width':1,'background-opacity':TH('zoneGrid')?0.55:1}},
+        'border-width':TH('boxBorderW'),'background-opacity':TH('zoneGrid')?0.55:1}},
       {selector:'node[gkind="site"].hot', style:{'background-opacity':TH('zoneGrid')?0.35:1}},
       {selector:'node[kind="group"].drop', style:{'border-color':'#33485f','color':'#7f93aa'}},
       {selector:'node[picked = 1]', style:{'border-color':'#4fc3d9','color':'#8fdcec'}},
@@ -2315,9 +2377,10 @@ function render(){
         let g=groupById(d.groupId);
         while(g){ pathGroups.add(g.id); g = g.parent ? groupById(g.parent) : null; }
       }
-      const dc=deviceColor(d);
+      const rr=roleOf(d);
+      const dc=deviceColor(d, rr);
       els.push({data:{id:d.id, label:d.name, kind:'device', vendor:d.vendor,
-                      role:d.isSwitch?'switch':'router', bg:dc.bg, fg:dc.fg, bd:dc.bd,
+                      role:rr, bg:dc.bg, fg:dc.fg, bd:dc.bd,
                       parent: d.groupId ? 'g_'+d.groupId : undefined}});
     };
     const netOfIface=(ifc)=>{
@@ -2431,7 +2494,7 @@ function render(){
         }
       }
     }
-    sizeNodes(els);
+    applyBends(els); sizeNodes(els);
     const vpP = (STATE.cy && !STATE.viewIsPath)
       ? {zoom:STATE.cy.zoom(), pan:Object.assign({}, STATE.cy.pan())} : null;
     const cyp = cytoscape({
@@ -2515,12 +2578,13 @@ function render(){
     const step=120, top=-((Math.max(cols.length,1)-1)*step)/2;
     const midPos=(idx)=>({x:mx+ux*(top+idx*step), y:my+uy*(top+idx*step)});
 
-    const dcA=deviceColor(a), dcB=deviceColor(b);
+    const rA=roleOf(a), rB=roleOf(b);
+    const dcA=deviceColor(a, rA), dcB=deviceColor(b, rB);
     els.push({data:{id:a.id, label:a.name, kind:'device', vendor:a.vendor,
-                    role:a.isSwitch?'switch':'router', pkey:'dev:'+a.name,
+                    role:rA, pkey:'dev:'+a.name,
                     bg:dcA.bg, fg:dcA.fg, bd:dcA.bd}, position:{x:ax, y:ay}});
     els.push({data:{id:b.id, label:b.name, kind:'device', vendor:b.vendor,
-                    role:b.isSwitch?'switch':'router', pkey:'dev:'+b.name,
+                    role:rB, pkey:'dev:'+b.name,
                     bg:dcB.bg, fg:dcB.fg, bd:dcB.bd}, position:{x:bx, y:by}});
 
     const port=(m)=>{
@@ -2582,7 +2646,7 @@ function render(){
     }
 
     if(STATE.cy) STATE.cy.destroy();
-    sizeNodes(els);
+    applyBends(els); sizeNodes(els);
     const vpL = (STATE.cy && !STATE.viewIsPath)
       ? {zoom:STATE.cy.zoom(), pan:Object.assign({}, STATE.cy.pan())} : null;
     if(STATE.cy) STATE.cy.destroy();
@@ -2671,7 +2735,7 @@ function render(){
     const role = (d.isSwitch && !routes && !d.interfaces.some(i=>i.addrs.length && !/^vlan/i.test(i.name)))
                  ? 'switch' : 'router';
     const vc = Object.keys(d.vlans||{}).length;
-    const dc=deviceColor(d);
+    const dc=deviceColor(d, role);
     els.push({data:{id:d.id, label:(selMode?(sel.has(d.id)?'☑ ':'☐ '):'')+d.name, kind:'device',
                     vendor:d.vendor, role, picked: sel.has(d.id)?1:0, pkey:'dev:'+d.name,
                     bg:dc.bg, fg:dc.fg, bd:dc.bd,
@@ -2853,7 +2917,7 @@ function render(){
   if((document.getElementById('opt-nolinks')||{}).checked){
     for(let i=els.length-1;i>=0;i--) if(els[i].data.source) els.splice(i,1);
   }
-  sizeNodes(els);
+  applyBends(els); sizeNodes(els);
   const cy = cytoscape({
     container: document.getElementById('cy'),
     elements: els,
@@ -2882,6 +2946,31 @@ function render(){
   });
   cy.on('tap','node[kind="subnet"]', evt=>showSegment(evt.target.data('net')||evt.target.data('label')));
   cy.on('dbltap','edge', evt=>onEdgeTap(cy, evt.target));
+  /* Drag a link sideways to pull it clear of another. The bend is stored per
+     link so it survives re-renders and is saved with the project. */
+  cy.on('mousedown','edge', evt=>{
+    const edge=evt.target, k=edge.data('ekey');
+    if(!k) return;
+    const start=evt.renderedPosition||evt.position;
+    const from=edge.data('bend')||0;
+    let moved=false;
+    const move=(e)=>{
+      const p=e.renderedPosition||e.position;
+      const s0=edge.source().renderedPosition(), t0=edge.target().renderedPosition();
+      const dx=t0.x-s0.x, dy=t0.y-s0.y, L=Math.hypot(dx,dy)||1;
+      // distance of the pointer from the straight line, signed
+      const off=((p.x-s0.x)*(-dy) + (p.y-s0.y)*dx)/L;
+      if(Math.abs(off-from)>2) moved=true;
+      edge.data('bend', Math.max(-400, Math.min(400, off)));
+    };
+    const up=()=>{
+      cy.off('mousemove', move); cy.off('mouseup', up); cy.off('tapend', up);
+      cy.userPanningEnabled(true); cy.boxSelectionEnabled(true);
+      if(moved){ STATE.bends[k]=edge.data('bend'); autosave(); }
+    };
+    cy.userPanningEnabled(false); cy.boxSelectionEnabled(false);
+    cy.on('mousemove', move); cy.on('mouseup', up); cy.on('tapend', up);
+  });
   const writeNS = STATE.posWriteNS;
   cy.on('dragfree','node', ()=>{ capturePositions(cy, writeNS); autosave(); });
   /* A layout does not finish synchronously. Capturing straight away would save
@@ -4291,10 +4380,14 @@ function showFind(){
   STATE.selected=null; renderDevList();
   r.innerHTML='<h2 class="sec">'+fr.devs.length+' device'+(fr.devs.length===1?'':'s')+
       ' match '+esc(fr.q)+'</h2>'+
-    '<p class="note" style="margin-top:0">Shown on the map in the topology arrangement.</p>'+
+    '<p class="note" style="margin-top:0">Shown on the map in the topology arrangement.'+
+      (fr.devs.some(x=>x.owner)
+        ? ' <span style="color:var(--green)">'+esc(fr.devs.filter(x=>x.owner).map(x=>x.dev.name).join(', '))+
+          '</span> owns this address.' : '')+'</p>'+
     fr.devs.map((x,i)=>
       '<div class="cfgpane-label"><span><a href="#" data-find="'+i+'" style="color:var(--cyan);text-decoration:none">'+
-      esc(x.dev.name)+'</a></span><span>'+esc(zoneOf(x.dev)?zoneOf(x.dev).name:'')+'</span></div>'+
+      esc(x.dev.name)+'</a>'+(x.owner?' <span class="tag allow">owner</span>':'')+
+      '</span><span>'+esc(zoneOf(x.dev)?zoneOf(x.dev).name:'')+'</span></div>'+
       '<table class="fib">'+x.why.map(w=>'<tr><td>'+esc(w)+'</td></tr>').join('')+'</table>').join('')+
     '<div id="warnbox"></div>';
   renderWarnings();
@@ -4499,7 +4592,11 @@ function showDevice(d, opts){
             (g.parent?esc((groupById(g.parent)||{name:''}).name)+' / ':'')+esc(g.name)+'</option>').join('')+
         '</select>'+
         '<button class="btn" id="dev-clearcfg">Clear config</button>'+
-      '</div>';
+      '</div>'+
+      (d.vendor==='palo-alto'
+        ? '<label class="auth"><input type="checkbox" id="dev-nopolicy"'+(d.noPolicy?' checked':'')+'>'+
+          '<span>Ignore this firewall\u2019s security rules when tracing — routing only.</span></label>'
+        : '');
 
   r.innerHTML =
     headHtml+
@@ -4529,6 +4626,8 @@ function showDevice(d, opts){
     if(e.key==='Enter') rnSave.click();
     if(e.key==='Escape') rnCancel.click();
   };
+  const devNoPol=document.getElementById('dev-nopolicy');
+  if(devNoPol) devNoPol.onchange=()=>{ d.noPolicy=devNoPol.checked; autosave(); };
   const devBg=document.getElementById('dev-bg'), devFg=document.getElementById('dev-fg');
   if(devBg) devBg.oninput=()=>{ d.bg=devBg.value; render(); autosave(); };
   if(devFg) devFg.oninput=()=>{ d.fg=devFg.value; render(); autosave(); };
@@ -4756,6 +4855,10 @@ function hopsHtml(res){
       html+='<div class="hop-line">crosses <span>'+esc(h.viaCloud)+'</span>'+
             '<span class="tag table">wan</span></div>';
     }
+    if(h.policyBypassed){
+      html+='<div class="hop-line">policy <span>not evaluated</span>'+
+            '<span class="tag igp">bypassed</span></div>';
+    }
     if(h.pol){
       const bad=/deny|drop|reset/i.test(h.pol.action);
       html+='<div class="hop-line">policy <span>'+esc(h.pol.rule)+'</span>'+
@@ -4870,6 +4973,7 @@ document.getElementById('add-paste').onclick=()=>{
 document.getElementById('opt-view').onchange=()=>{ render(); autosave(); };
 document.getElementById('opt-select').onchange=()=>{ render(); updateSelBtn(); };
 document.getElementById('opt-nolinks').onchange=()=>{ render(); autosave(); };
+document.getElementById('opt-nopolicy').onchange=()=>autosave();
 document.getElementById('opt-layer').onchange=()=>{ render(); autosave(); };
 document.getElementById('proj-name').addEventListener('input',()=>autosave());
 document.getElementById('rot-l').onclick=()=>rotateView(-15);
@@ -4936,6 +5040,7 @@ function runTrace(){
   const src=document.getElementById('src').value, dst=document.getElementById('dst').value;
   const startId=document.getElementById('startdev').value;
   const mode=STATE.traceMode||'after';
+  const tOpts={noPolicy: document.getElementById('opt-nopolicy').checked};
 
   const focus = document.getElementById('opt-focus').checked;
   const finish = (res)=>{
@@ -4949,14 +5054,14 @@ function runTrace(){
   };
 
   if(mode==='after'){
-    const res=trace(STATE.model, src, dst, startId);
+    const res=trace(STATE.model, src, dst, startId, tOpts);
     showTrace(res); finish(res);
   } else if(mode==='before'){
-    const res=trace(baselineModel(), src, dst, startId);
+    const res=trace(baselineModel(), src, dst, startId, tOpts);
     showTrace(res,{label:'original configs'}); finish(res);
   } else {
-    const before=trace(baselineModel(), src, dst, startId);
-    const after=trace(STATE.model, src, dst, startId);
+    const before=trace(baselineModel(), src, dst, startId, tOpts);
+    const after=trace(STATE.model, src, dst, startId, tOpts);
     showCompare(before, after); finish(after);
   }
 }
@@ -5076,10 +5181,12 @@ function projectObject(){
     name:(document.getElementById('proj-name').value||'').trim(),
     ui:STATE.ui,
     theme:STATE.theme,
+    bends:STATE.bends||{},
     clouds:STATE.clouds||[],
     groups:groups(),
     layer:document.getElementById('opt-layer').value,
     nolinks:document.getElementById('opt-nolinks').checked,
+    nopolicy:document.getElementById('opt-nopolicy').checked,
     providers:(STATE.providers||[]).map(p=>({name:p.name, patterns:p.patterns})),
     cloudOpts:STATE.cloudOpts||{},
     autowan:document.getElementById('opt-autowan').checked,
@@ -5089,7 +5196,7 @@ function projectObject(){
       cname: !!d.customName,
       show: d.show!==false,
       group: d.groupId||null,
-      bg: d.bg||null, fg: d.fg||null,
+      bg: d.bg||null, fg: d.fg||null, nopol: !!d.noPolicy,
       nbrs: d.neighbors||[],
       bgp: d.bgpTable||[],
       auth:d.tableAuthoritative,
@@ -5108,6 +5215,7 @@ function loadProject(obj){
   STATE.groups = Array.isArray(obj.groups) ? obj.groups : [];
   if(obj.ui) STATE.ui=Object.assign({left:290,right:400,leftOpen:true,rightOpen:true}, obj.ui);
   if(obj.theme) STATE.theme=Object.assign({}, THEME_DEFAULT, obj.theme);
+  STATE.bends = obj.bends || {};
   applyPanels();
   initTheme();
   const st=document.querySelector('.stage');
@@ -5116,6 +5224,7 @@ function loadProject(obj){
   if(obj.layer) document.getElementById('opt-layer').value = obj.layer;
   for(const g of STATE.groups){ const n=parseInt(String(g.id).replace(/\D/g,''),10); if(n>grpSeq) grpSeq=n; }
   if(obj.nolinks!=null) document.getElementById('opt-nolinks').checked=!!obj.nolinks;
+  if(obj.nopolicy!=null) document.getElementById('opt-nopolicy').checked=!!obj.nopolicy;
   STATE.providers = Array.isArray(obj.providers) && obj.providers.length
     ? obj.providers.map(p=>({name:p.name, patterns:p.patterns||[p.name]}))
     : DEFAULT_PROVIDERS.map(p=>({name:p.name, patterns:p.patterns.slice()}));
@@ -5128,6 +5237,7 @@ function loadProject(obj){
     d.customName = !!pd.cname;
     d.show = pd.show!==false;
     d.groupId = pd.group||null;
+    d.noPolicy = !!pd.nopol;
     if(pd.bg) d.bg=pd.bg;
     if(pd.fg) d.fg=pd.fg;
     d.neighbors = Array.isArray(pd.nbrs) ? pd.nbrs : [];
@@ -5283,7 +5393,9 @@ if(typeof cytoscape==='undefined'){
 }
 function initTheme(){
   const map={canvasBg:'th-canvasBg', linkText:'th-linkText', devBg:'th-devBg',
-             devText:'th-devText', zoneBg:'th-zoneBg', zoneText:'th-zoneText'};
+             devText:'th-devText', zoneBg:'th-zoneBg', zoneText:'th-zoneText',
+             zoneBorder:'th-zoneBorder', roleRouter:'th-roleRouter',
+             roleSwitch:'th-roleSwitch', roleFirewall:'th-roleFirewall'};
   for(const k in map){
     const el=document.getElementById(map[k]);
     if(!el) continue;
@@ -5293,6 +5405,11 @@ function initTheme(){
       if(k==='linkText') STATE.theme.netText=el.value;   // one control for subnet + link text
       applyTheme(); autosave();
     };
+  }
+  const bw=document.getElementById('th-borderW');
+  if(bw){
+    bw.value=STATE.theme.boxBorderW||2;
+    bw.oninput=()=>{ STATE.theme.boxBorderW=parseInt(bw.value,10)||2; applyTheme(); autosave(); };
   }
   const boolMap={canvasGrid:'th-canvasGrid', zoneGrid:'th-zoneGrid'};
   for(const k in boolMap){
@@ -5305,6 +5422,7 @@ function initTheme(){
     STATE.theme=Object.assign({}, t);
     for(const k in map) if(document.getElementById(map[k])) document.getElementById(map[k]).value=STATE.theme[k];
     for(const k in boolMap) if(document.getElementById(boolMap[k])) document.getElementById(boolMap[k]).checked=!!STATE.theme[k];
+    if(bw) bw.value=STATE.theme.boxBorderW||2;
     applyTheme(); autosave();
   };
   document.getElementById('th-dark').onclick=()=>applyPreset(THEME_DEFAULT);
