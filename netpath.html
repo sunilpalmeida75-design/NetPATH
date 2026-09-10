@@ -559,6 +559,10 @@ table.fib td:first-child{color:var(--ink)}
         <input type="number" id="th-devFontSize" placeholder="device text size" min="9" max="24">
         <input type="number" id="th-zoneFontSize" placeholder="zone text size" min="9" max="24">
       </div>
+      <div class="rt-form">
+        <select id="th-devFont" title="Device typeface"></select>
+        <select id="th-zoneFont" title="Zone typeface"></select>
+      </div>
       <label class="auth" style="margin-top:6px"><input type="checkbox" id="th-devBold"><span>Bold device text</span></label>
       <label class="auth"><input type="checkbox" id="th-zoneBold"><span>Bold zone text</span></label>
       <div class="btn-row" style="margin-top:0;margin-bottom:8px">
@@ -629,6 +633,7 @@ table.fib td:first-child{color:var(--ink)}
         </select>
       </label>
       <label class="toggle"><input type="checkbox" id="opt-nopolicy"> Ignore policy</label>
+      <label class="toggle" title="Freeze every link exactly as it is now"><input type="checkbox" id="opt-locklinks"> Lock links</label>
       <label class="toggle"><input type="checkbox" id="opt-nolinks"> Hide links</label>
       <label class="toggle"><input type="checkbox" id="opt-select"> Select devices</label>
       <button class="btn" id="analyse" style="display:none">Analyse selected</button>
@@ -2509,14 +2514,28 @@ const ROUTE_M=14, ROUTE_GRID=20;
 
 /* Spread the links arriving at a box across the side they come from, so they
    meet its edge at separate points rather than all at its centre. */
+function anchorKey(e, isSource){ return (e.data('ekey')||e.id())+'|'+(isSource?'s':'t'); }
 function assignEndpoints(cy){
+  STATE.anchors = STATE.anchors || {};
   cy.nodes().forEach(n=>{
     if(n.data('kind')==='group') return;
     const here=n.position();
     if(!here || !isFinite(here.x)) return;
+    const w0=n.outerWidth()||60, h0=n.outerHeight()||30;
     const sides={top:[], bottom:[], left:[], right:[]};
     n.connectedEdges().forEach(e=>{
-      const other = e.source().id()===n.id() ? e.target() : e.source();
+      const mine = e.source().id()===n.id();
+      /* A point the user dragged onto the border stays exactly where they put
+         it, and the line follows from there. */
+      const a=STATE.anchors[anchorKey(e,mine)];
+      if(a){
+        e.data(mine?'sep':'tep', (a.px*100).toFixed(1)+'% '+(a.py*100).toFixed(1)+'%');
+        e.data(mine?'spx':'tpx', here.x + a.px*w0);
+        e.data(mine?'spy':'tpy', here.y + a.py*h0);
+        e.data(mine?'sside':'tside', a.side);
+        return;
+      }
+      const other = mine ? e.target() : e.source();
       const p=other.position();
       if(!p || !isFinite(p.x)) return;
       const dx=p.x-here.x, dy=p.y-here.y;
@@ -2549,7 +2568,7 @@ function assignEndpoints(cy){
 }
 
 function autoRouteEdges(cy, mode){
-  if(!cy || STATE.noAutoRoute) return;
+  if(!cy || STATE.noAutoRoute || STATE.linksLocked) return;
   STATE.bends = STATE.bends || {};
   assignEndpoints(cy);
 
@@ -2708,6 +2727,31 @@ function autoRouteEdges(cy, mode){
       if(pts){
         const uh=pathHits(pts,obstacles,skip,M);
         if(uh<best.hits) best={pts,hits:uh,cost:0};
+      }
+    }
+
+    /* Last resort: if nothing tried so far is clear, walk out to a lane beyond
+       everything in the way and come back. This always exists, so a link never
+       ends up crossing a box. */
+    if(best.hits>0){
+      let lo=Infinity, hi=-Infinity, lft=Infinity, rgt=-Infinity;
+      for(const b of obstacles){
+        if(skip.has(b.id)) continue;
+        lo=Math.min(lo,b.y-b.hh); hi=Math.max(hi,b.y+b.hh);
+        lft=Math.min(lft,b.x-b.hw); rgt=Math.max(rgt,b.x+b.hw);
+      }
+      const cands=[];
+      if(isFinite(lo)) cands.push({v:snap(lo-M-24), horiz:true});
+      if(isFinite(hi)) cands.push({v:snap(hi+M+24), horiz:true});
+      if(isFinite(lft)) cands.push({v:snap(lft-M-24), horiz:false});
+      if(isFinite(rgt)) cands.push({v:snap(rgt+M+24), horiz:false});
+      for(const c of cands){
+        const pp = c.horiz
+          ? [[A.x,A.y],[A.x,c.v],[B.x,c.v],[B.x,B.y]]
+          : [[A.x,A.y],[c.v,A.y],[c.v,B.y],[B.x,B.y]];
+        const h=pathHits(pp,obstacles,skip,M);
+        if(h<best.hits) best={pts:pp,hits:h,cost:0};
+        if(h===0) break;
       }
     }
     toSeg(best.pts.slice(1,-1));
@@ -3595,6 +3639,7 @@ const THEME_DEFAULT={
   zoneBg:'#1e262f', zoneText:'#8a9bad', zoneBorder:'#3f8f63', zoneGrid:false,
   boxBorderW:2, boxW:null, boxH:null,          // null = auto-sized from the label
   devFontSize:13, devBold:false, zoneFontSize:12, zoneBold:false,
+  devFont:'IBM Plex Mono, monospace', zoneFont:'IBM Plex Sans Condensed, sans-serif',
   linkWidth:1.4,
   netText:'#4fc3d9', linkText:'#61799a'
 };
@@ -3607,6 +3652,7 @@ const THEME_VISIO={
   zoneBg:'#ffffff', zoneText:'#4a6b80', zoneBorder:'#1f7a4d', zoneGrid:false,
   boxBorderW:3, boxW:null, boxH:null,
   devFontSize:13, devBold:false, zoneFontSize:12, zoneBold:false,
+  devFont:'IBM Plex Mono, monospace', zoneFont:'IBM Plex Sans Condensed, sans-serif',
   linkWidth:1.4,
   netText:'#12628f', linkText:'#3d5568'
 };
@@ -3648,15 +3694,26 @@ function zoneColor(g){
   const tabfg = luminance(bd)>0.55 ? '#12202c' : '#f2f7fb';
   return {bg, fg, bd, tabfg};
 }
+const FONTS=[
+  ['IBM Plex Mono, monospace','Plex Mono'],
+  ['IBM Plex Sans Condensed, sans-serif','Plex Sans Cond'],
+  ['Inter, system-ui, sans-serif','Inter'],
+  ['Georgia, serif','Georgia'],
+  ['Consolas, Menlo, monospace','Consolas'],
+  ['Arial, Helvetica, sans-serif','Arial'],
+  ['"Courier New", monospace','Courier']
+];
 function deviceFont(d){
   const size=(d&&d.fontSize)||TH('devFontSize')||13;
   const bold=(d&&d.bold!=null)?d.bold:!!TH('devBold');
-  return {size, weight: bold?'bold':'normal'};
+  const fam=(d&&d.font)||TH('devFont')||'IBM Plex Mono, monospace';
+  return {size, weight: bold?'bold':'normal', fam};
 }
 function zoneFont(g){
   const size=(g&&g.fontSize)||TH('zoneFontSize')||12;
   const bold=(g&&g.bold!=null)?g.bold:!!TH('zoneBold');
-  return {size, weight: bold?'bold':'normal'};
+  const fam=(g&&g.font)||TH('zoneFont')||'IBM Plex Sans Condensed, sans-serif';
+  return {size, weight: bold?'bold':'normal', fam};
 }
 /* A small status dot baked into the corner of the box, as a second background
    image layer — moves with the node for free, no extra element to track. */
@@ -3708,7 +3765,7 @@ function graphStyle(){
       {selector:'node[kind="device"]', style:{
         'shape':'round-rectangle','width':'data(w)','height':'data(h)',
         'background-color':'data(bg)','border-width':TH('boxBorderW'),'border-color':'data(bd)',
-        'label':'data(label)','color':'data(fg)','font-family':'IBM Plex Mono, monospace',
+        'label':'data(label)','color':'data(fg)','font-family':'data(ff)',
         'font-size':'data(fs)','font-weight':'data(fw)','text-valign':'center','text-halign':'center',
         'text-wrap':'wrap',
         'background-image':'data(dotUri)','background-width':'11px','background-height':'11px',
@@ -3738,6 +3795,9 @@ function graphStyle(){
         'curve-style':'unbundled-bezier',
         'control-point-distances':'data(bend)','control-point-weights':0.5,
         'source-endpoint':'data(sep)','target-endpoint':'data(tep)',
+        'source-arrow-shape':'circle','target-arrow-shape':'circle',
+        'source-arrow-color':'data(dot)','target-arrow-color':'data(dot)',
+        'source-arrow-fill':'filled','target-arrow-fill':'filled','arrow-scale':0.55,
         'label':'data(label)','color':'#61799a','font-size':9
       }},
       {selector:'edge', style:{'color':TH('linkText'),'font-family':'IBM Plex Mono, monospace',
@@ -3767,7 +3827,7 @@ function graphStyle(){
         'shape':'round-rectangle','background-color':'data(bg)','background-opacity':TH('zoneGrid')?0.55:1,
         'border-width':TH('boxBorderW'),'border-color':'data(bd)','border-style':'solid','padding':'data(pad)',
         /* the name sits in a solid tab on the bottom edge of the box */
-        'label':'data(label)','color':'data(tabfg)','font-family':'var(--sans)',
+        'label':'data(label)','color':'data(tabfg)','font-family':'data(ff)',
         'font-size':'data(fs)','font-weight':'data(fw)',
         'text-valign':'bottom','text-halign':'center','text-margin-y':-2,
         'text-background-color':'data(bd)','text-background-opacity':1,
@@ -3846,7 +3906,7 @@ function render(){
       const rr=roleOf(d);
       const dc=deviceColor(d, rr), df=deviceFont(d);
       els.push({data:{id:d.id, label:d.name, kind:'device', vendor:d.vendor,
-                      role:rr, bg:dc.bg, fg:dc.fg, bd:dc.bd, fs:df.size, fw:df.weight, dotUri:statusDot(d),
+                      role:rr, bg:dc.bg, fg:dc.fg, bd:dc.bd, fs:df.size, fw:df.weight, ff:df.fam, dotUri:statusDot(d),
                       overrideW:d.boxW||undefined, overrideH:d.boxH||undefined,
                       parent: d.groupId ? 'g_'+d.groupId : undefined}});
     };
@@ -3926,7 +3986,7 @@ function render(){
       const gc=zoneColor(g), gf=zoneFont(g);
       els.unshift({data:{id:'g_'+g.id, label:g.name, kind:'group',
                          gkind:g.parent?'zone':'site', bg:gc.bg, fg:gc.fg, bd:gc.bd, tabfg:gc.tabfg,
-                         fs:gf.size, fw:gf.weight, pad:(g.padding||26)+'px',
+                         fs:gf.size, fw:gf.weight, ff:gf.fam, pad:(g.padding||26)+'px',
                          parent: g.parent && pathGroups.has(g.parent) ? 'g_'+g.parent : undefined}});
     }
 
@@ -4056,11 +4116,11 @@ function render(){
     const dcA=deviceColor(a, rA), dcB=deviceColor(b, rB), dfA=deviceFont(a), dfB=deviceFont(b);
     els.push({data:{id:a.id, label:a.name, kind:'device', vendor:a.vendor,
                     role:rA, pkey:'dev:'+a.name, bg:dcA.bg, fg:dcA.fg, bd:dcA.bd,
-                    fs:dfA.size, fw:dfA.weight, dotUri:statusDot(a),
+                    fs:dfA.size, fw:dfA.weight, ff:dfA.fam, dotUri:statusDot(a),
                     overrideW:a.boxW||undefined, overrideH:a.boxH||undefined}, position:{x:ax, y:ay}});
     els.push({data:{id:b.id, label:b.name, kind:'device', vendor:b.vendor,
                     role:rB, pkey:'dev:'+b.name, bg:dcB.bg, fg:dcB.fg, bd:dcB.bd,
-                    fs:dfB.size, fw:dfB.weight, dotUri:statusDot(b),
+                    fs:dfB.size, fw:dfB.weight, ff:dfB.fam, dotUri:statusDot(b),
                     overrideW:b.boxW||undefined, overrideH:b.boxH||undefined}, position:{x:bx, y:by}});
 
     const port=(m)=>{
@@ -4218,7 +4278,7 @@ function render(){
     const gc=zoneColor(g), gf=zoneFont(g);
     els.push({data:{id:'g_'+g.id, label:g.name, kind:'group',
                     gkind:g.parent?'zone':'site', bg:gc.bg, fg:gc.fg, bd:gc.bd, tabfg:gc.tabfg,
-                    fs:gf.size, fw:gf.weight, pad:(g.padding||26)+'px',
+                    fs:gf.size, fw:gf.weight, ff:gf.fam, pad:(g.padding||26)+'px',
                     parent: g.parent && usedGroups.has(g.parent) ? 'g_'+g.parent : undefined}});
   }
 
@@ -4232,7 +4292,7 @@ function render(){
     const dc=deviceColor(d, role), df=deviceFont(d);
     els.push({data:{id:d.id, label:(selMode?(sel.has(d.id)?'☑ ':'☐ '):'')+d.name, kind:'device',
                     vendor:d.vendor, role, picked: sel.has(d.id)?1:0, pkey:'dev:'+d.name,
-                    bg:dc.bg, fg:dc.fg, bd:dc.bd, fs:df.size, fw:df.weight, dotUri:statusDot(d),
+                    bg:dc.bg, fg:dc.fg, bd:dc.bd, fs:df.size, fw:df.weight, ff:df.fam, dotUri:statusDot(d),
                     overrideW:d.boxW||undefined, overrideH:d.boxH||undefined,
                     parent: (d.groupId && usedGroups.has(d.groupId)) ? 'g_'+d.groupId : undefined,
                     sub:(d.vendor==='palo-alto'?'firewall':(role==='switch'?'switch':'router'))+
@@ -4490,6 +4550,56 @@ function render(){
     cy.userPanningEnabled(false); cy.boxSelectionEnabled(false);
     cy.on('mousemove', move); cy.on('mouseup', up); cy.on('tapend', up);
   });
+  /* Drag either end-dot of a link around the border of its box. Grabbing
+     within reach of an endpoint moves that end; the line re-routes to follow. */
+  cy.on('mousedown','edge', evt=>{
+    const edge=evt.target;
+    const p=evt.position; if(!p) return;
+    const pick=(node, isSource)=>{
+      const c=node.position(), w=node.outerWidth()/2, h=node.outerHeight()/2;
+      const key = isSource ? 'spx' : 'tpx', keyY = isSource ? 'spy' : 'tpy';
+      const ex = edge.data(key)!=null ? edge.data(key) : c.x;
+      const ey = edge.data(keyY)!=null ? edge.data(keyY) : c.y;
+      return {d:Math.hypot(p.x-ex, p.y-ey), c, w, h};
+    };
+    const a=pick(edge.source(),true), b=pick(edge.target(),false);
+    const isSource = a.d<=b.d;
+    const hit = isSource?a:b;
+    if(hit.d > 26) return;                       // not near a dot: leave it to the bend drag
+    evt.preventDefault && evt.preventDefault();
+    cy.userPanningEnabled(false); cy.boxSelectionEnabled(false);
+    STATE.anchors = STATE.anchors || {};
+    const move=(ev)=>{
+      const q=ev.position; if(!q) return;
+      // clamp the pointer to the nearest point on the box border
+      const rx=(q.x-hit.c.x)/hit.w, ry=(q.y-hit.c.y)/hit.h;
+      let px, py, side;
+      if(Math.abs(rx)>=Math.abs(ry)){ px=rx>=0?0.5:-0.5; side=rx>=0?'right':'left';
+        py=Math.max(-0.5,Math.min(0.5,(q.y-hit.c.y)/(hit.h*2))); }
+      else { py=ry>=0?0.5:-0.5; side=ry>=0?'bottom':'top';
+        px=Math.max(-0.5,Math.min(0.5,(q.x-hit.c.x)/(hit.w*2))); }
+      STATE.anchors[anchorKey(edge,isSource)]={px,py,side};
+      autoRouteEdges(cy,'ortho');
+    };
+    const up=()=>{
+      cy.off('mousemove',move); cy.off('mouseup',up); cy.off('tapend',up);
+      cy.userPanningEnabled(true); cy.boxSelectionEnabled(true);
+      autosave();
+    };
+    cy.on('mousemove',move); cy.on('mouseup',up); cy.on('tapend',up);
+  });
+  /* Double-click an end-dot to hand it back to automatic placement. */
+  cy.on('dbltap','edge', evt=>{
+    const edge=evt.target, p=evt.position;
+    if(!p || !STATE.anchors) return;
+    for(const isSource of [true,false]){
+      const k=anchorKey(edge,isSource);
+      if(!STATE.anchors[k]) continue;
+      const ex=edge.data(isSource?'spx':'tpx'), ey=edge.data(isSource?'spy':'tpy');
+      if(ex!=null && Math.hypot(p.x-ex,p.y-ey)<26){ delete STATE.anchors[k]; autoRouteEdges(cy,'ortho'); autosave(); return; }
+    }
+  });
+
   /* Grab the bottom-right corner of a device box to resize it. Anywhere else
      on the box still does the normal Cytoscape drag-to-move. */
   cy.on('mousedown','node[kind="device"]', evt=>{
@@ -5482,13 +5592,26 @@ function renderGroups(){
     bgIn.title='Box colour'; bgIn.style.width='16px'; bgIn.style.height='16px'; bgIn.style.padding='0';
     bgIn.style.border='1px solid var(--rule)'; bgIn.style.borderRadius='3px'; bgIn.style.background='none';
     bgIn.onclick=(ev)=>ev.stopPropagation();
-    bgIn.oninput=(ev)=>{ ev.stopPropagation(); g.bg=bgIn.value; render(); autosave(); };
+    let bgT=null;
+    bgIn.oninput=(ev)=>{ ev.stopPropagation(); g.bg=bgIn.value;
+      if(bgT) return; bgT=setTimeout(()=>{ bgT=null; render(); },120); };
+    bgIn.onchange=(ev)=>{ ev.stopPropagation(); if(bgT){clearTimeout(bgT);bgT=null;} render(); autosave(); };
     const fgIn=document.createElement('input'); fgIn.type='color'; fgIn.value=g.fg||TH('zoneText');
     fgIn.title='Text colour'; fgIn.style.width='16px'; fgIn.style.height='16px'; fgIn.style.padding='0';
     fgIn.style.border='1px solid var(--rule)'; fgIn.style.borderRadius='3px'; fgIn.style.background='none';
     fgIn.style.marginLeft='3px';
     fgIn.onclick=(ev)=>ev.stopPropagation();
-    fgIn.oninput=(ev)=>{ ev.stopPropagation(); g.fg=fgIn.value; render(); autosave(); };
+    let fgT=null;
+    fgIn.oninput=(ev)=>{ ev.stopPropagation(); g.fg=fgIn.value;
+      if(fgT) return; fgT=setTimeout(()=>{ fgT=null; render(); },120); };
+    fgIn.onchange=(ev)=>{ ev.stopPropagation(); if(fgT){clearTimeout(fgT);fgT=null;} render(); autosave(); };
+    const fsel=document.createElement('select');
+    fsel.title='Typeface for this zone';
+    fsel.style.cssText='margin-left:4px;background:var(--bg);color:var(--ink);border:1px solid var(--rule);border-radius:3px;font-size:11px;max-width:92px';
+    fsel.innerHTML='<option value="">font</option>'+FONTS.map(([v,l])=>
+      '<option value="'+esc(v)+'"'+((g.font===v)?' selected':'')+'>'+esc(l)+'</option>').join('');
+    fsel.onclick=(ev)=>ev.stopPropagation();
+    fsel.onchange=(ev)=>{ ev.stopPropagation(); if(fsel.value) g.font=fsel.value; else delete g.font; render(); autosave(); };
     const rs=document.createElement('button');
     rs.className='dev-x'; rs.textContent='↺'; rs.title='Use default colours';
     rs.onclick=(ev)=>{ ev.stopPropagation(); delete g.bg; delete g.fg; renderGroups(); render(); autosave(); };
@@ -5508,7 +5631,7 @@ function renderGroups(){
       STATE.groups=groups().filter(z=>!gone.has(z.id));
       rebuild();
     };
-    li.append(nm,bgIn,fgIn,rs,minus,plus,x);
+    li.append(nm,bgIn,fgIn,fsel,rs,minus,plus,x);
     li.onclick=()=>{ const el=document.getElementById('grp-name'); el.value=g.name; el.focus(); };
     ul.appendChild(li);
     for(const z of groups().filter(y=>y.parent===g.id)) draw(z,1);
@@ -6339,6 +6462,12 @@ function showDevice(d, opts){
       '<span class="color-row" title="Box colour"><input type="color" id="dev-bg" value="'+
         esc(d.bg||TH('devBg'))+'"><input type="color" id="dev-fg" value="'+esc(d.fg||TH('devText'))+
         '"><button class="dev-x" id="dev-color-reset" title="Use default colours">↺</button></span></div>'+
+      '<p class="note" style="margin:6px 0 0">Typeface '+
+        '<select id="dev-font" style="background:var(--bg);color:var(--ink);border:1px solid var(--rule);'+
+        'border-radius:4px;padding:2px 5px;font-size:12px">'+
+        '<option value="">Use the global setting</option>'+
+        FONTS.map(([v,l])=>'<option value="'+esc(v)+'"'+((d.font===v)?' selected':'')+'>'+esc(l)+'</option>').join('')+
+        '</select></p>'+
       '<p class="note" style="margin:6px 0 0">Box size <input type="number" id="dev-boxw" min="70" max="500" '+
         'value="'+(d.boxW||'')+'" placeholder="auto" style="width:60px;background:var(--bg);color:var(--ink);'+
         'border:1px solid var(--rule);border-radius:4px;padding:2px 5px;font-family:var(--mono)">'+
@@ -6389,10 +6518,18 @@ function showDevice(d, opts){
   const devNoPol=document.getElementById('dev-nopolicy');
   if(devNoPol) devNoPol.onchange=()=>{ d.noPolicy=devNoPol.checked; autosave(); };
   const devBg=document.getElementById('dev-bg'), devFg=document.getElementById('dev-fg');
-  if(devBg) devBg.oninput=()=>{ d.bg=devBg.value; render(); autosave(); };
-  if(devFg) devFg.oninput=()=>{ d.fg=devFg.value; render(); autosave(); };
+  let dbT=null, dfT=null;
+  if(devBg){ devBg.oninput=()=>{ d.bg=devBg.value; if(dbT) return; dbT=setTimeout(()=>{dbT=null; render();},120); };
+             devBg.onchange=()=>{ if(dbT){clearTimeout(dbT);dbT=null;} render(); autosave(); }; }
+  if(devFg){ devFg.oninput=()=>{ d.fg=devFg.value; if(dfT) return; dfT=setTimeout(()=>{dfT=null; render();},120); };
+             devFg.onchange=()=>{ if(dfT){clearTimeout(dfT);dfT=null;} render(); autosave(); }; }
   const devColorReset=document.getElementById('dev-color-reset');
   if(devColorReset) devColorReset.onclick=()=>{ delete d.bg; delete d.fg; rebuild(); showDevice(d); };
+  const devFontSel=document.getElementById('dev-font');
+  if(devFontSel) devFontSel.onchange=()=>{
+    if(devFontSel.value) d.font=devFontSel.value; else delete d.font;
+    render(); autosave();
+  };
   const boxW=document.getElementById('dev-boxw'), boxH=document.getElementById('dev-boxh');
   const applyBoxSize=()=>{
     const w=parseInt(boxW.value,10), h=parseInt(boxH.value,10);
@@ -6775,6 +6912,11 @@ document.getElementById('add-paste').onclick=()=>{
 document.getElementById('opt-view').onchange=()=>{ render(); autosave(); };
 document.getElementById('opt-select').onchange=()=>{ render(); updateSelBtn(); };
 document.getElementById('opt-nolinks').onchange=()=>{ render(); autosave(); };
+document.getElementById('opt-locklinks').onchange=function(){
+  STATE.linksLocked=this.checked;
+  if(!STATE.linksLocked && STATE.cy) autoRouteEdges(STATE.cy,'ortho');
+  autosave();
+};
 document.getElementById('opt-nopolicy').onchange=()=>autosave();
 document.getElementById('opt-layer').onchange=()=>{ render(); autosave(); };
 document.getElementById('proj-name').addEventListener('input',()=>autosave());
@@ -6829,7 +6971,12 @@ document.getElementById('prov-name').addEventListener('keydown',e=>{
 document.getElementById('opt-igp').onchange=()=>{ STATE.lastTrace=null; rebuild(); };
 document.getElementById('fit').onclick=()=>{
   if(!STATE.cy) return;
-  STATE.cy.fit(undefined,40);
+  /* Fit returns to wherever the diagram was when it was last saved, so you
+     always land back on the view you set up. With nothing saved yet it falls
+     back to framing everything. */
+  const v=STATE.savedView;
+  if(v && isFinite(v.zoom)){ STATE.cy.zoom(v.zoom); STATE.cy.pan(v.pan); }
+  else STATE.cy.fit(undefined,40);
   autoRouteEdges(STATE.cy,'ortho');     // re-square every link to its boxes
 };
 document.getElementById('viewback').onclick=goBack;
@@ -7140,6 +7287,7 @@ function capturePositions(cyArg, nsArg){
   });
 }
 function projectObject(){
+  if(STATE.cy) STATE.savedView={zoom:STATE.cy.zoom(), pan:Object.assign({},STATE.cy.pan())};
   capturePositions();
   return {
     v:1, saved:new Date().toISOString(),
@@ -7150,6 +7298,9 @@ function projectObject(){
     name:(document.getElementById('proj-name').value||'').trim(),
     ui:STATE.ui,
     theme:STATE.theme,
+    view: STATE.cy ? {zoom:STATE.cy.zoom(), pan:Object.assign({},STATE.cy.pan())} : (STATE.savedView||null),
+    anchors: STATE.anchors||{},
+    linksLocked: !!STATE.linksLocked,
     bends:STATE.bends||{},
     lineWidths:STATE.lineWidths||{},
     scopeIgnoreFw: !!STATE.scopeIgnoreFw,
@@ -7175,7 +7326,7 @@ function projectObject(){
       group: d.groupId||null,
       bg: d.bg||null, fg: d.fg||null, nopol: !!d.noPolicy,
       boxW: d.boxW||null, boxH: d.boxH||null,
-      fontSize: d.fontSize||null, bold: d.bold!=null?d.bold:null,
+      fontSize: d.fontSize||null, bold: d.bold!=null?d.bold:null, font: d.font||null,
       nbrs: d.neighbors||[],
       bgp: d.bgpTable||[],
       auth:d.tableAuthoritative,
@@ -7194,6 +7345,11 @@ function loadProject(obj){
   STATE.groups = Array.isArray(obj.groups) ? obj.groups : [];
   if(obj.ui) STATE.ui=Object.assign({left:290,right:400,leftOpen:true,rightOpen:true}, obj.ui);
   if(obj.theme) STATE.theme=Object.assign({}, THEME_DEFAULT, obj.theme);
+  STATE.savedView = obj.view || null;
+  STATE.anchors = obj.anchors || {};
+  STATE.linksLocked = !!obj.linksLocked;
+  const lockBox=document.getElementById('opt-locklinks');
+  if(lockBox) lockBox.checked=!!STATE.linksLocked;
   STATE.bends = obj.bends || {};
   STATE.lineWidths = obj.lineWidths || {};
   // older projects stored a single include-only list per facet
@@ -7229,6 +7385,7 @@ function loadProject(obj){
     if(pd.boxW) d.boxW=pd.boxW;
     if(pd.boxH) d.boxH=pd.boxH;
     if(pd.fontSize) d.fontSize=pd.fontSize;
+    if(pd.font) d.font=pd.font;
     if(pd.bold!=null) d.bold=pd.bold;
     if(pd.bg) d.bg=pd.bg;
     if(pd.fg) d.fg=pd.fg;
@@ -7463,11 +7620,17 @@ function initTheme(){
     const el=document.getElementById(map[k]);
     if(!el) continue;
     el.value=STATE.theme[k];
+    /* A colour input fires continuously while the picker is open. Re-rendering
+       the whole diagram on every one of those is what made this crawl, so the
+       value is stored immediately and the redraw is coalesced. */
+    let paint=null;
     el.oninput=()=>{
       STATE.theme[k]=el.value;
-      if(k==='linkText') STATE.theme.netText=el.value;   // one control for subnet + link text
-      applyTheme(); autosave();
+      if(k==='linkText') STATE.theme.netText=el.value;
+      if(paint) return;
+      paint=setTimeout(()=>{ paint=null; applyTheme(); }, 120);
     };
+    el.onchange=()=>{ if(paint){ clearTimeout(paint); paint=null; } applyTheme(); autosave(); };
   }
   const bw=document.getElementById('th-borderW');
   if(bw){
@@ -7494,6 +7657,13 @@ function initTheme(){
     };
     bwW.onchange=applyGlobalBox; bwH.onchange=applyGlobalBox;
   }
+  const fontOpts=(sel,cur)=>{ sel.innerHTML=FONTS.map(([v,l])=>
+    '<option value="'+esc(v)+'"'+(v===cur?' selected':'')+'>'+esc(l)+'</option>').join(''); };
+  const dff=document.getElementById('th-devFont'), zff=document.getElementById('th-zoneFont');
+  if(dff){ fontOpts(dff, STATE.theme.devFont);
+    dff.onchange=()=>{ STATE.theme.devFont=dff.value; applyTheme(); autosave(); }; }
+  if(zff){ fontOpts(zff, STATE.theme.zoneFont);
+    zff.onchange=()=>{ STATE.theme.zoneFont=zff.value; applyTheme(); autosave(); }; }
   const dfs=document.getElementById('th-devFontSize'), zfs=document.getElementById('th-zoneFontSize');
   if(dfs){ dfs.value=STATE.theme.devFontSize||13;
     dfs.onchange=()=>{ STATE.theme.devFontSize=parseInt(dfs.value,10)||13; applyTheme(); autosave(); }; }
@@ -7520,6 +7690,8 @@ function initTheme(){
     if(lwEl) lwEl.value=STATE.theme.linkWidth||1.4;
     if(bwW) bwW.value=STATE.theme.boxW||'';
     if(bwH) bwH.value=STATE.theme.boxH||'';
+    if(dff) fontOpts(dff, STATE.theme.devFont);
+    if(zff) fontOpts(zff, STATE.theme.zoneFont);
     if(dfs) dfs.value=STATE.theme.devFontSize||13;
     if(zfs) zfs.value=STATE.theme.zoneFontSize||12;
     if(dBold) dBold.checked=!!STATE.theme.devBold;
