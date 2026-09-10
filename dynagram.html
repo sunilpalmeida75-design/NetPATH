@@ -209,8 +209,11 @@ ul.devs li.off .dev-name, ul.devs li.off .chip{opacity:.42}
   radial-gradient(circle at 1px 1px, #1b2836 1px, transparent 0) 0 0/26px 26px, var(--bg);}
 #cy{position:absolute; inset:0}
 .stage-bar{
-  position:absolute; top:12px; left:12px; right:12px; z-index:5;
-  display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+  position:absolute; top:10px; right:10px; left:auto; z-index:6;
+  display:flex; gap:6px; align-items:center; flex-wrap:nowrap;
+  max-width:calc(100% - 20px); overflow:visible;
+  background:rgba(27,34,42,.92); border:1px solid var(--rule); border-radius:9px;
+  padding:5px 6px; box-shadow:0 6px 20px rgba(0,0,0,.32);
   pointer-events:none;
 }
 .stage-bar > *{pointer-events:auto}
@@ -504,10 +507,35 @@ body.zen #gut-t, body.zen #gut-b{display:none !important}
 body.zen .shell{grid-template-columns:0 0 minmax(0,1fr) 0 0;
   grid-template-rows:0 0 minmax(0,1fr) 0 0}
 body.zen .stage{grid-column:1/-1;grid-row:1/-1}
-body.zen .stage-bar{position:fixed;left:50%;top:10px;transform:translateX(-50%);z-index:50;
-  border-radius:10px;border:1px solid var(--rule);box-shadow:0 10px 30px rgba(0,0,0,.45);
-  background:var(--panel-2);padding:6px 10px;max-width:calc(100vw - 24px);overflow-x:auto;
-  border-bottom:1px solid var(--rule)}
+body.zen .stage-bar{position:fixed;left:50%;right:auto;top:10px;transform:translateX(-50%);z-index:50}
+body.zen .sb-show{position:fixed;right:14px;top:10px}
+
+/* one-row control bar, collapsible into a corner button */
+.stage-bar.hidden{display:none}
+.sb-collapse{padding:2px 7px !important;font-size:13px;line-height:1;opacity:.7}
+.sb-collapse:hover{opacity:1}
+.sb-gap{width:1px;height:20px;background:var(--rule);margin:0 2px;flex:none}
+.sb-show{
+  position:absolute; top:10px; right:10px; z-index:6; display:none;
+  background:rgba(27,34,42,.92); border:1px solid var(--rule); color:var(--ink-dim);
+  border-radius:9px; padding:6px 10px; cursor:pointer; font-size:15px; line-height:1;
+  box-shadow:0 6px 20px rgba(0,0,0,.32); pointer-events:auto;
+}
+.sb-show:hover{color:var(--ink); border-color:var(--ink-faint)}
+.sb-show.on{display:block}
+.sb-more{position:relative; pointer-events:auto}
+.sb-menu{
+  display:none; position:absolute; right:0; top:calc(100% + 7px); min-width:242px;
+  background:var(--panel-2); border:1px solid var(--rule); border-radius:9px; padding:7px;
+  box-shadow:0 14px 36px rgba(0,0,0,.45); z-index:20;
+}
+.sb-menu.on{display:block}
+.sb-menu .toggle{display:flex; width:100%; margin:1px 0; background:none; border:0; padding:5px 7px}
+.sb-menu .toggle:hover{background:var(--panel); border-radius:5px}
+.sb-h{font-size:10.5px; text-transform:uppercase; letter-spacing:.09em; color:var(--ink-faint);
+  padding:7px 7px 3px; font-family:var(--mono)}
+.sb-row{display:flex; gap:5px; padding:2px 7px 5px}
+.sb-row .btn{flex:1}
 </style>
 </head>
 <body>
@@ -672,7 +700,8 @@ body.zen .stage-bar{position:fixed;left:50%;top:10px;transform:translateX(-50%);
 
   <!-- ============ CENTER: graph ============ -->
   <main class="stage">
-    <div class="stage-bar">
+    <div class="stage-bar" id="stage-bar">
+      <button class="btn sb-collapse" id="sb-toggle" title="Hide the controls">×</button>
       <label class="toggle">View
         <select id="opt-view">
           <option value="simple" selected>Topology only — one link per pair</option>
@@ -686,8 +715,6 @@ body.zen .stage-bar{position:fixed;left:50%;top:10px;transform:translateX(-50%);
           <option value="vrf">VRF / VSYS filter</option>
         </select>
       </label>
-      <label class="toggle"><input type="checkbox" id="opt-focus"> Switch to path view after trace</label>
-      <label class="toggle"><input type="checkbox" id="opt-igp" checked> Infer IGP reachability</label>
       <label class="toggle">Layer
         <select id="opt-layer">
           <option value="both" selected>L2 + L3</option>
@@ -695,24 +722,41 @@ body.zen .stage-bar{position:fixed;left:50%;top:10px;transform:translateX(-50%);
           <option value="l2">L2 only</option>
         </select>
       </label>
-      <label class="toggle"><input type="checkbox" id="opt-nopolicy"> Ignore policy</label>
-      <label class="toggle" title="Freeze every link exactly as it is now"><input type="checkbox" id="opt-locklinks"> Lock links</label>
-      <label class="toggle"><input type="checkbox" id="opt-nolinks"> Hide links</label>
-      <label class="toggle"><input type="checkbox" id="opt-select"> Select devices</label>
-      <button class="btn" id="analyse" style="display:none">Analyse selected</button>
-      <button class="btn" id="rot-l" title="Rotate left">⟲</button>
-      <button class="btn" id="rot-r" title="Rotate right">⟳</button>
       <button class="btn" id="viewback" style="display:none">← Back</button>
+      <button class="btn" id="analyse" style="display:none">Analyse selected</button>
+      <span class="sb-gap"></span>
       <button class="btn" id="zoom-out" title="Zoom out">−</button>
       <button class="btn" id="zoom-in" title="Zoom in">+</button>
+      <button class="btn" id="fit">Fit</button>
       <button class="btn" id="undo" title="Undo layout change">↶</button>
       <button class="btn" id="redo" title="Redo layout change">↷</button>
-      <button class="btn" id="fit">Fit</button>
       <button class="btn" id="zen" title="Full screen — hide every panel (F, or Esc to leave)">⛶</button>
-      <button class="btn" id="exp-svg" title="Vector, opens in Visio">SVG</button>
-      <button class="btn" id="exp-png" title="Picture at 2×">PNG</button>
-      <button class="btn" id="exp-report" title="Markdown change report">Report</button>
+      <div class="sb-more">
+        <button class="btn" id="sb-menu-btn" title="More options">⋯</button>
+        <div class="sb-menu" id="sb-menu">
+          <div class="sb-h">Show</div>
+          <label class="toggle"><input type="checkbox" id="opt-nolinks"> Hide links</label>
+          <label class="toggle"><input type="checkbox" id="opt-select"> Select devices</label>
+          <label class="toggle" title="Freeze every link exactly as it is now"><input type="checkbox" id="opt-locklinks"> Lock links</label>
+          <div class="sb-h">Trace</div>
+          <label class="toggle"><input type="checkbox" id="opt-focus"> Switch to path view after trace</label>
+          <label class="toggle"><input type="checkbox" id="opt-igp" checked> Infer IGP reachability</label>
+          <label class="toggle"><input type="checkbox" id="opt-nopolicy"> Ignore policy</label>
+          <div class="sb-h">Arrange</div>
+          <div class="sb-row">
+            <button class="btn" id="rot-l" title="Rotate left">⟲</button>
+            <button class="btn" id="rot-r" title="Rotate right">⟳</button>
+          </div>
+          <div class="sb-h">Export</div>
+          <div class="sb-row">
+            <button class="btn" id="exp-svg" title="Vector, opens in Visio">SVG</button>
+            <button class="btn" id="exp-png" title="Picture at 2×">PNG</button>
+            <button class="btn" id="exp-report" title="Markdown change report">Report</button>
+          </div>
+        </div>
+      </div>
     </div>
+    <button class="sb-show" id="sb-show" title="Show the controls">≡</button>
     <div id="cy"></div>
     <div class="empty-stage" id="stage-empty">
       <strong>Nothing to draw yet</strong>
@@ -2683,9 +2727,12 @@ function trace(model, srcStr, dstStr, startId, opts){
    ============================================================ */
 /* Cytoscape deprecated width/height:'label', so size nodes ourselves from the
    text. Monospace runs about 0.62em per character. */
-/* Size a box around its label so the text fills the share of it the theme
-   asks for — 80% by default. Before, the padding was fixed and generous, so a
-   label sat small in a large box. */
+/* Size a box around its label.
+
+   Width follows the text. Height does not: a one-line label in a wide box
+   would give a letterbox a few pixels tall, which is what made device boxes
+   look squashed. So the height is the taller of what the text needs and a
+   sensible share of the width, giving a box with real proportions. */
 function labelSize(label, font, padX, padY, minW){
   const lines=String(label||'').split('\n');
   let longest=0;
@@ -2693,10 +2740,11 @@ function labelSize(label, font, padX, padY, minW){
   const fill=Math.max(0.4, Math.min(0.95, TH('textFill')||0.8));
   const textH=lines.length*font*1.3;
   const textW=longest*font*0.6;
-  return {
-    w: Math.max(minW||20, Math.round(textW/fill)),
-    h: Math.round(textH/fill)
-  };
+  const w=Math.max(minW||20, Math.round(textW/fill));
+  const minH=Math.round(textH/fill);
+  // never flatter than 1:4, and never shorter than a comfortable row
+  const h=Math.max(minH, Math.round(w*0.25), Math.round(font*2.6));
+  return {w, h};
 }
 /* When a box has a size of its own, the font is scaled to fit it instead —
    same rule, applied the other way round. */
@@ -3152,13 +3200,19 @@ function sizeNodes(els){
       continue;
     }
     if(k==='device' && TH('boxW')){
+      /* A fixed global box size: the font is fitted to it, unless this device
+         was given a size of its own, which then wins. */
       el.data.w=TH('boxW'); el.data.h=TH('boxH')||48;
-      el.data.fs=fittedFont(el.data.label, el.data.w, el.data.h);
+      el.data.fs = el.data.fsFixed || fittedFont(el.data.label, el.data.w, el.data.h);
       continue;
     }
-    const s = k==='subnet' ? labelSize(el.data.label,11,8,6,24)
-            : k==='wan'    ? labelSize(el.data.label,12,34,28,96)
-            :                labelSize(el.data.label,13,30,26,96);
+    /* Size against the font this element will actually be drawn in — a
+       hardcoded 13 here meant changing the font size grew the text but not
+       the box, so nothing appeared to happen. */
+    const fs = el.data.fs || (k==='subnet' ? 11 : k==='wan' ? 12 : 13);
+    const s = k==='subnet' ? labelSize(el.data.label,fs,8,6,24)
+            : k==='wan'    ? labelSize(el.data.label,fs,34,28,96)
+            :                labelSize(el.data.label,fs,30,26,96);
     el.data.w=s.w; el.data.h=s.h;
   }
   return els;
@@ -7753,6 +7807,24 @@ window.addEventListener('keydown',(ev)=>{
     ev.preventDefault(); setZen(!STATE.zen);
   }
 });
+/* The control bar folds away into a single corner button, so the diagram gets
+   the window when you are reading it rather than adjusting it. */
+function setBarHidden(on){
+  STATE.barHidden=!!on;
+  const bar=document.getElementById('stage-bar'), show=document.getElementById('sb-show');
+  if(bar) bar.classList.toggle('hidden', STATE.barHidden);
+  if(show) show.classList.toggle('on', STATE.barHidden);
+  autosave();
+}
+document.getElementById('sb-toggle').onclick=()=>setBarHidden(true);
+document.getElementById('sb-show').onclick=()=>setBarHidden(false);
+const sbBtn=document.getElementById('sb-menu-btn'), sbMenu=document.getElementById('sb-menu');
+if(sbBtn && sbMenu){
+  sbBtn.onclick=(ev)=>{ ev.stopPropagation(); sbMenu.classList.toggle('on'); };
+  document.addEventListener('click',(ev)=>{
+    if(!sbMenu.contains(ev.target) && ev.target!==sbBtn) sbMenu.classList.remove('on');
+  });
+}
 document.getElementById('zoom-in').onclick=()=>zoomBy(1.25);
 document.getElementById('zoom-out').onclick=()=>zoomBy(1/1.25);
 document.getElementById('exp-report').onclick=()=>exportChangeReport();
@@ -8470,6 +8542,7 @@ function projectObject(){
     linksLocked: !!STATE.linksLocked,
     flowText: STATE.flowText||'',
     zen: !!STATE.zen,
+    barHidden: !!STATE.barHidden,
     bends:STATE.bends||{},
     lineWidths:STATE.lineWidths||{},
     scopeIgnoreFw: !!STATE.scopeIgnoreFw,
@@ -8554,6 +8627,7 @@ function loadProject(obj){
   STATE.linksLocked = !!obj.linksLocked;
   STATE.flowText = obj.flowText||'';
   if(obj.zen) setTimeout(()=>setZen(true),0);
+  if(obj.barHidden) setTimeout(()=>setBarHidden(true),0);
   STATE.flowResults=[];
   STATE.parked = Array.isArray(obj.parked) ? obj.parked : [];
   STATE.treePick = new Set();
