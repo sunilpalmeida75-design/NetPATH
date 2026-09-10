@@ -496,6 +496,18 @@ table.fib td:first-child{color:var(--ink)}
 .flowbtns{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .flowsum{margin-left:auto;font:12.5px var(--mono);color:var(--ink-dim)}
 .flowsum b.ok{color:var(--green)} .flowsum b.bad{color:var(--red)}
+
+/* full screen: only the map and the view row */
+body.zen .top-panel, body.zen .rail, body.zen .rail-right,
+body.zen .bottom-panel, body.zen #gut-l, body.zen #gut-r,
+body.zen #gut-t, body.zen #gut-b{display:none !important}
+body.zen .shell{grid-template-columns:0 0 minmax(0,1fr) 0 0;
+  grid-template-rows:0 0 minmax(0,1fr) 0 0}
+body.zen .stage{grid-column:1/-1;grid-row:1/-1}
+body.zen .stage-bar{position:fixed;left:50%;top:10px;transform:translateX(-50%);z-index:50;
+  border-radius:10px;border:1px solid var(--rule);box-shadow:0 10px 30px rgba(0,0,0,.45);
+  background:var(--panel-2);padding:6px 10px;max-width:calc(100vw - 24px);overflow-x:auto;
+  border-bottom:1px solid var(--rule)}
 </style>
 </head>
 <body>
@@ -526,8 +538,6 @@ table.fib td:first-child{color:var(--ink)}
   <!-- ============ LEFT: config intake ============ -->
   <aside class="rail">
     <div class="rail-head">
-      <h1 class="rail-brand">Dyna<span class="rail-accent">gram</span></h1>
-      <p class="rail-tag"><em>Dynamic Diagram</em></p>
       <p class="brand-sub">Topology and route trace, built from your device configs</p>
     </div>
     <div class="rail-body">
@@ -600,6 +610,9 @@ table.fib td:first-child{color:var(--ink)}
         <input type="range" id="th-borderW" min="1" max="6" step="1" style="flex:1;accent-color:var(--cyan)"></label>
       <label class="auth">Link thickness
         <input type="range" id="th-linkWidth" min="0.5" max="6" step="0.5" style="flex:1;accent-color:var(--cyan)"></label>
+      <label class="auth">Text fills the box
+        <input type="range" id="th-textFill" min="0.4" max="0.95" step="0.05" style="flex:1;accent-color:var(--cyan)">
+        <span id="th-textFill-v" style="font-family:var(--mono);font-size:11.5px;color:var(--ink-faint);min-width:32px;text-align:right"></span></label>
       <div class="rt-form" style="margin-top:6px">
         <input type="number" id="th-boxW" placeholder="auto width" min="70" max="500">
         <input type="number" id="th-boxH" placeholder="auto height" min="36" max="300">
@@ -695,6 +708,7 @@ table.fib td:first-child{color:var(--ink)}
       <button class="btn" id="undo" title="Undo layout change">↶</button>
       <button class="btn" id="redo" title="Redo layout change">↷</button>
       <button class="btn" id="fit">Fit</button>
+      <button class="btn" id="zen" title="Full screen — hide every panel (F, or Esc to leave)">⛶</button>
       <button class="btn" id="exp-svg" title="Vector, opens in Visio">SVG</button>
       <button class="btn" id="exp-png" title="Picture at 2×">PNG</button>
       <button class="btn" id="exp-report" title="Markdown change report">Report</button>
@@ -2669,14 +2683,31 @@ function trace(model, srcStr, dstStr, startId, opts){
    ============================================================ */
 /* Cytoscape deprecated width/height:'label', so size nodes ourselves from the
    text. Monospace runs about 0.62em per character. */
+/* Size a box around its label so the text fills the share of it the theme
+   asks for — 80% by default. Before, the padding was fixed and generous, so a
+   label sat small in a large box. */
 function labelSize(label, font, padX, padY, minW){
   const lines=String(label||'').split('\n');
   let longest=0;
   for(const l of lines) if(l.length>longest) longest=l.length;
+  const fill=Math.max(0.4, Math.min(0.95, TH('textFill')||0.8));
+  const textH=lines.length*font*1.3;
+  const textW=longest*font*0.6;
   return {
-    w: Math.max(minW||20, Math.round(longest*font*0.62)+padX),
-    h: Math.round(lines.length*font*1.35)+padY
+    w: Math.max(minW||20, Math.round(textW/fill)),
+    h: Math.round(textH/fill)
   };
+}
+/* When a box has a size of its own, the font is scaled to fit it instead —
+   same rule, applied the other way round. */
+function fittedFont(label, w, h){
+  const lines=String(label||'').split('\n');
+  let longest=0;
+  for(const l of lines) if(l.length>longest) longest=l.length;
+  const fill=Math.max(0.4, Math.min(0.95, TH('textFill')||0.8));
+  const byH = (h*fill)/(lines.length*1.3);
+  const byW = longest ? (w*fill)/(longest*0.6) : byH;
+  return Math.max(7, Math.min(48, Math.floor(Math.min(byH, byW))));
 }
 /* A stable identity for an edge so a bend the user set survives re-renders. */
 function edgeKey(d){
@@ -3115,8 +3146,16 @@ function sizeNodes(els){
     if(el.data.w!=null) continue;
     const k=el.data.kind;
     if(k==='group') continue;
-    if(el.data.overrideW){ el.data.w=el.data.overrideW; el.data.h=el.data.overrideH; continue; }
-    if(k==='device' && TH('boxW')){ el.data.w=TH('boxW'); el.data.h=TH('boxH')||48; continue; }
+    if(el.data.overrideW){
+      el.data.w=el.data.overrideW; el.data.h=el.data.overrideH;
+      if(k==='device') el.data.fs=fittedFont(el.data.label, el.data.w, el.data.h);
+      continue;
+    }
+    if(k==='device' && TH('boxW')){
+      el.data.w=TH('boxW'); el.data.h=TH('boxH')||48;
+      el.data.fs=fittedFont(el.data.label, el.data.w, el.data.h);
+      continue;
+    }
     const s = k==='subnet' ? labelSize(el.data.label,11,8,6,24)
             : k==='wan'    ? labelSize(el.data.label,12,34,28,96)
             :                labelSize(el.data.label,13,30,26,96);
@@ -4217,6 +4256,7 @@ const THEME_DEFAULT={
   devBg:'#1b222a', devText:'#e8edf2',
   roleRouter:'#3a5273', roleSwitch:'#3f7a63', roleFirewall:'#8a6a2e',
   zoneBg:'#1e262f', zoneText:'#8a9bad', zoneBorder:'#3f8f63', zoneGrid:false,
+  textFill:0.8,                                // how much of a box its label fills
   linkIntra:'#4a6076', linkInter:'#c98a3e',   // within a site, and between sites
   boxBorderW:2, boxW:null, boxH:null,          // null = auto-sized from the label
   devFontSize:13, devBold:false, zoneFontSize:12, zoneBold:false,
@@ -4231,6 +4271,7 @@ const THEME_VISIO={
   devBg:'#ffffff', devText:'#14304a',
   roleRouter:'#1f7a4d', roleSwitch:'#1f7a4d', roleFirewall:'#1f7a4d',
   zoneBg:'#ffffff', zoneText:'#4a6b80', zoneBorder:'#1f7a4d', zoneGrid:false,
+  textFill:0.8,
   linkIntra:'#8496a6', linkInter:'#c07a22',
   boxBorderW:3, boxW:null, boxH:null,
   devFontSize:13, devBold:false, zoneFontSize:12, zoneBold:false,
@@ -4412,7 +4453,7 @@ function graphStyle(){
         /* the name sits in a solid tab on the bottom edge of the box */
         'label':'data(label)','color':'data(tabfg)','font-family':'data(ff)',
         'font-size':'data(fs)','font-weight':'data(fw)',
-        'text-valign':'bottom','text-halign':'center','text-margin-y':-2,
+        'text-valign':'bottom','text-halign':'left','text-margin-y':-8,'text-margin-x':10,
         'text-background-color':'data(bd)','text-background-opacity':1,
         'text-background-shape':'roundrectangle','text-background-padding':7,
         'z-index':0}},
@@ -4615,7 +4656,7 @@ function render(){
     const cyp = cytoscape({
       container: document.getElementById('cy'),
       elements: els, motionBlur:false,
-      wheelSensitivity:0.15, minZoom:0.05, maxZoom:4,
+      wheelSensitivity:0.06, minZoom:0.05, maxZoom:4,
       style: graphStyle(),
       layout: anchoredPath
         ? {name:'preset', padding:44, fit: !vpP}
@@ -4785,7 +4826,7 @@ function render(){
     const cyl = cytoscape({
       container: document.getElementById('cy'),
       elements: els, motionBlur:false,
-      wheelSensitivity:0.15, minZoom:0.05, maxZoom:4,
+      wheelSensitivity:0.06, minZoom:0.05, maxZoom:4,
       style: graphStyle(),
       layout:{name:'preset', padding:60, fit: !(anchored && vpL)}
     });
@@ -5084,7 +5125,7 @@ function render(){
   const cy = cytoscape({
     container: document.getElementById('cy'),
     elements: els,
-    wheelSensitivity:0.15, minZoom:0.05, maxZoom:4,
+    wheelSensitivity:0.06, minZoom:0.05, maxZoom:4,
     motionBlur:false,
     textureOnViewport:bigGraph,
     hideEdgesOnViewport:bigGraph,
@@ -7693,6 +7734,25 @@ function zoomBy(factor){
   const z=Math.max(0.05, Math.min(4, cy.zoom()*factor));
   cy.zoom({level:z, renderedPosition:{x:cy.width()/2, y:cy.height()/2}});
 }
+/* Full screen hides the panels and leaves the view row floating over the map,
+   so the diagram gets the whole window for a screenshot or a walkthrough. */
+function setZen(on){
+  STATE.zen=!!on;
+  document.body.classList.toggle('zen', STATE.zen);
+  const b=document.getElementById('zen');
+  if(b) b.classList.toggle('btn-go', STATE.zen);
+  setTimeout(()=>{ if(STATE.cy){ STATE.cy.resize(); autoRouteEdges(STATE.cy,'ortho'); } }, 60);
+  autosave();
+}
+document.getElementById('zen').onclick=()=>setZen(!STATE.zen);
+window.addEventListener('keydown',(ev)=>{
+  const tag=(ev.target&&ev.target.tagName)||'';
+  if(/INPUT|TEXTAREA|SELECT/.test(tag)) return;
+  if(ev.key==='Escape' && STATE.zen){ ev.preventDefault(); setZen(false); }
+  else if((ev.key==='f'||ev.key==='F') && !ev.ctrlKey && !ev.metaKey && !ev.altKey){
+    ev.preventDefault(); setZen(!STATE.zen);
+  }
+});
 document.getElementById('zoom-in').onclick=()=>zoomBy(1.25);
 document.getElementById('zoom-out').onclick=()=>zoomBy(1/1.25);
 document.getElementById('exp-report').onclick=()=>exportChangeReport();
@@ -8409,6 +8469,7 @@ function projectObject(){
     linkColors: STATE.linkColors||{},
     linksLocked: !!STATE.linksLocked,
     flowText: STATE.flowText||'',
+    zen: !!STATE.zen,
     bends:STATE.bends||{},
     lineWidths:STATE.lineWidths||{},
     scopeIgnoreFw: !!STATE.scopeIgnoreFw,
@@ -8492,6 +8553,7 @@ function loadProject(obj){
   STATE.linkColors = obj.linkColors || {};
   STATE.linksLocked = !!obj.linksLocked;
   STATE.flowText = obj.flowText||'';
+  if(obj.zen) setTimeout(()=>setZen(true),0);
   STATE.flowResults=[];
   STATE.parked = Array.isArray(obj.parked) ? obj.parked : [];
   STATE.treePick = new Set();
@@ -8766,6 +8828,13 @@ function initTheme(){
     gs.value=STATE.theme.gridStyle||'dots';
     gs.onchange=()=>{ STATE.theme.gridStyle=gs.value; applyTheme(); autosave(); };
   }
+  const tf=document.getElementById('th-textFill'), tfv=document.getElementById('th-textFill-v');
+  if(tf){
+    const show=()=>{ if(tfv) tfv.textContent=Math.round((STATE.theme.textFill||0.8)*100)+'%'; };
+    tf.value=STATE.theme.textFill||0.8; show();
+    tf.oninput=()=>{ STATE.theme.textFill=parseFloat(tf.value)||0.8; show(); applyTheme(); };
+    tf.onchange=()=>{ applyTheme(); autosave(); };
+  }
   const lwEl=document.getElementById('th-linkWidth');
   if(lwEl){
     lwEl.value=STATE.theme.linkWidth||1.4;
@@ -8812,6 +8881,7 @@ function initTheme(){
     if(bw) bw.value=STATE.theme.boxBorderW||2;
     if(gs) gs.value=STATE.theme.gridStyle||'dots';
     if(lwEl) lwEl.value=STATE.theme.linkWidth||1.4;
+    if(tf){ tf.value=STATE.theme.textFill||0.8; if(tfv) tfv.textContent=Math.round((STATE.theme.textFill||0.8)*100)+'%'; }
     if(bwW) bwW.value=STATE.theme.boxW||'';
     if(bwH) bwH.value=STATE.theme.boxH||'';
     if(dff) fontOpts(dff, STATE.theme.devFont);
