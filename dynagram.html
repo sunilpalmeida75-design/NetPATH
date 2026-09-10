@@ -487,6 +487,15 @@ table.fib td:first-child{color:var(--ink)}
   -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:var(--cyan)}
 .qmark-tag{font-family:var(--mono);font-style:italic;font-size:9.5px;letter-spacing:.13em;
   text-transform:uppercase;color:var(--ink-faint);margin-top:3px;white-space:nowrap}
+
+.flowbar{display:none;flex:none;padding:10px 12px;border-bottom:1px solid var(--rule);background:var(--panel-2);gap:8px}
+.flowbar.on{display:flex;flex-direction:column}
+.flowbar textarea{width:100%;height:74px;resize:vertical;background:var(--bg);border:1px solid var(--rule);
+  border-radius:6px;color:var(--ink);padding:7px 9px;font:12.5px var(--mono);outline:0}
+.flowbar textarea:focus{border-color:var(--cyan)}
+.flowbtns{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.flowsum{margin-left:auto;font:12.5px var(--mono);color:var(--ink-dim)}
+.flowsum b.ok{color:var(--green)} .flowsum b.bad{color:var(--red)}
 </style>
 </head>
 <body>
@@ -681,7 +690,14 @@ table.fib td:first-child{color:var(--ink)}
       <button class="btn" id="rot-l" title="Rotate left">⟲</button>
       <button class="btn" id="rot-r" title="Rotate right">⟳</button>
       <button class="btn" id="viewback" style="display:none">← Back</button>
+      <button class="btn" id="zoom-out" title="Zoom out">−</button>
+      <button class="btn" id="zoom-in" title="Zoom in">+</button>
+      <button class="btn" id="undo" title="Undo layout change">↶</button>
+      <button class="btn" id="redo" title="Redo layout change">↷</button>
       <button class="btn" id="fit">Fit</button>
+      <button class="btn" id="exp-svg" title="Vector, opens in Visio">SVG</button>
+      <button class="btn" id="exp-png" title="Picture at 2×">PNG</button>
+      <button class="btn" id="exp-report" title="Markdown change report">Report</button>
     </div>
     <div id="cy"></div>
     <div class="empty-stage" id="stage-empty">
@@ -740,12 +756,24 @@ table.fib td:first-child{color:var(--ink)}
       <button class="gtab on" data-gtab="ifaces">Interfaces<i id="gn-ifaces"></i></button>
       <button class="gtab" data-gtab="routes">Routes<i id="gn-routes"></i></button>
       <button class="gtab" data-gtab="links">Links<i id="gn-links"></i></button>
+      <button class="gtab" data-gtab="flows">Flows<i id="gn-flows"></i></button>
       <button class="gtab" data-gtab="warnings">Warnings<i id="gn-warnings"></i></button>
       <button class="gtab" data-gtab="readiness">Readiness<i id="gn-readiness"></i></button>
       <div class="gright">
         <input id="gfilter" placeholder="Filter this table…" spellcheck="false">
         <button class="btn tiny" id="gcsv">Export CSV</button>
         <button class="btn tiny" id="tog-b" title="Minimize">▾</button>
+      </div>
+    </div>
+    <div class="flowbar" id="flowbar">
+      <textarea id="flow-list" spellcheck="false" placeholder="One flow per line:&#10;10.65.19.26 -> 10.64.140.3&#10;10.1.1.5, 8.8.8.8, DNS from the server VLAN&#10;10.9.0.5 10.8.0.9  # comment after a hash"></textarea>
+      <div class="flowbtns">
+        <button class="btn btn-go" id="flow-run">Run all</button>
+        <label class="toggle"><input type="checkbox" id="flow-compare" checked> Compare before and after</label>
+        <button class="btn tiny" id="flow-file-btn">Load from file</button>
+        <input type="file" id="flow-file" class="hidden" accept=".txt,.csv,.log">
+        <button class="btn tiny" id="flow-clear">Clear</button>
+        <span class="flowsum" id="flow-sum"></span>
       </div>
     </div>
     <div class="gbody" id="gbody"></div>
@@ -880,8 +908,9 @@ function baseName(s){
 
 function parseCisco(text, fname){
   const dev = newDevice('cisco', fname);
+  dev.acls={}; dev.nat=[];
   const lines = text.split(/\r?\n/);
-  let cur=null, ctx=null, lastVlans=[];
+  let cur=null, ctx=null, lastVlans=[], curAcl=null;
 
   lines.forEach((raw, idx) => {
     const lineNo = idx + 1;
@@ -890,7 +919,32 @@ function parseCisco(text, fname){
     if(!t || t[0]==='!' || t[0]==='#') return;
     const indented = /^\s/.test(line);
 
+    if(indented && ctx==='acl' && curAcl){
+      const ace=parseAceLine(t, lineNo);
+      if(ace){ curAcl.entries.push(ace); return; }
+      if(/^(remark|exit)\b/i.test(t)) return;
+    }
     if(!indented){
+      let am;
+      /* ip access-list extended NAME  — entries follow, indented */
+      if((am=t.match(/^ip\s+access-list\s+(?:extended|standard)\s+(\S+)/i))){
+        curAcl=dev.acls[am[1]]=dev.acls[am[1]]||{name:am[1], entries:[], line:lineNo};
+        cur=null; ctx='acl'; return;
+      }
+      /* access-list 101 permit ...  — the whole entry on one line */
+      if((am=t.match(/^access-list\s+(\d+)\s+(.*)$/i))){
+        const l=dev.acls[am[1]]=dev.acls[am[1]]||{name:am[1], entries:[], line:lineNo};
+        const ace=parseAceLine(am[2].trim(), lineNo);
+        if(ace) l.entries.push(ace);
+        curAcl=null; ctx=null; return;
+      }
+      if((am=t.match(/^ip\s+nat\s+inside\s+source\s+(?:static\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+)|list\s+(\S+)\s+(?:interface\s+(\S+)|pool\s+(\S+))(\s+overload)?)/i))){
+        dev.nat.push(am[1]
+          ? {kind:'static', inside:ip2int(am[1]), outside:ip2int(am[2]), line:lineNo, text:t}
+          : {kind:'dynamic', list:am[3], via:am[4]||am[5]||null, overload:!!am[6], line:lineNo, text:t});
+        curAcl=null; ctx=null; return;
+      }
+      curAcl=null;
       cur=null; ctx=null;
     }
 
@@ -933,6 +987,11 @@ function parseCisco(text, fname){
         cur.l2=true; cur.native=parseInt(m[1],10); dev.isSwitch=true; return;
       }
       if(/^switchport\s*$/i.test(t)){ cur.l2=true; dev.isSwitch=true; return; }
+      // which access list guards this interface, and in which direction
+      if((m=t.match(/^ip\s+access-group\s+(\S+)\s+(in|out)\b/i))){
+        cur.acl=cur.acl||{}; cur.acl[m[2].toLowerCase()]=m[1]; cur.aclLine=lineNo; return;
+      }
+      if((m=t.match(/^ip\s+nat\s+(inside|outside)\s*$/i))){ cur.natSide=m[1].toLowerCase(); return; }
       // a bundled member takes its switching config from the port-channel it
       // joins — CDP/LLDP still reports the physical port, not the bundle
       if((m=t.match(/^channel-group\s+(\d+)/i))){ cur.channelGroup=parseInt(m[1],10); return; }
@@ -1225,6 +1284,39 @@ function parsePanSet(text, fname){
     }
 
     // zones
+    /* set network virtual-router VR protocol bgp ... — same fields, flat form */
+    if(k[0]==='network' && k[1]==='virtual-router' && k[3]==='protocol' && k[4]==='bgp'){
+      const vrName=String(k[2]);
+      if(k[5]==='local-as' || k[5]==='router-id'){
+        dev.bgp=dev.bgp||{asn:'', routerId:null, neighbors:{}, networks:[], line:lineNo, vr:vrName};
+        if(k[5]==='local-as') dev.bgp.asn=String(k[6]);
+        else dev.bgp.routerId=String(k[6]);
+        continue;
+      }
+      if(k[5]==='peer-group' && k[7]==='peer' && k[8]){
+        dev.bgp=dev.bgp||{asn:'', routerId:null, neighbors:{}, networks:[], line:lineNo, vr:vrName};
+        const peerName=String(k[8]);
+        dev.bgp._byName=dev.bgp._byName||{};
+        const rec=dev.bgp._byName[peerName]=dev.bgp._byName[peerName]||{group:String(k[6]), line:lineNo};
+        if(k[9]==='peer-address' && k[10]==='ip') rec.ipStr=String(k[11]).split('/')[0];
+        if(k[9]==='peer-as') rec.remoteAs=String(k[10]);
+        if(k[9]==='local-address' && k[10]==='interface') rec.updateSource=String(k[11]);
+        if(k[9]==='enable') rec.shutdown=/^no$/i.test(String(k[10]));
+        if(rec.ipStr){
+          const n=ip2int(rec.ipStr);
+          if(n!==null) dev.bgp.neighbors[rec.ipStr]=Object.assign({ip:n}, rec);
+        }
+        continue;
+      }
+      if(k[5]==='peer-group' && k[7]==='type' && k[9]==='peer-as'){
+        // an AS set on the group applies to its peers
+        dev.bgp=dev.bgp||{asn:'', routerId:null, neighbors:{}, networks:[], line:lineNo, vr:vrName};
+        dev.bgp._groupAs=dev.bgp._groupAs||{};
+        dev.bgp._groupAs[String(k[6])]=String(k[10]);
+        continue;
+      }
+      continue;
+    }
     if(k[0]==='zone' && k[2]==='network'){
       const zname=String(k[1]);
       const members = flat(k[4]!==undefined && Array.isArray(k[4]) ? k[4] : k.slice(4));
@@ -1573,6 +1665,36 @@ function parsePanCurly(text, fname){
         for(const m of pEntries(ifs)) iface(m.name, vr.node.line).vrf=vr.name;
       }
       if(pKid(vr.node,'protocol','ospf') || pKid(vr.node,'protocol','bgp')) dev.dynamic=true;
+      /* A firewall's BGP lives under its virtual router. Read it into the same
+         shape the Cisco side produces, so the neighbour table, best-path panel
+         and config checks all work on a firewall too. */
+      const bg=pKid(vr.node,'protocol','bgp');
+      if(bg && !/^no$/i.test(pVal(bg,'enable')||'yes')){
+        const asn=pVal(bg,'local-as')||pVal(bg,'as-number')||'';
+        if(asn){
+          dev.bgp=dev.bgp||{asn:String(asn), routerId:pVal(bg,'router-id')||null,
+                            neighbors:{}, networks:[], line:bg.line, vr:vr.name};
+          for(const grp of pEntries(pKid(bg,'peer-group'))){
+            const grpAs=pVal(pKid(grp.node,'type','ebgp')||pKid(grp.node,'type','ibgp')||grp.node,'peer-as');
+            for(const pr of pEntries(pKid(grp.node,'peer'))){
+              const ip=pVal(pr.node,'peer-address')||pVal(pKid(pr.node,'peer-address'),'ip')||
+                       (pKid(pr.node,'peer-address') ? pKid(pr.node,'peer-address').vals[0] : null);
+              if(!ip) continue;
+              const bare=String(ip).split('/')[0];
+              const n=ip2int(bare);
+              if(n===null) continue;
+              dev.bgp.neighbors[bare]={
+                ip:n, ipStr:bare,
+                remoteAs: pVal(pr.node,'peer-as') || grpAs || null,
+                updateSource: pVal(pKid(pr.node,'local-address'),'interface') ||
+                              (pKid(pr.node,'local-address') ? pVal(pKid(pr.node,'local-address'),'ip') : null),
+                shutdown: /^no$/i.test(pVal(pr.node,'enable')||'yes'),
+                group: grp.name, line: pr.node.line
+              };
+            }
+          }
+        }
+      }
       const srRoot = pKid(vr.node,'routing-table','ip','static-route') || pKid(vr.node,'static-route');
       for(const sr of pEntries(srRoot)){
         const c=parseCidr(pVal(sr.node,'destination')||'');
@@ -1632,6 +1754,75 @@ function parsePanCurly(text, fname){
 
 function isFirewall(d){ return !!d && d.vendor==='palo-alto'; }
 
+/* An access-list entry, reduced to what a trace needs: does this packet match,
+   and if so is it permitted. Ports and protocols are kept so a rule that only
+   covers tcp/443 does not silently block everything. */
+function parseAceLine(t, lineNo){
+  let m=t.match(/^(?:permit|deny)\b/i) ? t : null;
+  if(!m) return null;
+  const act = /^permit/i.test(t) ? 'permit' : 'deny';
+  let rest = t.replace(/^(permit|deny)\s+/i,'');
+  let proto='ip';
+  const pm=rest.match(/^(ip|tcp|udp|icmp|esp|ahp|gre|eigrp|ospf|pim|\d+)\s+/i);
+  if(pm){ proto=pm[1].toLowerCase(); rest=rest.slice(pm[0].length); }
+  // read one address spec: any | host X | X wildcard | X/len
+  const readAddr=()=>{
+    let mm;
+    if((mm=rest.match(/^any\d?\s*/i))){ rest=rest.slice(mm[0].length); return {any:true}; }
+    if((mm=rest.match(/^host\s+(\d+\.\d+\.\d+\.\d+)\s*/i))){
+      rest=rest.slice(mm[0].length); return {net:ip2int(mm[1]), len:32}; }
+    if((mm=rest.match(/^(\d+\.\d+\.\d+\.\d+)\/(\d+)\s*/))){
+      rest=rest.slice(mm[0].length); return {net:netOf(ip2int(mm[1]),+mm[2]), len:+mm[2]}; }
+    if((mm=rest.match(/^(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+)\s*/))){
+      rest=rest.slice(mm[0].length);
+      const wild=ip2int(mm[2]);
+      // a wildcard mask is the inverse of a subnet mask
+      const len=32-Math.round(Math.log2((wild>>>0)+1));
+      const ok=isFinite(len)&&len>=0&&len<=32;
+      return ok ? {net:netOf(ip2int(mm[1]),len), len} : {net:ip2int(mm[1]), len:32};
+    }
+    return null;
+  };
+  const readPorts=()=>{
+    let mm;
+    if((mm=rest.match(/^(eq|gt|lt|neq)\s+([\w-]+(?:\s+[\w-]+)*?)\s*(?=$|established|log|precedence|dscp|any|host|\d+\.)/i))){
+      rest=rest.slice(mm[0].length);
+      return {op:mm[1].toLowerCase(), vals:mm[2].split(/\s+/)};
+    }
+    if((mm=rest.match(/^range\s+(\S+)\s+(\S+)\s*/i))){
+      rest=rest.slice(mm[0].length); return {op:'range', vals:[mm[1],mm[2]]};
+    }
+    return null;
+  };
+  const src=readAddr(); if(!src) return null;
+  const sPorts=readPorts();
+  const dst=readAddr();
+  const dPorts=dst?readPorts():null;
+  return {action:act, proto, src, dst:dst||{any:true}, sPorts, dPorts, line:lineNo, text:t};
+}
+function aceMatches(ace, sIp, dIp){
+  const inSpec=(spec, ip)=> !spec ? true : spec.any ? true : inNet(ip, spec.net, spec.len);
+  return inSpec(ace.src, sIp) && inSpec(ace.dst, dIp);
+}
+/* Walk an access list in order and return the first entry that matches.
+   Nothing matched means the implicit deny at the end. */
+function evalAcl(dev, name, sIp, dIp){
+  const acl = dev.acls && dev.acls[name];
+  if(!acl) return null;                       // list not in the config we were given
+  for(const ace of acl.entries){
+    if(ace.proto!=='ip' && ace.proto!=='tcp' && ace.proto!=='udp' && ace.proto!=='icmp'){
+      // protocol-specific rule we cannot judge from addresses alone
+      if(!aceMatches(ace,sIp,dIp)) continue;
+      return {action:ace.action, ace, uncertain:true, name};
+    }
+    if(aceMatches(ace, sIp, dIp)){
+      const portScoped = !!(ace.sPorts || ace.dPorts);
+      return {action:ace.action, ace, uncertain:portScoped, name};
+    }
+  }
+  return {action:'deny', ace:null, implicit:true, name};
+}
+
 function newDevice(vendor, fname){
   return {
     id:'d'+(++devSeq), vendor, file:fname||'pasted', name:null, rawText:'', originalText:null,
@@ -1645,10 +1836,23 @@ function newDevice(vendor, fname){
 
 function parseConfig(text, fname){
   const v = detectVendor(text);
+  const finish=(dev)=>{
+    /* An AS set on a peer-group applies to its peers, and the two PAN config
+       formats state it in different places, so resolve it once here. */
+    if(dev && dev.bgp && dev.bgp._groupAs){
+      for(const ip in dev.bgp.neighbors){
+        const nb=dev.bgp.neighbors[ip];
+        if(!nb.remoteAs && nb.group && dev.bgp._groupAs[nb.group]) nb.remoteAs=dev.bgp._groupAs[nb.group];
+      }
+    }
+    if(dev && dev.bgp){ delete dev.bgp._groupAs; delete dev.bgp._byName; }
+    return dev;
+  };
   const d = v==='pan-xml'   ? parsePanXml(text, fname)
           : v==='pan-curly' ? parsePanCurly(text, fname)
           : v==='pan-set'   ? parsePanSet(text, fname)
           : parseCisco(text, fname);
+  finish(d);
   d.rawText = text;
   return d;
 }
@@ -2311,9 +2515,48 @@ function trace(model, srcStr, dstStr, startId, opts){
     const pol = (cur.vendor==='palo-alto' && !bypass)
       ? evalPolicy(cur, inIf?inIf.zone:null, outIf?outIf.zone:null, src, dst) : null;
 
-    const hop={dev:cur, inIf, outIf, route, pol, nextHop:route.nextHop};
+    /* Cisco access lists: inbound on the interface the packet arrived on,
+       outbound on the one it leaves by. Both are checked, in that order. */
+    let acl=null;
+    if(cur.vendor!=='palo-alto' && !bypass){
+      if(inIf && inIf.acl && inIf.acl.in){
+        const r=evalAcl(cur, inIf.acl.in, src, dst);
+        if(r) acl={dir:'in', iface:inIf.name, ...r};
+      }
+      if((!acl || acl.action==='permit') && outIf && outIf.acl && outIf.acl.out){
+        const r=evalAcl(cur, outIf.acl.out, src, dst);
+        if(r && (r.action==='deny' || !acl)) acl={dir:'out', iface:outIf.name, ...r};
+      }
+    }
+    /* Static NAT rewrites the address as it crosses, so the rest of the path
+       is traced against the translated one. */
+    let nat=null;
+    if(cur.nat && cur.nat.length && inIf && outIf && !bypass){
+      const insideToOutside = inIf.natSide==='inside' && outIf.natSide==='outside';
+      const outsideToInside = inIf.natSide==='outside' && outIf.natSide==='inside';
+      for(const n of cur.nat){
+        if(n.kind!=='static') continue;
+        if(insideToOutside && src===n.inside){ nat={from:src, to:n.outside, on:'source', rule:n}; src=n.outside; break; }
+        if(outsideToInside && dst===n.outside){ nat={from:dst, to:n.inside, on:'destination', rule:n}; dst=n.inside; break; }
+      }
+    }
+
+    const hop={dev:cur, inIf, outIf, route, pol, acl, nat, nextHop:route.nextHop};
     if(bypass && cur.vendor==='palo-alto') hop.policyBypassed=true;
     hops.push(hop);
+
+    if(acl && acl.action==='deny'){
+      const how = acl.implicit
+        ? 'has no matching entry in '+acl.name+' on '+acl.iface+' '+acl.dir+
+          ', so the implicit deny at the end of the list drops it'
+        : 'matches '+acl.name+' on '+acl.iface+' '+acl.dir+': '+acl.ace.text;
+      verdict={ok:false, title:'Blocked by an access list',
+               detail:cur.name+' '+how+'.'};
+      pin={deviceId:cur.id, deviceName:cur.name,
+           line:(acl.ace ? acl.ace.line : (inIf&&inIf.aclLine)||null),
+           detail:'Access list '+acl.name+' on '+cur.name+' '+how+'.'};
+      break;
+    }
 
     if(pol && pol.action && /deny|drop|reset/i.test(pol.action)){
       verdict={ok:false, title:'Blocked by policy',
@@ -3584,6 +3827,7 @@ function openLinkMenu(cy, edge, clientX, clientY, at){
     '<button data-a="reset">Reset this link</button>';
   document.body.appendChild(m);
   const step=90;
+  pushUndo();
   const done=()=>{ closeLinkMenu(); autoRouteEdges(cy,'ortho'); autosave(); };
   m.querySelectorAll('[data-a]').forEach(b=>b.onclick=()=>{
     const a=b.dataset.a;
@@ -3805,6 +4049,23 @@ function gridRows(tab){
     }
     return {cols:['Device A','Port','Device B','Port','Subnet','Type','VRF'], rows};
   }
+  if(tab==='flows'){
+    const rows=(STATE.flowResults||[]).map(r=>{
+      if(r.bad) return {cells:[
+        {html:'<span class="tg w">could not read</span>', sort:0},
+        {html:esc(r.bad), sort:r.bad},{html:'',sort:''},{html:'',sort:''},{html:'',sort:''}]};
+      const cls = r.verdict.cls==='ok' ? 'ok' : 'w';
+      const first=(r.after&&r.after.hops&&r.after.hops[0]) ? r.after.hops[0].dev : null;
+      return {dev:first?first.id:null, flow:r, cells:[
+        {html:'<span class="tg '+cls+'">'+esc(r.verdict.title)+'</span>', sort:r.verdict.title},
+        {html:esc(r.src), sort:ip2int(r.src)||0},
+        {html:esc(r.dst), sort:ip2int(r.dst)||0},
+        {html:esc(r.path), sort:r.path},
+        {html:esc(r.note||r.verdict.detail||''), sort:r.note||''}
+      ]};
+    });
+    return {cols:['Result','Source','Destination','Path','Note'], rows};
+  }
   if(tab==='warnings'){
     const rows=[];
     const vis=new Set(devs.map(d=>d.id));
@@ -3837,6 +4098,8 @@ function gridRows(tab){
 function renderGrid(){
   const body=document.getElementById('gbody'); if(!body) return;
   document.querySelectorAll('.gtab').forEach(b=>b.classList.toggle('on', b.dataset.gtab===STATE.gtab));
+  const fb=document.getElementById('flowbar');
+  if(fb) fb.classList.toggle('on', STATE.gtab==='flows');
   // counts on every tab
   for(const t of ['ifaces','routes','links','warnings','readiness']){
     const el=document.getElementById('gn-'+t); if(el) el.textContent=gridRows(t).rows.length;
@@ -3853,9 +4116,65 @@ function renderGrid(){
   body.querySelectorAll('th').forEach(th=>th.onclick=()=>{ const c=+th.dataset.col; const cur=STATE.gsort[STATE.gtab]; STATE.gsort[STATE.gtab]={col:c, dir:cur&&cur.col===c?-cur.dir:1}; renderGrid(); });
   body.querySelectorAll('tr[data-ri]').forEach(tr=>tr.onclick=(ev)=>{
     const r=rows[+tr.dataset.ri];
+    if(r.flow && r.flow.after){
+      /* Put this flow into the trace boxes and show it, so a failing row is
+         one click from the full hop-by-hop explanation. */
+      document.getElementById('src').value=r.flow.src;
+      document.getElementById('dst').value=r.flow.dst;
+      STATE.lastTrace=r.flow.after;
+      if(r.flow.before){ STATE.lastBefore=r.flow.before; }
+      openRight(); showTrace(r.flow.after); render();
+      return;
+    }
     if(r.pair){ openLink(r.pair[0], r.pair[1]); return; }
     const d=STATE.devices.find(x=>x.id===r.dev); if(d){ openRight(); showDevice(d); renderDevTree(); renderGrid(); }
   });
+}
+function runFlowsFromBox(){
+  const box=document.getElementById('flow-list');
+  const list=parseFlowList(box?box.value:'');
+  if(!list.length){ STATE.flowResults=[]; renderGrid(); updateFlowSummary(); return; }
+  const cmp=(document.getElementById('flow-compare')||{}).checked;
+  const noPolicy=(document.getElementById('opt-nopolicy')||{}).checked;
+  STATE.flowResults=runFlows(list, {compare:cmp && STATE.devices.some(d=>d.originalText!=null), noPolicy});
+  STATE.gtab='flows';
+  renderGrid(); updateFlowSummary(); autosave();
+}
+function updateFlowSummary(){
+  const el=document.getElementById('flow-sum');
+  if(!el) return;
+  const res=STATE.flowResults||[];
+  if(!res.length){ el.textContent=''; return; }
+  const s=flowSummary(res);
+  el.innerHTML='<b class="ok">'+s.ok+' ok</b> \u00b7 <b class="bad">'+s.bad+' failing</b>'+
+    (s.regressions?' \u00b7 '+s.regressions+' regression'+(s.regressions===1?'':'s'):'')+
+    (s.fixed?' \u00b7 '+s.fixed+' fixed':'')+
+    (s.invalid?' \u00b7 '+s.invalid+' unreadable':'');
+}
+function initFlows(){
+  const run=document.getElementById('flow-run');
+  if(run) run.onclick=runFlowsFromBox;
+  const clr=document.getElementById('flow-clear');
+  if(clr) clr.onclick=()=>{
+    const b=document.getElementById('flow-list'); if(b) b.value='';
+    STATE.flowResults=[]; renderGrid(); updateFlowSummary(); autosave();
+  };
+  const fb=document.getElementById('flow-file-btn'), fi=document.getElementById('flow-file');
+  if(fb && fi){
+    fb.onclick=()=>fi.click();
+    fi.onchange=function(){
+      const f=this.files[0]; if(!f) return;
+      const rd=new FileReader();
+      rd.onload=()=>{ const b=document.getElementById('flow-list'); if(b) b.value=rd.result; runFlowsFromBox(); };
+      rd.readAsText(f); this.value='';
+    };
+  }
+  const box=document.getElementById('flow-list');
+  if(box){
+    if(STATE.flowText) box.value=STATE.flowText;
+    box.oninput=()=>{ STATE.flowText=box.value; };
+    box.onkeydown=(ev)=>{ if((ev.ctrlKey||ev.metaKey) && ev.key==='Enter') runFlowsFromBox(); };
+  }
 }
 function initGrid(){
   document.querySelectorAll('.gtab').forEach(b=>b.onclick=()=>{ STATE.gtab=b.dataset.gtab; renderGrid(); });
@@ -4296,6 +4615,7 @@ function render(){
     const cyp = cytoscape({
       container: document.getElementById('cy'),
       elements: els, motionBlur:false,
+      wheelSensitivity:0.15, minZoom:0.05, maxZoom:4,
       style: graphStyle(),
       layout: anchoredPath
         ? {name:'preset', padding:44, fit: !vpP}
@@ -4465,6 +4785,7 @@ function render(){
     const cyl = cytoscape({
       container: document.getElementById('cy'),
       elements: els, motionBlur:false,
+      wheelSensitivity:0.15, minZoom:0.05, maxZoom:4,
       style: graphStyle(),
       layout:{name:'preset', padding:60, fit: !(anchored && vpL)}
     });
@@ -4763,6 +5084,7 @@ function render(){
   const cy = cytoscape({
     container: document.getElementById('cy'),
     elements: els,
+    wheelSensitivity:0.15, minZoom:0.05, maxZoom:4,
     motionBlur:false,
     textureOnViewport:bigGraph,
     hideEdgesOnViewport:bigGraph,
@@ -4841,6 +5163,7 @@ function render(){
     };
     if(near(edge.source(),'spx','spy') || near(edge.target(),'tpx','tpy')) return;
 
+    pushUndo();
     STATE.waypoints = STATE.waypoints || {};
     const wps = STATE.waypoints[key] = (STATE.waypoints[key]||[]).slice();
     // move the closest existing turn, or add one where they grabbed
@@ -4888,6 +5211,7 @@ function render(){
     const hit = isSource?a:b;
     if(hit.d > 26) return;                       // not near a dot: leave it to the bend drag
     evt.preventDefault && evt.preventDefault();
+    pushUndo();
     cy.userPanningEnabled(false); cy.boxSelectionEnabled(false);
     STATE.anchors = STATE.anchors || {};
     const move=(ev)=>{
@@ -4928,6 +5252,7 @@ function render(){
     const rp=evt.renderedPosition||evt.position;
     const bb=node.renderedBoundingBox();
     if(Math.abs(rp.x-bb.x2)>12 || Math.abs(rp.y-bb.y2)>12) return;   // not the corner — let it drag
+    pushUndo();
     node.ungrabify();
     const startW=node.data('w')||bb.w, startH=node.data('h')||bb.h;
     const z=cy.zoom();
@@ -4946,6 +5271,7 @@ function render(){
     cy.on('mousemove', move); cy.on('mouseup', up); cy.on('tapend', up);
   });
   const writeNS = STATE.posWriteNS;
+  cy.on('grab','node', ()=>pushUndo());        // snapshot before the move, not after
   cy.on('dragfree','node', ()=>{ capturePositions(cy, writeNS); autosave(); });
   /* A layout does not finish synchronously. Capturing straight away would save
      half-settled coordinates and restore them next time as if the user had
@@ -5743,6 +6069,75 @@ function baselineDevices(){
     return b;
   });
 }
+/* ============================================================
+   Flows — run a list of source/destination pairs in one go
+
+   A single trace answers one question. A migration needs the same set of
+   questions asked again after every change, so this takes a pasted list, runs
+   each pair, and reports them together. Run it against both the original and
+   the candidate configs and each flow gets the same verdict language the
+   single-trace comparison already uses: Unchanged, Regression, Fixed, and so
+   on — which turns the list into a pass/fail sheet for a cutover.
+   ============================================================ */
+STATE.flows = STATE.flows || [];
+
+/* Accept the shapes people actually paste: "a -> b", "a b", "a,b", with an
+   optional trailing label after a second comma or a #. */
+function parseFlowList(text){
+  const out=[];
+  for(const raw of String(text||'').split(/\r?\n/)){
+    let line=raw.trim();
+    if(!line || line[0]==='#' || line[0]===';') continue;
+    let note='';
+    const hash=line.indexOf('#');
+    if(hash>0){ note=line.slice(hash+1).trim(); line=line.slice(0,hash).trim(); }
+    const parts=line.split(/\s*(?:->|=>|,|\t|\s+)\s*/).filter(Boolean);
+    if(parts.length<2){ out.push({bad:raw.trim()}); continue; }
+    const src=parts[0], dst=parts[1];
+    if(!note && parts.length>2) note=parts.slice(2).join(' ');
+    if(ip2int(src)===null || ip2int(dst)===null){ out.push({bad:raw.trim()}); continue; }
+    out.push({src, dst, note});
+  }
+  return out;
+}
+
+/* Run every flow. With both models given, each result carries the before,
+   the after, and the comparison between them. */
+function runFlows(list, opts){
+  const after=STATE.model;
+  const before = (opts&&opts.compare) ? baselineModel() : null;
+  const out=[];
+  for(const f of list){
+    if(f.bad){ out.push({bad:f.bad}); continue; }
+    const a=trace(after, f.src, f.dst, '', opts);
+    let rec={src:f.src, dst:f.dst, note:f.note||'', after:a};
+    if(before){
+      const b=trace(before, f.src, f.dst, '', opts);
+      const cmp=comparePaths(b,a);
+      rec.before=b; rec.cmp=cmp; rec.verdict=compareVerdict(b,a,cmp);
+    } else {
+      rec.verdict = a.verdict && a.verdict.ok
+        ? {cls:'ok',  title:a.verdict.title, detail:a.verdict.detail||''}
+        : {cls:'bad', title:(a.verdict&&a.verdict.title)||'Failed', detail:(a.verdict&&a.verdict.detail)||''};
+    }
+    rec.path=((a.hops||[]).map(h=>h.dev.name).join(' \u2192 '))||'\u2014';
+    out.push(rec);
+  }
+  return out;
+}
+function flowSummary(results){
+  const s={total:0, ok:0, bad:0, bad_list:[], regressions:0, fixed:0, unchanged:0, invalid:0};
+  for(const r of results){
+    if(r.bad){ s.invalid++; continue; }
+    s.total++;
+    if(r.verdict.cls==='ok') s.ok++; else { s.bad++; s.bad_list.push(r); }
+    if(/^Regression/.test(r.verdict.title)) s.regressions++;
+    if(/^Fixed/.test(r.verdict.title)) s.fixed++;
+    if(/^Unchanged/.test(r.verdict.title)) s.unchanged++;
+  }
+  return s;
+}
+
 function baselineModel(){
   return buildModel(baselineDevices(), {
     igp: document.getElementById('opt-igp').checked,
@@ -7290,6 +7685,28 @@ document.getElementById('prov-name').addEventListener('keydown',e=>{
   if(e.key==='Enter') document.getElementById('prov-add').click();
 });
 document.getElementById('opt-igp').onchange=()=>{ STATE.lastTrace=null; rebuild(); };
+/* A fixed step from the centre of the view, for crossing a big range quickly
+   without the wheel. */
+function zoomBy(factor){
+  const cy=STATE.cy;
+  if(!cy) return;
+  const z=Math.max(0.05, Math.min(4, cy.zoom()*factor));
+  cy.zoom({level:z, renderedPosition:{x:cy.width()/2, y:cy.height()/2}});
+}
+document.getElementById('zoom-in').onclick=()=>zoomBy(1.25);
+document.getElementById('zoom-out').onclick=()=>zoomBy(1/1.25);
+document.getElementById('exp-report').onclick=()=>exportChangeReport();
+document.getElementById('exp-svg').onclick=()=>exportSvg();
+document.getElementById('exp-png').onclick=()=>exportPng(2);
+document.getElementById('undo').onclick=undoLayout;
+document.getElementById('redo').onclick=redoLayout;
+window.addEventListener('keydown', (ev)=>{
+  const tag=(ev.target&&ev.target.tagName)||'';
+  if(/INPUT|TEXTAREA|SELECT/.test(tag)) return;      // never steal typing
+  if(!(ev.ctrlKey||ev.metaKey)) return;
+  if(ev.key==='z' || ev.key==='Z'){ ev.preventDefault(); ev.shiftKey ? redoLayout() : undoLayout(); }
+  if(ev.key==='y' || ev.key==='Y'){ ev.preventDefault(); redoLayout(); }
+});
 document.getElementById('fit').onclick=()=>{
   if(!STATE.cy) return;
   /* Fit returns to wherever the diagram was when it was last saved, so you
@@ -7596,6 +8013,372 @@ function savedPos(key, ns){
   const P=STATE.positions||{};
   return P[(ns||STATE.posNS||'simple|')+key] || P['simple|'+key] || P[key] || null;
 }
+
+/* ============================================================
+   Undo for the layout
+
+   Arranging a diagram is real work and one stray drag can undo a lot of it.
+   Every change that moves something — a drag, a bend, an endpoint, a resize —
+   pushes the previous state onto a stack first. Ctrl+Z walks back, Ctrl+Shift+Z
+   forward. Only layout is covered: configs and settings are not touched, so
+   undo can never quietly change what the diagram means.
+   ============================================================ */
+STATE.undo = STATE.undo || {stack:[], at:-1, busy:false};
+const UNDO_MAX=60;
+
+function layoutSnapshot(){
+  return JSON.stringify({
+    positions: STATE.positions||{},
+    bends: STATE.bends||{},
+    anchors: STATE.anchors||{},
+    waypoints: STATE.waypoints||{},
+    freeLinks: STATE.freeLinks||{},
+    lineWidths: STATE.lineWidths||{},
+    boxes: (STATE.devices||[]).map(d=>({n:d.name, w:d.boxW||null, h:d.boxH||null})),
+    pads: (STATE.groups||[]).map(g=>({id:g.id, p:g.padding||null}))
+  });
+}
+function applySnapshot(json){
+  let o; try{ o=JSON.parse(json); }catch(e){ return; }
+  STATE.positions=o.positions||{};
+  STATE.bends=o.bends||{};
+  STATE.anchors=o.anchors||{};
+  STATE.waypoints=o.waypoints||{};
+  STATE.freeLinks=o.freeLinks||{};
+  STATE.lineWidths=o.lineWidths||{};
+  const byName={}; for(const b of (o.boxes||[])) byName[b.n]=b;
+  for(const d of STATE.devices){
+    const b=byName[d.name];
+    if(b){ if(b.w) d.boxW=b.w; else delete d.boxW; if(b.h) d.boxH=b.h; else delete d.boxH; }
+  }
+  const byId={}; for(const g of (o.pads||[])) byId[g.id]=g.p;
+  for(const g of (STATE.groups||[])) { if(byId[g.id]) g.padding=byId[g.id]; else delete g.padding; }
+  render();
+  updateUndoButtons();
+}
+/* Call before a change, not after: the stack holds the state to go back to. */
+function pushUndo(){
+  const u=STATE.undo;
+  if(u.busy) return;
+  const snap=layoutSnapshot();
+  if(u.stack[u.at]===snap) return;              // nothing actually moved
+  u.stack=u.stack.slice(0, u.at+1);
+  u.stack.push(snap);
+  if(u.stack.length>UNDO_MAX) u.stack.shift();
+  u.at=u.stack.length-1;
+  updateUndoButtons();
+}
+function undoLayout(){
+  const u=STATE.undo;
+  if(u.at<0) return;
+  /* If the live layout has moved on since the last snapshot, bank it first so
+     redo has somewhere to return to — and point at it, so stepping back lands
+     on the previous state rather than skipping one. */
+  if(u.at===u.stack.length-1){
+    const cur=layoutSnapshot();
+    if(u.stack[u.at]!==cur){ u.stack.push(cur); u.at=u.stack.length-1; }
+  }
+  if(u.at<=0) return;
+  u.busy=true; u.at--; applySnapshot(u.stack[u.at]); u.busy=false;
+  autosave();
+}
+function redoLayout(){
+  const u=STATE.undo;
+  if(u.at>=u.stack.length-1) return;
+  u.busy=true; u.at++; applySnapshot(u.stack[u.at]); u.busy=false;
+  autosave();
+}
+function updateUndoButtons(){
+  const u=STATE.undo;
+  const a=document.getElementById('undo'), b=document.getElementById('redo');
+  if(a){ a.disabled = u.at<=0; a.title='Undo layout change'+(u.at>0?' ('+u.at+')':''); }
+  if(b){ b.disabled = u.at>=u.stack.length-1; }
+}
+
+
+/* ============================================================
+   Export the diagram
+
+   PNG comes straight from the canvas. SVG is built by walking the same node
+   and edge geometry the renderer uses — worth the extra work because it drops
+   into Visio, scales for print, and stays editable. Both honour whatever is on
+   screen, so a filtered diagram exports filtered.
+   ============================================================ */
+function exportPng(scale){
+  const cy=STATE.cy;
+  if(!cy) return;
+  const uri=cy.png({full:true, scale:scale||2, bg:TH('canvasBg')});
+  downloadUri(uri, exportName('png'));
+}
+function exportName(ext){
+  const nm=(document.getElementById('proj-name').value||'').trim()
+    .replace(/[^\w .-]+/g,'').replace(/\s+/g,'-') || 'dynagram';
+  return nm+'-'+new Date().toISOString().slice(0,10)+'.'+ext;
+}
+function downloadUri(uri, name){
+  const a=document.createElement('a');
+  a.href=uri; a.download=name; a.click();
+}
+const xmlEsc=(t)=>String(t==null?'':t)
+  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+  .replace(/"/g,'&quot;').replace(/'/g,'&apos;');
+
+/* Rebuild the drawn polyline for an edge, exactly as autoRouteEdges laid it
+   out, so the exported picture matches the screen. */
+function edgePolyline(e){
+  const S=e.source(), T=e.target();
+  const s=S.position(), t=T.position();
+  const pct=(v)=>String(v||'0% 0%').trim().split(/\s+/).map(x=>parseFloat(x)/100);
+  const sep=e.data('sep'), tep=e.data('tep');
+  const A = (sep && sep.indexOf('%')>=0)
+    ? (()=>{ const [x,y]=pct(sep); return [s.x+x*S.outerWidth(), s.y+y*S.outerHeight()]; })()
+    : [s.x, s.y];
+  const B = (tep && tep.indexOf('%')>=0)
+    ? (()=>{ const [x,y]=pct(tep); return [t.x+x*T.outerWidth(), t.y+y*T.outerHeight()]; })()
+    : [t.x, t.y];
+  const pts=[A];
+  const ds=String(e.data('segD')||'').trim().split(/\s+/).filter(x=>x!=='').map(Number);
+  const ws=String(e.data('segW')||'').trim().split(/\s+/).filter(x=>x!=='').map(Number);
+  if(ds.length && ws.length){
+    const dx=t.x-s.x, dy=t.y-s.y, L=Math.hypot(dx,dy)||1;
+    const ux=dx/L, uy=dy/L, nx=-uy, ny=ux;
+    for(let i=0;i<ws.length;i++)
+      pts.push([s.x+ux*L*ws[i]+nx*(ds[i]||0), s.y+uy*L*ws[i]+ny*(ds[i]||0)]);
+  }
+  pts.push(B);
+  return pts;
+}
+function exportSvg(){
+  const cy=STATE.cy;
+  if(!cy) return;
+  const pad=40;
+  const bb=cy.elements().boundingBox();
+  const W=Math.max(1, bb.w+pad*2), H=Math.max(1, bb.h+pad*2);
+  const ox=-bb.x1+pad, oy=-bb.y1+pad;
+  const out=[];
+  out.push('<?xml version="1.0" encoding="UTF-8"?>');
+  out.push('<svg xmlns="http://www.w3.org/2000/svg" width="'+Math.round(W)+'" height="'+Math.round(H)+
+           '" viewBox="0 0 '+Math.round(W)+' '+Math.round(H)+'">');
+  out.push('<rect width="100%" height="100%" fill="'+xmlEsc(TH('canvasBg'))+'"/>');
+
+  // zones first, so devices sit on top of them
+  cy.nodes().forEach(n=>{
+    if(n.data('kind')!=='group') return;
+    const b=n.boundingBox();
+    out.push('<rect x="'+(b.x1+ox).toFixed(1)+'" y="'+(b.y1+oy).toFixed(1)+
+      '" width="'+b.w.toFixed(1)+'" height="'+b.h.toFixed(1)+'" rx="10" fill="'+xmlEsc(n.data('bg')||'none')+
+      '" stroke="'+xmlEsc(n.data('bd')||'#888')+'" stroke-width="'+(TH('boxBorderW')||2)+'"/>');
+    out.push('<text x="'+((b.x1+b.x2)/2+ox).toFixed(1)+'" y="'+(b.y2+oy-6).toFixed(1)+
+      '" text-anchor="middle" font-family="'+xmlEsc(n.data('ff')||'sans-serif')+'" font-size="'+(n.data('fs')||12)+
+      '" font-weight="'+xmlEsc(n.data('fw')||'normal')+'" fill="'+xmlEsc(n.data('tabfg')||'#fff')+'">'+
+      xmlEsc(n.data('label'))+'</text>');
+  });
+
+  // links, with their labels
+  cy.edges().forEach(e=>{
+    const pts=edgePolyline(e).map(p=>[(p[0]+ox).toFixed(1),(p[1]+oy).toFixed(1)]);
+    const dashed = e.data('kind')==='l2' && !e.data('trunk');
+    out.push('<polyline points="'+pts.map(p=>p.join(',')).join(' ')+'" fill="none" stroke="'+
+      xmlEsc(e.data('lc')||'#888')+'" stroke-width="'+(e.data('lw')||1.4)+'"'+
+      (dashed?' stroke-dasharray="6 5"':'')+' stroke-linejoin="round" stroke-linecap="round"/>');
+    // the dot at each end
+    for(const p of [pts[0], pts[pts.length-1]])
+      out.push('<circle cx="'+p[0]+'" cy="'+p[1]+'" r="2.6" fill="'+xmlEsc(e.data('lc')||'#888')+'"/>');
+    const lbl=e.data('label');
+    if(lbl){
+      const mid=pts[Math.floor(pts.length/2)];
+      String(lbl).split('\n').forEach((ln,i)=>{
+        out.push('<text x="'+mid[0]+'" y="'+(+mid[1]+i*12-4).toFixed(1)+'" text-anchor="middle" '+
+          'font-family="monospace" font-size="10" fill="'+xmlEsc(TH('linkText'))+'">'+xmlEsc(ln)+'</text>');
+      });
+    }
+  });
+
+  // devices and segments
+  cy.nodes().forEach(n=>{
+    const kind=n.data('kind');
+    if(kind==='group') return;
+    const b=n.boundingBox();
+    if(kind==='subnet'){
+      out.push('<text x="'+((b.x1+b.x2)/2+ox).toFixed(1)+'" y="'+((b.y1+b.y2)/2+oy+4).toFixed(1)+
+        '" text-anchor="middle" font-family="monospace" font-size="11" fill="'+xmlEsc(TH('netText'))+'">'+
+        xmlEsc(n.data('label'))+'</text>');
+      return;
+    }
+    out.push('<rect x="'+(b.x1+ox).toFixed(1)+'" y="'+(b.y1+oy).toFixed(1)+
+      '" width="'+b.w.toFixed(1)+'" height="'+b.h.toFixed(1)+'" rx="7" fill="'+xmlEsc(n.data('bg')||'#fff')+
+      '" stroke="'+xmlEsc(n.data('bd')||'#555')+'" stroke-width="'+(TH('boxBorderW')||2)+'"/>');
+    const lines=String(n.data('label')||'').split('\n');
+    const cx=(b.x1+b.x2)/2+ox, cy0=(b.y1+b.y2)/2+oy;
+    lines.forEach((ln,i)=>{
+      out.push('<text x="'+cx.toFixed(1)+'" y="'+(cy0+(i-(lines.length-1)/2)*13+4).toFixed(1)+
+        '" text-anchor="middle" font-family="'+xmlEsc(n.data('ff')||'monospace')+'" font-size="'+(n.data('fs')||13)+
+        '" font-weight="'+xmlEsc(n.data('fw')||'normal')+'" fill="'+xmlEsc(n.data('fg')||'#111')+'">'+
+        xmlEsc(ln)+'</text>');
+    });
+    // the readiness dot, top-right
+    const d=STATE.devices.find(x=>x.id===n.id());
+    if(d) out.push('<circle cx="'+(b.x2+ox-5).toFixed(1)+'" cy="'+(b.y1+oy+5).toFixed(1)+
+      '" r="4.4" fill="'+(readinessOf(d)?'#5fb98a':'#e0625f')+'"/>');
+  });
+
+  out.push('</svg>');
+  downloadUri('data:image/svg+xml;charset=utf-8,'+encodeURIComponent(out.join('\n')), exportName('svg'));
+}
+
+
+/* ============================================================
+   Change report
+
+   What a change ticket needs: what differs between the configs you started
+   with and the ones you are proposing, and whether the flows you care about
+   still work. Written as Markdown so it pastes into a ticket, a wiki or a
+   pull request without reformatting.
+   ============================================================ */
+function diffDevice(d){
+  /* Compare the parsed form rather than the text, so reordering or a comment
+     change does not show up as a difference. */
+  const before = d.originalText!=null ? parseConfig(d.originalText, d.file||'before') : null;
+  if(!before) return null;
+  const key=(r)=>cidr(r.net,r.len)+' via '+(r.nextHop!=null?int2ip(r.nextHop):(r.iface||'?'))+' ['+r.vrf+']';
+  const ifKey=(i)=>i.name+' '+i.addrs.map(a=>int2ip(a.ip)+'/'+a.len).join(',')+' vrf='+(i.vrf||'default');
+  const setOf=(arr,f)=>{ const m=new Map(); for(const x of arr) m.set(f(x), x); return m; };
+
+  const bS=setOf(before.statics||[], key), aS=setOf(d.statics||[], key);
+  const bI=setOf(before.interfaces||[], ifKey), aI=setOf(d.interfaces||[], ifKey);
+  const added=(a,b)=>[...a.keys()].filter(k=>!b.has(k));
+
+  const bAcl=Object.keys(before.acls||{}), aAcl=Object.keys(d.acls||{});
+  const bRules=(before.rules||[]).map(r=>r.name+' '+r.from+'->'+r.to+' '+r.action);
+  const aRules=(d.rules||[]).map(r=>r.name+' '+r.from+'->'+r.to+' '+r.action);
+
+  const out={
+    name:d.name,
+    routesAdded: added(aS,bS), routesRemoved: added(bS,aS),
+    ifacesAdded: added(aI,bI), ifacesRemoved: added(bI,aI),
+    aclsAdded: aAcl.filter(x=>bAcl.indexOf(x)<0), aclsRemoved: bAcl.filter(x=>aAcl.indexOf(x)<0),
+    rulesAdded: aRules.filter(x=>bRules.indexOf(x)<0), rulesRemoved: bRules.filter(x=>aRules.indexOf(x)<0)
+  };
+  out.changed = out.routesAdded.length||out.routesRemoved.length||out.ifacesAdded.length||
+                out.ifacesRemoved.length||out.aclsAdded.length||out.aclsRemoved.length||
+                out.rulesAdded.length||out.rulesRemoved.length;
+  return out;
+}
+
+function buildChangeReport(){
+  const L=[];
+  const proj=(document.getElementById('proj-name').value||'').trim() || 'Untitled';
+  const when=new Date().toISOString().slice(0,16).replace('T',' ');
+  L.push('# Change report \u2014 '+proj);
+  L.push('');
+  L.push('Generated '+when+' by Dynagram from '+STATE.devices.length+' device config'+
+         (STATE.devices.length===1?'':'s')+'.');
+  L.push('');
+
+  /* Flows first: it is the part a reviewer actually needs to decide. */
+  const res=STATE.flowResults||[];
+  if(res.length){
+    const s=flowSummary(res);
+    L.push('## Flow results');
+    L.push('');
+    L.push('| | |');
+    L.push('|---|---|');
+    L.push('| Flows tested | '+s.total+' |');
+    L.push('| Working | '+s.ok+' |');
+    L.push('| Failing | '+s.bad+' |');
+    if(s.regressions) L.push('| **Regressions caused by this change** | **'+s.regressions+'** |');
+    if(s.fixed) L.push('| Fixed by this change | '+s.fixed+' |');
+    if(s.invalid) L.push('| Lines that could not be read | '+s.invalid+' |');
+    L.push('');
+    if(s.bad){
+      L.push('### Flows that do not work');
+      L.push('');
+      L.push('| Source | Destination | Result | Why |');
+      L.push('|---|---|---|---|');
+      for(const r of s.bad_list)
+        L.push('| `'+r.src+'` | `'+r.dst+'` | '+r.verdict.title+' | '+
+               String(r.verdict.detail||(r.after&&r.after.verdict&&r.after.verdict.detail)||'').replace(/\|/g,'\\|')+' |');
+      L.push('');
+    }
+    L.push('<details><summary>All '+s.total+' flows</summary>');
+    L.push('');
+    L.push('| Source | Destination | Result | Path |');
+    L.push('|---|---|---|---|');
+    for(const r of res){
+      if(r.bad){ L.push('| `'+r.bad+'` | | Could not read | |'); continue; }
+      L.push('| `'+r.src+'` | `'+r.dst+'` | '+r.verdict.title+' | '+(r.path||'').replace(/\|/g,'\\|')+' |');
+    }
+    L.push('');
+    L.push('</details>');
+    L.push('');
+  } else {
+    L.push('## Flow results');
+    L.push('');
+    L.push('_No flows were run. Add a list on the Flows tab and run it to include results here._');
+    L.push('');
+  }
+
+  // config differences
+  const diffs=STATE.devices.map(diffDevice).filter(x=>x&&x.changed);
+  L.push('## Configuration changes');
+  L.push('');
+  if(!diffs.length){
+    L.push('_No device has a candidate config that differs from its original._');
+  } else {
+    L.push(diffs.length+' device'+(diffs.length===1?'':'s')+' changed.');
+    L.push('');
+    for(const d of diffs){
+      L.push('### '+d.name);
+      L.push('');
+      const sec=(title, add, rem)=>{
+        if(!add.length && !rem.length) return;
+        L.push('**'+title+'**');
+        L.push('');
+        for(const x of rem) L.push('- removed `'+x+'`');
+        for(const x of add) L.push('- added `'+x+'`');
+        L.push('');
+      };
+      sec('Static routes', d.routesAdded, d.routesRemoved);
+      sec('Interfaces',    d.ifacesAdded, d.ifacesRemoved);
+      sec('Access lists',  d.aclsAdded,   d.aclsRemoved);
+      sec('Security rules',d.rulesAdded,  d.rulesRemoved);
+    }
+  }
+  L.push('');
+
+  // anything the model itself flagged
+  const warns=(STATE.model&&STATE.model.warnings)||[];
+  L.push('## Things worth checking');
+  L.push('');
+  if(!warns.length) L.push('_Nothing flagged._');
+  else {
+    for(const w of warns.slice(0,60)){
+      const nm=w.devId ? (STATE.devices.find(x=>x.id===w.devId)||{}).name : null;
+      L.push('- '+(nm?'**'+nm+'** \u2014 ':'')+String(w.text||w.msg||w));
+    }
+    if(warns.length>60) L.push('- _\u2026and '+(warns.length-60)+' more_');
+  }
+  L.push('');
+
+  // readiness, so a reviewer knows how complete the picture is
+  const r=deviceReadiness(STATE.devices);
+  L.push('## How complete this picture is');
+  L.push('');
+  L.push('- '+STATE.devices.length+' device configs loaded');
+  if(r.noTable.length) L.push('- '+r.noTable.length+' without an imported routing table (routes inferred)');
+  if(r.noNeighbors.length) L.push('- '+r.noNeighbors.length+' without CDP/LLDP (no layer 2 adjacency)');
+  if(r.noConfig.length) L.push('- '+r.noConfig.length+' with no config at all');
+  if(!r.noTable.length && !r.noNeighbors.length && !r.noConfig.length)
+    L.push('- every device has a config, a routing table and neighbour data');
+  L.push('');
+  return L.join('\n');
+}
+
+function exportChangeReport(){
+  const md=buildChangeReport();
+  downloadUri('data:text/markdown;charset=utf-8,'+encodeURIComponent(md), exportName('md'));
+}
+
 function capturePositions(cyArg, nsArg){
   const cy = cyArg || STATE.cy;
   if(!cy || (!cyArg && STATE.viewIsPath)) return;   // transient views never write positions
@@ -7625,6 +8408,7 @@ function projectObject(){
     freeLinks: STATE.freeLinks||{},
     linkColors: STATE.linkColors||{},
     linksLocked: !!STATE.linksLocked,
+    flowText: STATE.flowText||'',
     bends:STATE.bends||{},
     lineWidths:STATE.lineWidths||{},
     scopeIgnoreFw: !!STATE.scopeIgnoreFw,
@@ -7707,6 +8491,8 @@ function loadProject(obj){
   STATE.freeLinks = obj.freeLinks || {};
   STATE.linkColors = obj.linkColors || {};
   STATE.linksLocked = !!obj.linksLocked;
+  STATE.flowText = obj.flowText||'';
+  STATE.flowResults=[];
   STATE.parked = Array.isArray(obj.parked) ? obj.parked : [];
   STATE.treePick = new Set();
   const lockBox=document.getElementById('opt-locklinks');
@@ -8051,6 +8837,8 @@ initPanels();
 initTheme();
 initQueryBar();
 initGrid();
+initFlows();
+setTimeout(()=>{ pushUndo(); updateUndoButtons(); }, 300);   // the starting layout
 if(!restore()) rebuild();
 </script>
 </body>
