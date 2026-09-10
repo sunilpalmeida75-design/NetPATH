@@ -2411,14 +2411,69 @@ function applyBends(els){
   for(const pair in groups){
     const list=groups[pair];
     list.forEach((el, idx)=>{
-      const saved=STATE.bends[el.data.ekey];
-      if(saved!=null){ el.data.bend=saved; return; }
-      // default fan: 0, +55, -55, +110, -110 ...
+      // separation for parallel links between the same pair: 0, +55, -55, ...
       const step=Math.ceil((idx)/2)*55;
-      el.data.bend = list.length===1 ? 0 : (idx%2 ? step : -step);
+      el.data.fan = list.length===1 ? 0 : (idx%2 ? step : -step);
+      const saved=STATE.bends[el.data.ekey];
+      el.data.bend = saved!=null ? saved : el.data.fan;
     });
   }
   return els;
+}
+
+/* Bend a link clear of any device box that sits across it.
+
+   Cytoscape draws a straight line between two nodes and does not care what is
+   in the way, so a link between devices on opposite sides of the map runs
+   straight through whatever is in the middle. For each edge we measure how far
+   every other box intrudes on the straight line and curve the edge past the
+   worst offender. A bend the user set by hand always wins. */
+function autoRouteEdges(cy){
+  if(!cy || STATE.noAutoRoute) return;
+  STATE.bends = STATE.bends || {};
+  const boxes=[];
+  cy.nodes().forEach(n=>{
+    if(n.data('kind')==='group') return;               // zone containers are not obstacles
+    const p=n.position();
+    if(!p || !isFinite(p.x)) return;
+    boxes.push({id:n.id(), x:p.x, y:p.y, hw:(n.outerWidth()||60)/2, hh:(n.outerHeight()||30)/2});
+  });
+  const MARGIN=14;
+
+  cy.edges().forEach(e=>{
+    const key=e.data('ekey');
+    if(key && STATE.bends[key]!=null) return;          // hand-placed: leave alone
+    const base=e.data('fan')||0;                       // keep parallel links separated
+    const s=e.source().position(), t=e.target().position();
+    if(!s||!t) return;
+    const dx=t.x-s.x, dy=t.y-s.y, L=Math.hypot(dx,dy);
+    if(L<1){ e.data('bend', base); return; }
+    const nx=-dy/L, ny=dx/L;                           // unit normal to the line
+    const srcId=e.source().id(), tgtId=e.target().id();
+
+    let needPos=0, needNeg=0;
+    for(const b of boxes){
+      if(b.id===srcId || b.id===tgtId) continue;
+      const vx=b.x-s.x, vy=b.y-s.y;
+      const along=(vx*dx+vy*dy)/L;
+      if(along<=0 || along>=L) continue;               // not between the two ends
+      const off=vx*nx+vy*ny;                           // signed distance from the line
+      // how wide the box is when measured across the line
+      const clear=Math.abs(b.hw*nx)+Math.abs(b.hh*ny)+MARGIN;
+      if(Math.abs(off)>=clear) continue;               // the line already misses it
+      // push to whichever side the box is not on
+      if(off>=0) needNeg=Math.max(needNeg, clear-off);
+      else       needPos=Math.max(needPos, clear+off);
+    }
+    if(!needPos && !needNeg){ e.data('bend', base); return; }
+
+    // a bezier's midpoint moves about half the control distance, so double it
+    const wantPos = needPos ? (needPos*2+base) : Infinity;
+    const wantNeg = needNeg ? (needNeg*2-base) : Infinity;
+    let bend = Math.abs(wantPos)<=Math.abs(wantNeg) ? wantPos : -wantNeg;
+    if(!isFinite(bend)) bend=base;
+    e.data('bend', Math.max(-520, Math.min(520, bend)));
+  });
 }
 
 function sizeNodes(els){
@@ -3673,6 +3728,9 @@ function render(){
       if(d) showDevice(d);
     });
     cyp.on('tap','node[kind="subnet"]', evt=>showSegment(evt.target.data('net')||evt.target.data('label')));
+    cyp.on('layoutstop', ()=>autoRouteEdges(cyp));
+    cyp.on('position','node', ()=>{ if(cyp._rt) return; cyp._rt=setTimeout(()=>{ cyp._rt=null; autoRouteEdges(cyp); },60); });
+    setTimeout(()=>autoRouteEdges(cyp),0);
     cyp.on('dbltap','edge', evt=>onEdgeTap(cyp, evt.target));
     STATE.cy=cyp; STATE.edgeFor=edgeFor; STATE.edgePair={}; STATE.viewIsPath=true;
     paintTrace(res);
@@ -3831,6 +3889,8 @@ function render(){
       layout:{name:'preset', padding:60, fit: !(anchored && vpL)}
     });
     if(anchored && vpL){ cyl.zoom(vpL.zoom); cyl.pan(vpL.pan); }
+    setTimeout(()=>autoRouteEdges(cyl),0);
+    cyl.on('position','node', ()=>{ if(cyl._rt) return; cyl._rt=setTimeout(()=>{ cyl._rt=null; autoRouteEdges(cyl); },60); });
     cyl.on('tap','node[kind="device"]', evt=>{
       const d=model.devices.find(x=>x.id===evt.target.id());
       if(d) showDevice(d);
@@ -4168,6 +4228,7 @@ function render(){
       cy.off('mousemove', move); cy.off('mouseup', up); cy.off('tapend', up);
       cy.userPanningEnabled(true); cy.boxSelectionEnabled(true);
       if(moved){ STATE.bends[k]=edge.data('bend'); autosave(); }
+      else { delete STATE.bends[k]; autoRouteEdges(cy); autosave(); }   // a click without a drag hands it back to auto-routing
     };
     cy.userPanningEnabled(false); cy.boxSelectionEnabled(false);
     cy.on('mousemove', move); cy.on('mouseup', up); cy.on('tapend', up);
@@ -4203,6 +4264,12 @@ function render(){
      arranged them that way — which is what collapsed the map into a column.
      Bind to this graph and this namespace so a quick view switch cannot write
      one view's layout into another. */
+  cy.on('layoutstop', ()=>{ autoRouteEdges(cy); });
+  setTimeout(()=>autoRouteEdges(cy), 0);
+  cy.on('position', 'node', ()=>{
+    if(STATE._routeTimer) return;
+    STATE._routeTimer=setTimeout(()=>{ STATE._routeTimer=null; autoRouteEdges(cy); }, 60);
+  });
   cy.one('layoutstop', ()=>{ capturePositions(cy, writeNS); autosave(); });
 
   STATE.cy=cy; STATE.edgeFor=edgeFor; STATE.edgePair=edgePair; STATE.viewIsPath=false;
