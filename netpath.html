@@ -2417,22 +2417,25 @@ function applyBends(els){
       const saved=STATE.bends[el.data.ekey];
       el.data.bend = saved!=null ? saved : el.data.fan;
       // sensible defaults until autoRouteEdges measures the real geometry
-      const f=el.data.fan||0;
-      el.data.segD = el.data.segD || (f? f+' '+f : '0');
-      el.data.segW = el.data.segW || (f? '0.22 0.78' : '0.5');
+      el.data.segD = el.data.segD || '0';
+      el.data.segW = el.data.segW || '0.5';
     });
   }
   return els;
 }
 
-/* Route a link so it does not cross what it has nothing to do with.
+/* Route every link as right-angle runs, and keep them off things they have
+   nothing to do with.
 
-   Every link is drawn as a series of straight runs with rounded corners. For
-   each one we measure what stands in the way of the direct line — other device
-   boxes, and any zone the link neither starts nor ends inside — and offset the
-   run sideways far enough to clear the worst of them. A zone the link is not
-   part of counts as solid, so a cable between two datacentres goes around a
-   third rather than through it. */
+   Cytoscape's segment edges take waypoints expressed relative to the straight
+   line between the two ends: how far along it (a weight, 0..1) and how far to
+   the side (a distance). We work in plain x/y, choose an orthogonal path — a
+   Z shape with one vertical or horizontal channel — then convert the corners
+   into that form. Candidate channels are tried in turn and the one that
+   crosses the fewest device boxes and unrelated zones wins. Two devices that
+   share a row or column, with something between them, get a U-shaped detour
+   instead, because no Z can dodge it. Channels snap to a grid so runs from
+   neighbouring links line up instead of scattering. */
 function zoneAncestors(node){
   const out=new Set();
   let p=node.parent && node.parent();
@@ -2450,51 +2453,111 @@ function autoRouteEdges(cy){
     const b={id:n.id(), x:p.x, y:p.y, hw:(n.outerWidth()||60)/2, hh:(n.outerHeight()||30)/2};
     if(n.data('kind')==='group') zoneBoxes.push(b); else devBoxes.push(b);
   });
-  const M=18;
+  const M=14, GRID=20;
+  const snap=(v)=>Math.round(v/GRID)*GRID;
+
+  // does the straight run a->b pass through box b (with a margin)?
+  const legHits=(ax,ay,bx,by,box,pad)=>
+    Math.max(ax,bx) >= box.x-box.hw-pad && Math.min(ax,bx) <= box.x+box.hw+pad &&
+    Math.max(ay,by) >= box.y-box.hh-pad && Math.min(ay,by) <= box.y+box.hh+pad;
+  const pathHits=(pts,boxes,skip,pad)=>{
+    let n=0;
+    for(const b of boxes){
+      if(skip.has(b.id)) continue;
+      for(let i=0;i<pts.length-1;i++)
+        if(legHits(pts[i][0],pts[i][1],pts[i+1][0],pts[i+1][1],b,pad)){ n++; break; }
+    }
+    return n;
+  };
 
   cy.edges().forEach(e=>{
-    const key=e.data('ekey');
     const S=e.source(), T=e.target();
     const s=S.position(), t=T.position();
     if(!s||!t) return;
-
-    const fan=e.data('fan')||0;
-    const setSeg=(d)=>{
-      if(!d){ e.data('segD','0'); e.data('segW','0.5'); }
-      else  { e.data('segD', d+' '+d); e.data('segW','0.22 0.78'); }
-    };
-    if(key && STATE.bends[key]!=null){ setSeg(STATE.bends[key]); return; }   // hand-placed
-
     const dx=t.x-s.x, dy=t.y-s.y, L=Math.hypot(dx,dy);
-    if(L<1){ setSeg(fan); return; }
-    const nx=-dy/L, ny=dx/L;                       // unit normal to the run
+    if(L<1){ e.data('segD','0'); e.data('segW','0.5'); return; }
+    const ux=dx/L, uy=dy/L, nx=-uy, ny=ux;
 
-    // the endpoints, and any zone either endpoint lives in, are never obstacles
+    // express an x/y corner as (weight along, distance across) for cytoscape
+    const toSeg=(pts)=>{
+      const ws=[], ds=[];
+      for(const [px,py] of pts){
+        const vx=px-s.x, vy=py-s.y;
+        ws.push(((vx*ux+vy*uy)/L).toFixed(4));
+        ds.push(Math.round(vx*nx+vy*ny));
+      }
+      e.data('segD', ds.join(' ')); e.data('segW', ws.join(' '));
+    };
+
+    const key=e.data('ekey');
+    const fan=e.data('fan')||0;
+
+    // never treat the endpoints, or any zone either endpoint lives in, as solid
     const skip=new Set([S.id(), T.id()]);
     const inZones=new Set([...zoneAncestors(S), ...zoneAncestors(T)]);
     for(const z of inZones) skip.add(z);
     const obstacles=devBoxes.concat(zoneBoxes.filter(z=>!inZones.has(z.id)));
 
-    let needPos=0, needNeg=0;
-    for(const b of obstacles){
-      if(skip.has(b.id)) continue;
-      const vx=b.x-s.x, vy=b.y-s.y;
-      const along=(vx*dx+vy*dy)/L;
-      if(along<=0 || along>=L) continue;           // not between the two ends
-      const off=vx*nx+vy*ny;                       // signed distance from the run
-      const clear=Math.abs(b.hw*nx)+Math.abs(b.hh*ny)+M;   // its width across the run
-      if(Math.abs(off)>=clear) continue;           // already misses it
-      if(off>=0) needNeg=Math.max(needNeg, clear-off);
-      else       needPos=Math.max(needPos, clear+off);
+    /* A hand-placed link keeps its offset, but still as right angles: the
+       saved value is where the channel sits, as a fraction of the span. */
+    const hand = key && STATE.bends[key]!=null ? STATE.bends[key] : null;
+
+    const horizFirst = Math.abs(dx) >= Math.abs(dy);
+    const fracs = hand!=null ? [Math.max(0.05,Math.min(0.95,hand/100))]
+                             : [0.5,0.4,0.6,0.3,0.7,0.2,0.8,0.12,0.88];
+    // parallel links between the same pair pick different channels
+    const fanShift = fan ? (fan>0?0.08:-0.08)*Math.ceil(Math.abs(fan)/55) : 0;
+
+    let best=null;
+    for(const f0 of fracs){
+      const f=Math.max(0.05,Math.min(0.95,f0+fanShift));
+      let pts;
+      if(horizFirst){ const cx=snap(s.x+dx*f); pts=[[s.x,s.y],[cx,s.y],[cx,t.y],[t.x,t.y]]; }
+      else          { const cy2=snap(s.y+dy*f); pts=[[s.x,s.y],[s.x,cy2],[t.x,cy2],[t.x,t.y]]; }
+      const hits=pathHits(pts,obstacles,skip,M);
+      const cost=hits*100+Math.abs(f-0.5);
+      if(!best||cost<best.cost) best={pts,hits,cost};
+      if(hits===0) break;
     }
 
-    if(!needPos && !needNeg){ setSeg(fan); return; }
-    // go whichever way needs less deviation, keeping the parallel-link offset
-    const wantPos = needPos ? needPos+Math.max(0,fan)  : Infinity;
-    const wantNeg = needNeg ? needNeg+Math.max(0,-fan) : Infinity;
-    let d = wantPos<=wantNeg ? wantPos : -wantNeg;
-    if(!isFinite(d)) d=fan;
-    setSeg(Math.round(Math.max(-600, Math.min(600, d))));
+    /* If no Z-channel is clear, detour around the outside with a U. Its legs
+       are axis-aligned, so the clearance is worked out per axis: the middle
+       run must sit outside every blocker's extent on that axis. */
+    if(best.hits>0){
+      let pts=null;
+      if(horizFirst){
+        const x1=snap(s.x+dx*0.15), x2=snap(s.x+dx*0.85);
+        const lo=Math.min(x1,x2), hi=Math.max(x1,x2);
+        let up=Infinity, down=-Infinity;              // candidate y for the middle run
+        for(const b of obstacles){
+          if(skip.has(b.id)) continue;
+          if(b.x+b.hw+M < lo || b.x-b.hw-M > hi) continue;   // not under the run
+          up=Math.min(up, b.y-b.hh-M-6); down=Math.max(down, b.y+b.hh+M+6);
+        }
+        const ref=(s.y+t.y)/2;
+        const ry = (Math.abs(up-ref) <= Math.abs(down-ref)) ? up : down;
+        if(isFinite(ry)) pts=[[s.x,s.y],[x1,s.y],[x1,ry],[x2,ry],[x2,t.y],[t.x,t.y]];
+      } else {
+        const y1=snap(s.y+dy*0.15), y2=snap(s.y+dy*0.85);
+        const lo=Math.min(y1,y2), hi=Math.max(y1,y2);
+        let left=Infinity, right=-Infinity;
+        for(const b of obstacles){
+          if(skip.has(b.id)) continue;
+          if(b.y+b.hh+M < lo || b.y-b.hh-M > hi) continue;
+          left=Math.min(left, b.x-b.hw-M-6); right=Math.max(right, b.x+b.hw+M+6);
+        }
+        const ref=(s.x+t.x)/2;
+        const rx = (Math.abs(left-ref) <= Math.abs(right-ref)) ? left : right;
+        if(isFinite(rx)) pts=[[s.x,s.y],[s.x,y1],[rx,y1],[rx,y2],[t.x,y2],[t.x,t.y]];
+      }
+      if(pts){
+        const uh=pathHits(pts,obstacles,skip,M);
+        if(uh<best.hits) best={pts,hits:uh,cost:0};
+      }
+    }
+
+    // corners only — cytoscape supplies the two ends itself
+    toSeg(best.pts.slice(1,-1));
   });
 }
 
@@ -3518,10 +3581,10 @@ function graphStyle(){
         'width':'data(lw)','line-color':'#33485f',
         /* right-angle routing with rounded corners, the way a hand-drawn
            network diagram runs its cables */
-        'curve-style':'round-segments',
+        'curve-style':'segments',
+        'edge-distances':'node-position',
         'segment-distances':'data(segD)',
         'segment-weights':'data(segW)',
-        'radius':12,
         'label':'data(label)','color':'#61799a','font-size':9
       }},
       {selector:'edge', style:{'color':TH('linkText'),'font-family':'IBM Plex Mono, monospace',
@@ -3559,7 +3622,7 @@ function graphStyle(){
         'z-index':0}},
       {selector:'node[gkind="site"]', style:{'background-opacity':TH('zoneGrid')?0.35:1}},
       {selector:'edge[kind="ha"]', style:{
-        'line-color':'#8a6a2e','line-style':'dotted','width':2,'curve-style':'round-segments',
+        'line-color':'#8a6a2e','line-style':'dotted','width':2,'curve-style':'segments',
         'color':'#c49a4e','font-size':9,'text-wrap':'wrap','z-index':2}},
       {selector:'node[kind="group"].hot', style:{
         'border-width':TH('boxBorderW'),'background-opacity':TH('zoneGrid')?0.55:1}},
@@ -4247,20 +4310,24 @@ function render(){
     if(!k) return;
     const start=evt.renderedPosition||evt.position;
     const from=edge.data('bend')||0;
-    let moved=false;
+    let moved=false, frac=null;
     const move=(e)=>{
-      const p=e.renderedPosition||e.position;
-      const s0=edge.source().renderedPosition(), t0=edge.target().renderedPosition();
-      const dx=t0.x-s0.x, dy=t0.y-s0.y, L=Math.hypot(dx,dy)||1;
-      // distance of the pointer from the straight line, signed
-      const off=((p.x-s0.x)*(-dy) + (p.y-s0.y)*dx)/L;
-      if(Math.abs(off-from)>2) moved=true;
-      edge.data('bend', Math.max(-400, Math.min(400, off)));
+      const p=e.position||e.renderedPosition;
+      const s0=edge.source().position(), t0=edge.target().position();
+      const dx=t0.x-s0.x, dy=t0.y-s0.y;
+      /* Dragging slides the link's channel along the span: for a mostly
+         horizontal link that is where its vertical run sits, and vice versa. */
+      const horizFirst=Math.abs(dx)>=Math.abs(dy);
+      const f = horizFirst ? (p.x-s0.x)/(dx||1) : (p.y-s0.y)/(dy||1);
+      const next=Math.round(Math.max(5,Math.min(95,f*100)));
+      if(frac!==null && next!==frac) moved=true;
+      if(frac===null) frac=next; else frac=next;
+      STATE.bends[k]=frac; autoRouteEdges(cy);
     };
     const up=()=>{
       cy.off('mousemove', move); cy.off('mouseup', up); cy.off('tapend', up);
       cy.userPanningEnabled(true); cy.boxSelectionEnabled(true);
-      if(moved){ STATE.bends[k]=edge.data('bend'); autosave(); }
+      if(moved){ autosave(); }
       else { delete STATE.bends[k]; autoRouteEdges(cy); autosave(); }   // a click without a drag hands it back to auto-routing
     };
     cy.userPanningEnabled(false); cy.boxSelectionEnabled(false);
