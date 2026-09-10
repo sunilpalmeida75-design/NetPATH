@@ -2398,6 +2398,56 @@ function edgeKey(d){
 }
 /* Apply saved bends and fan out any remaining overlaps, so parallel links and
    their labels do not sit on top of each other. */
+/* A link is only worth drawing if there is a device at each end.
+
+   Segments and provider clouds are drawn as their own nodes, so a subnet that
+   only one device sits on, or a cloud with a single attachment, leaves a line
+   dangling to a box that represents nothing. Those get pruned, and so does
+   anything left with nothing attached once they are gone. Devices themselves
+   always stay: an isolated device is a real finding, an isolated segment is
+   just noise. */
+function pruneDanglingLinks(els){
+  const byId={};
+  for(const el of els) if(!el.data.source) byId[el.data.id]=el.data;
+  const isDevice=(id)=>byId[id] && byId[id].kind==='device';
+
+  const keptEdges=[], degree={};
+  for(const el of els){
+    if(!el.data.source) continue;
+    const a=byId[el.data.source], b=byId[el.data.target];
+    if(!a || !b) continue;                       // endpoint never made it onto the map
+    /* A device at each end, or a device at one end and a segment or cloud
+       that genuinely joins two or more devices at the other. */
+    const viaHub=(id)=>{
+      let n=0;
+      for(const x of els){
+        if(!x.data.source) continue;
+        if(x.data.source===id && isDevice(x.data.target)) n++;
+        if(x.data.target===id && isDevice(x.data.source)) n++;
+      }
+      return n>=2;
+    };
+    const ok = (isDevice(el.data.source) || viaHub(el.data.source)) &&
+               (isDevice(el.data.target) || viaHub(el.data.target));
+    if(!ok) continue;
+    keptEdges.push(el);
+    degree[el.data.source]=(degree[el.data.source]||0)+1;
+    degree[el.data.target]=(degree[el.data.target]||0)+1;
+  }
+
+  const out=[];
+  for(const el of els){
+    if(el.data.source) continue;                 // edges handled below
+    const k=el.data.kind;
+    // a segment, cloud or endpoint box with nothing left attached is noise
+    if((k==='subnet'||k==='wan'||k==='link') && !degree[el.data.id]) continue;
+    out.push(el);
+  }
+  const final=out.concat(keptEdges);
+  els.length=0; els.push.apply(els, final);      // callers hold this array
+  return els;
+}
+
 function applyBends(els){
   STATE.bends = STATE.bends || {};
   const groups={};
@@ -2477,13 +2527,22 @@ function assignEndpoints(cy){
       const list=sides[side];
       if(!list.length) continue;
       list.sort((a,b)=>a.key-b.key);
+      const w=n.outerWidth()||60, h=n.outerHeight()||30;
       list.forEach((item,i)=>{
         // evenly across the middle 80% of that side
         const f = list.length===1 ? 0 : (-0.4 + 0.8*(i/(list.length-1)));
-        const pos = (side==='left'||side==='right')
-          ? (side==='right'?'50%':'-50%')+' '+(f*100).toFixed(1)+'%'
-          : (f*100).toFixed(1)+'% '+(side==='bottom'?'50%':'-50%');
-        item.e.data(item.e.source().id()===n.id() ? 'sep' : 'tep', pos);
+        const isSide = (side==='left'||side==='right');
+        const px = isSide ? (side==='right'? 0.5 : -0.5) : f;
+        const py = isSide ? f : (side==='bottom'? 0.5 : -0.5);
+        const pos=(px*100).toFixed(1)+'% '+(py*100).toFixed(1)+'%';
+        const mine = item.e.source().id()===n.id();
+        item.e.data(mine ? 'sep' : 'tep', pos);
+        /* Remember where the line actually starts, in real coordinates. The
+           routing has to build its corners from these points, not from the box
+           centres, or the first and last legs come out on a slant. */
+        item.e.data(mine ? 'spx' : 'tpx', here.x + px*w);
+        item.e.data(mine ? 'spy' : 'tpy', here.y + py*h);
+        item.e.data(mine ? 'sside' : 'tside', side);
       });
     }
   });
@@ -2573,7 +2632,15 @@ function autoRouteEdges(cy, mode){
       e.data('ortho', 1);      // give this one right angles instead
     }
 
-    /* Orthogonal: a Z through a clear channel, or a U around the outside. */
+    /* Orthogonal: a Z through a clear channel, or a U around the outside.
+       Everything is measured between the real landing points, so every leg is
+       exactly horizontal or vertical. */
+    const A={x: e.data('spx')!=null ? e.data('spx') : s.x,
+             y: e.data('spy')!=null ? e.data('spy') : s.y};
+    const B={x: e.data('tpx')!=null ? e.data('tpx') : t.x,
+             y: e.data('tpy')!=null ? e.data('tpy') : t.y};
+    const sideA=e.data('sside'), sideB=e.data('tside');
+    // cytoscape places waypoints against the centre-to-centre line, so convert
     const toSeg=(pts)=>{
       const ws=[], ds=[];
       for(const [px,py] of pts){
@@ -2584,7 +2651,19 @@ function autoRouteEdges(cy, mode){
       e.data('segD', ds.join(' ')); e.data('segW', ws.join(' '));
     };
     const hand = key && STATE.bends[key]!=null ? STATE.bends[key] : null;
-    const horizFirst = Math.abs(dx) >= Math.abs(dy);
+    // leave and arrive square to whichever side each endpoint sits on
+    const horizFirst = (sideA==='left'||sideA==='right') ? true
+                     : (sideA==='top'||sideA==='bottom') ? false
+                     : Math.abs(dx) >= Math.abs(dy);
+    const ABx=B.x-A.x, ABy=B.y-A.y;
+    const horizA=(sideA==='left'||sideA==='right'), horizB=(sideB==='left'||sideB==='right');
+    /* One end leaves sideways and the other from top or bottom: a single
+       corner joins them, one horizontal leg and one vertical. */
+    if(sideA && sideB && horizA!==horizB){
+      const corner = horizA ? [B.x, A.y] : [A.x, B.y];
+      const pts=[[A.x,A.y], corner, [B.x,B.y]];
+      if(pathHits(pts,obstacles,skip,M)===0){ toSeg(pts.slice(1,-1)); return; }
+    }
     const fracs = hand!=null ? [Math.max(0.05,Math.min(0.95,hand/100))]
                              : [0.5,0.4,0.6,0.3,0.7,0.2,0.8,0.12,0.88];
     const fanShift = fan ? (fan>0?0.08:-0.08)*Math.ceil(Math.abs(fan)/55) : 0;
@@ -2592,8 +2671,8 @@ function autoRouteEdges(cy, mode){
     for(const f0 of fracs){
       const f=Math.max(0.05,Math.min(0.95,f0+fanShift));
       let pts;
-      if(horizFirst){ const cx=snap(s.x+dx*f); pts=[[s.x,s.y],[cx,s.y],[cx,t.y],[t.x,t.y]]; }
-      else          { const cy2=snap(s.y+dy*f); pts=[[s.x,s.y],[s.x,cy2],[t.x,cy2],[t.x,t.y]]; }
+      if(horizFirst){ const cx=snap(A.x+ABx*f); pts=[[A.x,A.y],[cx,A.y],[cx,B.y],[B.x,B.y]]; }
+      else          { const cy2=snap(A.y+ABy*f); pts=[[A.x,A.y],[A.x,cy2],[B.x,cy2],[B.x,B.y]]; }
       const hits=pathHits(pts,obstacles,skip,M);
       const cost=hits*100+Math.abs(f-0.5);
       if(!best||cost<best.cost) best={pts,hits,cost};
@@ -2602,7 +2681,7 @@ function autoRouteEdges(cy, mode){
     if(best.hits>0 && hand==null){
       let pts=null;
       if(horizFirst){
-        const x1=snap(s.x+dx*0.15), x2=snap(s.x+dx*0.85);
+        const x1=snap(A.x+ABx*0.15), x2=snap(A.x+ABx*0.85);
         const lo=Math.min(x1,x2), hi=Math.max(x1,x2);
         let up=Infinity, down=-Infinity;
         for(const b of obstacles){
@@ -2610,11 +2689,11 @@ function autoRouteEdges(cy, mode){
           if(b.x+b.hw+M < lo || b.x-b.hw-M > hi) continue;
           up=Math.min(up, b.y-b.hh-M-6); down=Math.max(down, b.y+b.hh+M+6);
         }
-        const ref=(s.y+t.y)/2;
+        const ref=(A.y+B.y)/2;
         const ry=(Math.abs(up-ref)<=Math.abs(down-ref))?up:down;
-        if(isFinite(ry)) pts=[[s.x,s.y],[x1,s.y],[x1,ry],[x2,ry],[x2,t.y],[t.x,t.y]];
+        if(isFinite(ry)) pts=[[A.x,A.y],[x1,A.y],[x1,ry],[x2,ry],[x2,B.y],[B.x,B.y]];
       } else {
-        const y1=snap(s.y+dy*0.15), y2=snap(s.y+dy*0.85);
+        const y1=snap(A.y+ABy*0.15), y2=snap(A.y+ABy*0.85);
         const lo=Math.min(y1,y2), hi=Math.max(y1,y2);
         let left=Infinity, right=-Infinity;
         for(const b of obstacles){
@@ -2622,9 +2701,9 @@ function autoRouteEdges(cy, mode){
           if(b.y+b.hh+M < lo || b.y-b.hh-M > hi) continue;
           left=Math.min(left, b.x-b.hw-M-6); right=Math.max(right, b.x+b.hw+M+6);
         }
-        const ref=(s.x+t.x)/2;
+        const ref=(A.x+B.x)/2;
         const rx=(Math.abs(left-ref)<=Math.abs(right-ref))?left:right;
-        if(isFinite(rx)) pts=[[s.x,s.y],[s.x,y1],[rx,y1],[rx,y2],[t.x,y2],[t.x,t.y]];
+        if(isFinite(rx)) pts=[[A.x,A.y],[A.x,y1],[rx,y1],[rx,y2],[B.x,y2],[B.x,B.y]];
       }
       if(pts){
         const uh=pathHits(pts,obstacles,skip,M);
@@ -3883,7 +3962,7 @@ function render(){
         }
       }
     }
-    applyBends(els); sizeNodes(els);
+    pruneDanglingLinks(els); applyBends(els); sizeNodes(els);
     const vpP = (STATE.cy && !STATE.viewIsPath)
       ? {zoom:STATE.cy.zoom(), pan:Object.assign({}, STATE.cy.pan())} : null;
     const cyp = cytoscape({
@@ -4051,7 +4130,7 @@ function render(){
     }
 
     if(STATE.cy) STATE.cy.destroy();
-    applyBends(els); sizeNodes(els);
+    pruneDanglingLinks(els); applyBends(els); sizeNodes(els);
     const vpL = (STATE.cy && !STATE.viewIsPath)
       ? {zoom:STATE.cy.zoom(), pan:Object.assign({}, STATE.cy.pan())} : null;
     if(STATE.cy) STATE.cy.destroy();
@@ -4352,7 +4431,7 @@ function render(){
   if((document.getElementById('opt-nolinks')||{}).checked){
     for(let i=els.length-1;i>=0;i--) if(els[i].data.source) els.splice(i,1);
   }
-  applyBends(els); sizeNodes(els);
+  pruneDanglingLinks(els); applyBends(els); sizeNodes(els);
   const cy = cytoscape({
     container: document.getElementById('cy'),
     elements: els,
@@ -6748,7 +6827,11 @@ document.getElementById('prov-name').addEventListener('keydown',e=>{
   if(e.key==='Enter') document.getElementById('prov-add').click();
 });
 document.getElementById('opt-igp').onchange=()=>{ STATE.lastTrace=null; rebuild(); };
-document.getElementById('fit').onclick=()=>{ if(STATE.cy) STATE.cy.fit(undefined,40); };
+document.getElementById('fit').onclick=()=>{
+  if(!STATE.cy) return;
+  STATE.cy.fit(undefined,40);
+  autoRouteEdges(STATE.cy,'ortho');     // re-square every link to its boxes
+};
 document.getElementById('viewback').onclick=goBack;
 document.getElementById('modeseg').onclick=(e)=>{
   const b=e.target.closest('button[data-mode]'); if(!b) return;
