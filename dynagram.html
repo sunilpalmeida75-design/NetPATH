@@ -4311,10 +4311,11 @@ const THEME_DEFAULT={
   roleRouter:'#3a5273', roleSwitch:'#3f7a63', roleFirewall:'#8a6a2e',
   zoneBg:'#1e262f', zoneText:'#8a9bad', zoneBorder:'#3f8f63', zoneGrid:false,
   textFill:0.8,                                // how much of a box its label fills
+  showRole:true,                               // a "Router"/"Switch"/"Firewall" line above the name
   linkIntra:'#4a6076', linkInter:'#c98a3e',   // within a site, and between sites
   boxBorderW:2, boxW:null, boxH:null,          // null = auto-sized from the label
-  devFontSize:13, devBold:false, zoneFontSize:12, zoneBold:false,
-  devFont:'IBM Plex Mono, monospace', zoneFont:'IBM Plex Sans Condensed, sans-serif',
+  devFontSize:15, devBold:false, zoneFontSize:13, zoneBold:false,
+  devFont:'Arial, Helvetica, sans-serif', zoneFont:'Arial, Helvetica, sans-serif',
   linkWidth:1.4,
   netText:'#4fc3d9', linkText:'#61799a'
 };
@@ -4325,16 +4326,21 @@ const THEME_VISIO={
   devBg:'#ffffff', devText:'#14304a',
   roleRouter:'#1f7a4d', roleSwitch:'#1f7a4d', roleFirewall:'#1f7a4d',
   zoneBg:'#ffffff', zoneText:'#4a6b80', zoneBorder:'#1f7a4d', zoneGrid:false,
-  textFill:0.8,
+  textFill:0.8, showRole:true,
   linkIntra:'#8496a6', linkInter:'#c07a22',
   boxBorderW:3, boxW:null, boxH:null,
-  devFontSize:13, devBold:false, zoneFontSize:12, zoneBold:false,
-  devFont:'IBM Plex Mono, monospace', zoneFont:'IBM Plex Sans Condensed, sans-serif',
+  devFontSize:15, devBold:false, zoneFontSize:13, zoneBold:false,
+  devFont:'Arial, Helvetica, sans-serif', zoneFont:'Arial, Helvetica, sans-serif',
   linkWidth:1.4,
   netText:'#12628f', linkText:'#3d5568'
 };
 STATE.theme = Object.assign({}, THEME_DEFAULT);
-function TH(k){ return (STATE.theme && STATE.theme[k]) || THEME_DEFAULT[k]; }
+/* `||` here meant a stored `false` fell through to the default, so no boolean
+   setting could ever be switched off. Only an absent value falls back. */
+function TH(k){
+  const v = STATE.theme ? STATE.theme[k] : undefined;
+  return (v===undefined || v===null) ? THEME_DEFAULT[k] : v;
+}
 
 /* Mix toward white or black to derive a border shade from a background
    colour, so a custom box colour still reads as a box without a separate
@@ -4473,12 +4479,16 @@ function graphStyle(){
         'curve-style':'unbundled-bezier',
         'control-point-distances':'data(bend)','control-point-weights':0.5,
         'source-endpoint':'data(sep)','target-endpoint':'data(tep)',
+        'source-label':'data(sLab)','target-label':'data(tLab)',
+        'source-text-offset':16,'target-text-offset':16,
+        'source-text-margin-y':-9,'target-text-margin-y':-9,
+        'edge-text-rotation':'none',
         'source-arrow-shape':'circle','target-arrow-shape':'circle',
         'source-arrow-color':'data(dot)','target-arrow-color':'data(dot)',
         'source-arrow-fill':'filled','target-arrow-fill':'filled','arrow-scale':0.55,
         'label':'data(label)','color':'#61799a','font-size':9
       }},
-      {selector:'edge', style:{'color':TH('linkText'),'font-family':'IBM Plex Mono, monospace',
+      {selector:'edge', style:{'color':TH('linkText'),'font-family':TH('devFont'),'font-size':12,
         'text-wrap':'wrap','text-background-color':TH('canvasBg'),'text-background-opacity':0.85,'text-background-padding':2}},
       {selector:'edge[meta = 1]', style:{'color':'#7fd4a8','font-size':9.5}},
       {selector:'edge.hot', style:{'line-color':'#e8a13a','width':3,'color':'#e8a13a','z-index':20,
@@ -4970,11 +4980,18 @@ function render(){
     if(!vis(d)) continue;
     const lo = d.interfaces.filter(i=>i.addrs.some(a=>a.len===32)).length;
     const routes = d.fib.some(f=>f.type!=='connected');
-    const role = (d.isSwitch && !routes && !d.interfaces.some(i=>i.addrs.length && !/^vlan/i.test(i.name)))
-                 ? 'switch' : 'router';
+    /* roleOf knows about firewalls; the old local test only ever said switch
+       or router, so a firewall came out labelled Router. */
+    const role = roleOf(d);
     const vc = Object.keys(d.vlans||{}).length;
     const dc=deviceColor(d, role), df=deviceFont(d);
-    els.push({data:{id:d.id, label:(selMode?(sel.has(d.id)?'☑ ':'☐ '):'')+d.name, kind:'device',
+    /* Two lines, as a drawn diagram does it: what the device is, then what it
+       is called. The role line is optional so a dense map can drop it. */
+    const roleLine = TH('showRole')===false ? '' :
+      (role==='firewall' ? 'Firewall' : role==='switch' ? 'Switch' : 'Router');
+    const devLabel = (selMode?(sel.has(d.id)?'☑ ':'☐ '):'') +
+                     (roleLine ? roleLine+'\n' : '') + d.name;
+    els.push({data:{id:d.id, label:devLabel, kind:'device',
                     vendor:d.vendor, role, picked: sel.has(d.id)?1:0, pkey:'dev:'+d.name,
                     bg:dc.bg, fg:dc.fg, bd:dc.bd, fs:df.size, fw:df.weight, ff:df.fam, dotUri:statusDot(d),
                     overrideW:d.boxW||undefined, overrideH:d.boxH||undefined,
@@ -5032,8 +5049,13 @@ function render(){
             }
           } else {
             id='e'+(++e);
+            /* The port name belongs at the end it describes, the way a drawn
+               diagram does it — reading a crowded midpoint label to work out
+               which port is which end is the thing that slows you down. */
             els.push({data:{id, source:a.dev.id, target:b.dev.id, kind:'p2p', net:k,
-              label: members.length===2 ? shortIf(a.iface.name)+'  ·  '+k+'  ·  '+shortIf(b.iface.name) : k}});
+              label: k,
+              sLab: members.length===2 ? shortIf(a.iface.name) : '',
+              tLab: members.length===2 ? shortIf(b.iface.name) : ''}});
           }
           edgePair[a.dev.id+'::'+a.iface.name+'::'+b.dev.id]=id;
           edgePair[b.dev.id+'::'+b.iface.name+'::'+a.dev.id]=id;
@@ -8941,7 +8963,7 @@ function initTheme(){
     dBold.onchange=()=>{ STATE.theme.devBold=dBold.checked; applyTheme(); autosave(); }; }
   if(zBold){ zBold.checked=!!STATE.theme.zoneBold;
     zBold.onchange=()=>{ STATE.theme.zoneBold=zBold.checked; applyTheme(); autosave(); }; }
-  const boolMap={canvasGrid:'th-canvasGrid', zoneGrid:'th-zoneGrid'};
+  const boolMap={canvasGrid:'th-canvasGrid', zoneGrid:'th-zoneGrid', showRole:'th-showRole'};
   for(const k in boolMap){
     const el=document.getElementById(boolMap[k]);
     if(!el) continue;
