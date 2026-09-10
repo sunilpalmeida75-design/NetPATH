@@ -2419,47 +2419,86 @@ function applyBends(els){
       // sensible defaults until autoRouteEdges measures the real geometry
       el.data.segD = el.data.segD || '0';
       el.data.segW = el.data.segW || '0.5';
+      el.data.sep  = el.data.sep  || 'outside-to-node';
+      el.data.tep  = el.data.tep  || 'outside-to-node';
     });
   }
   return els;
 }
 
-/* Route every link as right-angle runs, and keep them off things they have
-   nothing to do with.
+/* Keep links off the boxes, and spread where they land.
 
-   Cytoscape's segment edges take waypoints expressed relative to the straight
-   line between the two ends: how far along it (a weight, 0..1) and how far to
-   the side (a distance). We work in plain x/y, choose an orthogonal path — a
-   Z shape with one vertical or horizontal channel — then convert the corners
-   into that form. Candidate channels are tried in turn and the one that
-   crosses the fewest device boxes and unrelated zones wins. Two devices that
-   share a row or column, with something between them, get a U-shaped detour
-   instead, because no Z can dodge it. Channels snap to a grid so runs from
-   neighbouring links line up instead of scattering. */
+   Two shapes are used. Everywhere except link detail a link is a gentle curve,
+   bowed aside only as far as it takes to clear whatever stands between its two
+   ends. Link detail, where a handful of connections are shown large, uses
+   right-angle runs instead.
+
+   Either way nothing passes beneath a device box: the obstacles are every
+   other device, plus any zone the link neither starts nor ends inside, so a
+   cable between two datacentres goes around a third rather than through it.
+   Endpoints are then spread along the sides of each box, so several links
+   arriving at one device meet its edge at separate points instead of stacking
+   on the centre. */
 function zoneAncestors(node){
   const out=new Set();
   let p=node.parent && node.parent();
   while(p && p.length){ out.add(p.id()); p=p.parent(); }
   return out;
 }
-function autoRouteEdges(cy){
-  if(!cy || STATE.noAutoRoute) return;
-  STATE.bends = STATE.bends || {};
-
-  const devBoxes=[], zoneBoxes=[];
+function routeObstacles(cy){
+  const dev=[], zone=[];
   cy.nodes().forEach(n=>{
     const p=n.position();
     if(!p || !isFinite(p.x)) return;
     const b={id:n.id(), x:p.x, y:p.y, hw:(n.outerWidth()||60)/2, hh:(n.outerHeight()||30)/2};
-    if(n.data('kind')==='group') zoneBoxes.push(b); else devBoxes.push(b);
+    if(n.data('kind')==='group') zone.push(b); else dev.push(b);
   });
-  const M=14, GRID=20;
-  const snap=(v)=>Math.round(v/GRID)*GRID;
+  return {dev, zone};
+}
+const ROUTE_M=14, ROUTE_GRID=20;
 
-  // does the straight run a->b pass through box b (with a margin)?
-  const legHits=(ax,ay,bx,by,box,pad)=>
-    Math.max(ax,bx) >= box.x-box.hw-pad && Math.min(ax,bx) <= box.x+box.hw+pad &&
-    Math.max(ay,by) >= box.y-box.hh-pad && Math.min(ay,by) <= box.y+box.hh+pad;
+/* Spread the links arriving at a box across the side they come from, so they
+   meet its edge at separate points rather than all at its centre. */
+function assignEndpoints(cy){
+  cy.nodes().forEach(n=>{
+    if(n.data('kind')==='group') return;
+    const here=n.position();
+    if(!here || !isFinite(here.x)) return;
+    const sides={top:[], bottom:[], left:[], right:[]};
+    n.connectedEdges().forEach(e=>{
+      const other = e.source().id()===n.id() ? e.target() : e.source();
+      const p=other.position();
+      if(!p || !isFinite(p.x)) return;
+      const dx=p.x-here.x, dy=p.y-here.y;
+      const side = Math.abs(dx)>=Math.abs(dy) ? (dx>=0?'right':'left') : (dy>=0?'bottom':'top');
+      sides[side].push({e, key:(side==='left'||side==='right') ? p.y : p.x});
+    });
+    for(const side in sides){
+      const list=sides[side];
+      if(!list.length) continue;
+      list.sort((a,b)=>a.key-b.key);
+      list.forEach((item,i)=>{
+        // evenly across the middle 80% of that side
+        const f = list.length===1 ? 0 : (-0.4 + 0.8*(i/(list.length-1)));
+        const pos = (side==='left'||side==='right')
+          ? (side==='right'?'50%':'-50%')+' '+(f*100).toFixed(1)+'%'
+          : (f*100).toFixed(1)+'% '+(side==='bottom'?'50%':'-50%');
+        item.e.data(item.e.source().id()===n.id() ? 'sep' : 'tep', pos);
+      });
+    }
+  });
+}
+
+function autoRouteEdges(cy, mode){
+  if(!cy || STATE.noAutoRoute) return;
+  STATE.bends = STATE.bends || {};
+  assignEndpoints(cy);
+
+  const {dev, zone}=routeObstacles(cy);
+  const M=ROUTE_M, snap=(v)=>Math.round(v/ROUTE_GRID)*ROUTE_GRID;
+  const legHits=(ax,ay,bx,by,b,pad)=>
+    Math.max(ax,bx) >= b.x-b.hw-pad && Math.min(ax,bx) <= b.x+b.hw+pad &&
+    Math.max(ay,by) >= b.y-b.hh-pad && Math.min(ay,by) <= b.y+b.hh+pad;
   const pathHits=(pts,boxes,skip,pad)=>{
     let n=0;
     for(const b of boxes){
@@ -2475,10 +2514,61 @@ function autoRouteEdges(cy){
     const s=S.position(), t=T.position();
     if(!s||!t) return;
     const dx=t.x-s.x, dy=t.y-s.y, L=Math.hypot(dx,dy);
-    if(L<1){ e.data('segD','0'); e.data('segW','0.5'); return; }
+    const key=e.data('ekey'), fan=e.data('fan')||0;
+    const ortho = mode==='ortho';
+    e.data('ortho', ortho?1:0);
+    if(L<1){ e.data('bend',0); e.data('segD','0'); e.data('segW','0.5'); return; }
     const ux=dx/L, uy=dy/L, nx=-uy, ny=ux;
 
-    // express an x/y corner as (weight along, distance across) for cytoscape
+    // the endpoints, and any zone either endpoint sits inside, are never solid
+    const skip=new Set([S.id(), T.id()]);
+    const inZones=new Set([...zoneAncestors(S), ...zoneAncestors(T)]);
+    for(const z of inZones) skip.add(z);
+    const obstacles=dev.concat(zone.filter(z=>!inZones.has(z.id)));
+
+    // how far sideways this link must move to clear everything in its way
+    let needPos=0, needNeg=0;
+    for(const b of obstacles){
+      if(skip.has(b.id)) continue;
+      const vx=b.x-s.x, vy=b.y-s.y, along=vx*ux+vy*uy;
+      if(along<=0||along>=L) continue;
+      const off=vx*nx+vy*ny;
+      const clear=Math.abs(b.hw*nx)+Math.abs(b.hh*ny)+M;
+      if(Math.abs(off)>=clear) continue;
+      if(off>=0) needNeg=Math.max(needNeg,clear-off); else needPos=Math.max(needPos,clear+off);
+    }
+
+    if(!ortho){
+      /* Curved: bow the line aside. A bezier's middle moves about half its
+         control distance, so ask for twice the clearance needed. */
+      if(key && STATE.bends[key]!=null){ e.data('bend', STATE.bends[key]); return; }
+      if(!needPos && !needNeg){ e.data('bend', fan); return; }
+      const wantPos = needPos ? needPos*2+Math.max(0,fan)  : Infinity;
+      const wantNeg = needNeg ? needNeg*2+Math.max(0,-fan) : Infinity;
+      let d = wantPos<=wantNeg ? wantPos : -wantNeg;
+      if(!isFinite(d)) d=fan;
+      d = Math.round(Math.max(-600, Math.min(600, d)));
+      /* A curve pulls back toward its ends, so a wide obstacle — a zone, say —
+         can still be clipped however hard we bow. Check the drawn curve, and
+         fall back to right angles for this one link if it does not clear. */
+      const clears=(bend)=>{
+        const cx=(s.x+t.x)/2+nx*bend, cy2=(s.y+t.y)/2+ny*bend;
+        for(let i=0;i<=40;i++){
+          const u=i/40, k=(1-u)*(1-u), k2=2*(1-u)*u, k3=u*u;
+          const px=k*s.x+k2*cx+k3*t.x, py=k*s.y+k2*cy2+k3*t.y;
+          for(const b of obstacles){
+            if(skip.has(b.id)) continue;
+            if(Math.abs(px-b.x)<b.hw+M*0.5 && Math.abs(py-b.y)<b.hh+M*0.5) return false;
+          }
+        }
+        return true;
+      };
+      if(clears(d)){ e.data('bend', d); e.data('ortho',0); return; }
+      if(clears(d*1.6)){ e.data('bend', Math.round(d*1.6)); e.data('ortho',0); return; }
+      e.data('ortho', 1);      // give this one right angles instead
+    }
+
+    /* Orthogonal: a Z through a clear channel, or a U around the outside. */
     const toSeg=(pts)=>{
       const ws=[], ds=[];
       for(const [px,py] of pts){
@@ -2488,26 +2578,11 @@ function autoRouteEdges(cy){
       }
       e.data('segD', ds.join(' ')); e.data('segW', ws.join(' '));
     };
-
-    const key=e.data('ekey');
-    const fan=e.data('fan')||0;
-
-    // never treat the endpoints, or any zone either endpoint lives in, as solid
-    const skip=new Set([S.id(), T.id()]);
-    const inZones=new Set([...zoneAncestors(S), ...zoneAncestors(T)]);
-    for(const z of inZones) skip.add(z);
-    const obstacles=devBoxes.concat(zoneBoxes.filter(z=>!inZones.has(z.id)));
-
-    /* A hand-placed link keeps its offset, but still as right angles: the
-       saved value is where the channel sits, as a fraction of the span. */
     const hand = key && STATE.bends[key]!=null ? STATE.bends[key] : null;
-
     const horizFirst = Math.abs(dx) >= Math.abs(dy);
     const fracs = hand!=null ? [Math.max(0.05,Math.min(0.95,hand/100))]
                              : [0.5,0.4,0.6,0.3,0.7,0.2,0.8,0.12,0.88];
-    // parallel links between the same pair pick different channels
     const fanShift = fan ? (fan>0?0.08:-0.08)*Math.ceil(Math.abs(fan)/55) : 0;
-
     let best=null;
     for(const f0 of fracs){
       const f=Math.max(0.05,Math.min(0.95,f0+fanShift));
@@ -2519,23 +2594,19 @@ function autoRouteEdges(cy){
       if(!best||cost<best.cost) best={pts,hits,cost};
       if(hits===0) break;
     }
-
-    /* If no Z-channel is clear, detour around the outside with a U. Its legs
-       are axis-aligned, so the clearance is worked out per axis: the middle
-       run must sit outside every blocker's extent on that axis. */
-    if(best.hits>0){
+    if(best.hits>0 && hand==null){
       let pts=null;
       if(horizFirst){
         const x1=snap(s.x+dx*0.15), x2=snap(s.x+dx*0.85);
         const lo=Math.min(x1,x2), hi=Math.max(x1,x2);
-        let up=Infinity, down=-Infinity;              // candidate y for the middle run
+        let up=Infinity, down=-Infinity;
         for(const b of obstacles){
           if(skip.has(b.id)) continue;
-          if(b.x+b.hw+M < lo || b.x-b.hw-M > hi) continue;   // not under the run
+          if(b.x+b.hw+M < lo || b.x-b.hw-M > hi) continue;
           up=Math.min(up, b.y-b.hh-M-6); down=Math.max(down, b.y+b.hh+M+6);
         }
         const ref=(s.y+t.y)/2;
-        const ry = (Math.abs(up-ref) <= Math.abs(down-ref)) ? up : down;
+        const ry=(Math.abs(up-ref)<=Math.abs(down-ref))?up:down;
         if(isFinite(ry)) pts=[[s.x,s.y],[x1,s.y],[x1,ry],[x2,ry],[x2,t.y],[t.x,t.y]];
       } else {
         const y1=snap(s.y+dy*0.15), y2=snap(s.y+dy*0.85);
@@ -2547,7 +2618,7 @@ function autoRouteEdges(cy){
           left=Math.min(left, b.x-b.hw-M-6); right=Math.max(right, b.x+b.hw+M+6);
         }
         const ref=(s.x+t.x)/2;
-        const rx = (Math.abs(left-ref) <= Math.abs(right-ref)) ? left : right;
+        const rx=(Math.abs(left-ref)<=Math.abs(right-ref))?left:right;
         if(isFinite(rx)) pts=[[s.x,s.y],[s.x,y1],[rx,y1],[rx,y2],[t.x,y2],[t.x,t.y]];
       }
       if(pts){
@@ -2555,11 +2626,10 @@ function autoRouteEdges(cy){
         if(uh<best.hits) best={pts,hits:uh,cost:0};
       }
     }
-
-    // corners only — cytoscape supplies the two ends itself
     toSeg(best.pts.slice(1,-1));
   });
 }
+
 
 function sizeNodes(els){
   for(const el of els){
@@ -3581,10 +3651,9 @@ function graphStyle(){
         'width':'data(lw)','line-color':'#33485f',
         /* right-angle routing with rounded corners, the way a hand-drawn
            network diagram runs its cables */
-        'curve-style':'segments',
-        'edge-distances':'node-position',
-        'segment-distances':'data(segD)',
-        'segment-weights':'data(segW)',
+        'curve-style':'unbundled-bezier',
+        'control-point-distances':'data(bend)','control-point-weights':0.5,
+        'source-endpoint':'data(sep)','target-endpoint':'data(tep)',
         'label':'data(label)','color':'#61799a','font-size':9
       }},
       {selector:'edge', style:{'color':TH('linkText'),'font-family':'IBM Plex Mono, monospace',
@@ -3621,8 +3690,11 @@ function graphStyle(){
         'text-background-shape':'roundrectangle','text-background-padding':7,
         'z-index':0}},
       {selector:'node[gkind="site"]', style:{'background-opacity':TH('zoneGrid')?0.35:1}},
+      {selector:'edge[ortho = 1]', style:{
+        'curve-style':'segments','edge-distances':'node-position',
+        'segment-distances':'data(segD)','segment-weights':'data(segW)'}},
       {selector:'edge[kind="ha"]', style:{
-        'line-color':'#8a6a2e','line-style':'dotted','width':2,'curve-style':'segments',
+        'line-color':'#8a6a2e','line-style':'dotted','width':2,'curve-style':'unbundled-bezier',
         'color':'#c49a4e','font-size':9,'text-wrap':'wrap','z-index':2}},
       {selector:'node[kind="group"].hot', style:{
         'border-width':TH('boxBorderW'),'background-opacity':TH('zoneGrid')?0.55:1}},
@@ -3985,8 +4057,9 @@ function render(){
       layout:{name:'preset', padding:60, fit: !(anchored && vpL)}
     });
     if(anchored && vpL){ cyl.zoom(vpL.zoom); cyl.pan(vpL.pan); }
-    setTimeout(()=>autoRouteEdges(cyl),0);
-    cyl.on('position','node', ()=>{ if(cyl._rt) return; cyl._rt=setTimeout(()=>{ cyl._rt=null; autoRouteEdges(cyl); },60); });
+    // link detail is the one screen that uses right-angle routing
+    setTimeout(()=>autoRouteEdges(cyl,'ortho'),0);
+    cyl.on('position','node', ()=>{ if(cyl._rt) return; cyl._rt=setTimeout(()=>{ cyl._rt=null; autoRouteEdges(cyl,'ortho'); },60); });
     cyl.on('tap','node[kind="device"]', evt=>{
       const d=model.devices.find(x=>x.id===evt.target.id());
       if(d) showDevice(d);
