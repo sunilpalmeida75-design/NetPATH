@@ -9,23 +9,23 @@
 <title>NetPath — topology and route trace from device configs</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js"></script>
 <style>
 :root{
-  --bg:#0e1621;
-  --panel:#182534;
-  --panel-2:#13202e;
-  --rule:#27394f;
-  --ink:#d3dfec;
-  --ink-dim:#7f93aa;
-  --ink-faint:#546a83;
-  --cyan:#4fc3d9;
+  --bg:#232b34;
+  --panel:#2b343f;
+  --panel-2:#1b222a;
+  --rule:#35404c;
+  --ink:#e8edf2;
+  --ink-dim:#a9b7c4;
+  --ink-faint:#6f8093;
+  --cyan:#57c7dc;
   --amber:#e8a13a;
   --red:#e0625f;
   --green:#5fb98a;
   --mono:"IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
-  --sans:"Inter", system-ui, -apple-system, sans-serif;
+  --sans:"IBM Plex Sans Condensed", system-ui, -apple-system, sans-serif;
 }
 *{box-sizing:border-box}
 html,body{height:100%}
@@ -383,22 +383,98 @@ table.fib td:first-child{color:var(--ink)}
   border-left:2px solid var(--amber); padding:4px 0 4px 10px; margin-bottom:7px;
 }
 .hidden{display:none}
+
+/* ================= Console layout ================= */
+:root{--top:44px}
+.top-panel{overflow:visible}
+.qbar{display:flex;align-items:center;gap:10px;padding:0 12px;height:44px;background:var(--panel-2);border-bottom:1px solid var(--rule)}
+.qbrand{font-weight:600;color:var(--ink-dim);font-size:13.5px;margin-right:4px}
+.q{flex:1;display:flex;align-items:center;gap:6px;background:var(--bg);border:1px solid var(--rule);border-radius:6px;min-height:32px;padding:3px 8px;font:13px var(--mono);flex-wrap:wrap}
+.q:focus-within{border-color:var(--cyan)}
+.qtoks{display:flex;gap:5px;flex-wrap:wrap}
+.qtok{background:var(--panel);padding:2px 7px;border-radius:4px;color:var(--ink-dim);display:inline-flex;gap:4px;align-items:center;cursor:pointer;white-space:nowrap}
+.qtok b{color:var(--cyan);font-weight:500}
+.qtok.neg b{color:var(--red)}
+.qtok .x{color:var(--ink-faint);margin-left:2px}
+.qtok:hover .x{color:var(--ink)}
+.q input{flex:1;min-width:220px;background:none;border:0;color:var(--ink);font:inherit;outline:0;padding:3px 0}
+.qhelp{color:var(--ink-faint);font-size:12px;font-family:var(--sans);white-space:nowrap}
+.qsuggest{position:absolute;z-index:40;background:var(--panel);border:1px solid var(--rule);border-radius:6px;box-shadow:0 8px 24px rgba(0,0,0,.35);max-height:260px;overflow:auto;min-width:260px;font:13px var(--mono)}
+.qsuggest div{padding:6px 10px;cursor:pointer;color:var(--ink-dim)}
+.qsuggest div:hover,.qsuggest div.on{background:var(--panel-2);color:var(--ink)}
+.qsuggest div b{color:var(--cyan);font-weight:500}
+/* device tree */
+#devtree .site{padding:8px 4px 2px;font-weight:600;font-size:12.5px;color:var(--ink-dim)}
+#devtree .dev{display:flex;align-items:center;gap:7px;padding:4px 6px 4px 14px;font:12.5px var(--mono);cursor:pointer;color:var(--ink-dim);border-radius:4px}
+#devtree .dev:hover{background:var(--panel-2)}
+#devtree .dev.on{background:var(--panel-2);color:var(--ink);box-shadow:inset 2px 0 0 var(--cyan)}
+#devtree .dev .k{margin-left:auto;font:11px var(--sans);color:var(--ink-faint)}
+#devtree .dev .d{width:7px;height:7px;border-radius:50%;flex:none}
+#devtree .dev.dim{opacity:.4}
+/* data grid */
+.bottom-panel{display:flex;flex-direction:column;min-height:0;overflow:hidden}
+.gtabs{display:flex;align-items:center;gap:2px;padding:0 8px;border-bottom:1px solid var(--rule);height:36px;flex:none;background:var(--panel-2)}
+.gtab{background:none;border:0;color:var(--ink-faint);padding:8px 10px;font:13.5px var(--sans);cursor:pointer;border-bottom:2px solid transparent}
+.gtab.on{color:var(--ink);border-bottom-color:var(--cyan)}
+.gtab i{font-style:normal;color:var(--ink-faint);margin-left:5px;font-size:11.5px}
+.gright{margin-left:auto;display:flex;gap:6px;align-items:center}
+.gright input{background:var(--bg);border:1px solid var(--rule);border-radius:5px;color:var(--ink);padding:4px 8px;font:12.5px var(--sans);width:220px}
+.gbody{overflow:auto;flex:1;min-height:0}
+.gbody table{width:100%;border-collapse:collapse;font:12.5px var(--mono)}
+.gbody th{position:sticky;top:0;background:var(--panel-2);text-align:left;font:600 12px var(--sans);color:var(--ink-faint);padding:6px 10px;border-bottom:1px solid var(--rule);cursor:pointer;user-select:none;white-space:nowrap}
+.gbody th.sorted{color:var(--ink)}
+.gbody td{padding:5px 10px;border-bottom:1px solid var(--rule);white-space:nowrap;color:var(--ink-dim)}
+.gbody tr:hover td{background:var(--panel)}
+.gbody tr.on td{background:var(--panel);color:var(--ink)}
+.gbody td.dv{font-family:var(--sans);cursor:pointer;color:var(--cyan)}
+.gbody td .tg{font:11.5px var(--sans);padding:1px 6px;border-radius:4px;background:var(--panel);color:var(--ink-dim)}
+.gbody td .tg.l3{color:var(--cyan)} .gbody td .tg.l2{color:var(--green)} .gbody td .tg.w{color:var(--red)} .gbody td .tg.ok{color:var(--green)}
+.gbody .gempty{padding:18px;color:var(--ink-faint);font-size:13px}
+
+/* bulk picker */
+.pick-back{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:60}
+.pick{position:fixed;z-index:61;top:56px;left:50%;transform:translateX(-50%);width:min(880px,94vw);max-height:76vh;
+  background:var(--panel-2);border:1px solid var(--rule);border-radius:10px;box-shadow:0 20px 60px rgba(0,0,0,.5);display:flex;flex-direction:column}
+.pick header{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--rule)}
+.pick header h2{margin:0;font-size:14px;font-weight:600}
+.pick header .sp{flex:1}
+.pick .cols{display:grid;grid-template-columns:1fr 1fr;gap:0;overflow:hidden;flex:1;min-height:0}
+.pick .col{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--rule)}
+.pick .col:last-child{border-right:0}
+.pick .col h3{margin:0;padding:10px 16px 6px;font-size:12px;font-weight:600;color:var(--ink-faint);display:flex;gap:8px;align-items:center}
+.pick .col h3 span{color:var(--ink-dim);font-weight:400}
+.pick .tools{display:flex;gap:6px;padding:0 16px 8px;flex-wrap:wrap}
+.pick .tools input{flex:1;min-width:150px;background:var(--bg);border:1px solid var(--rule);border-radius:5px;color:var(--ink);padding:5px 8px;font:12.5px var(--mono)}
+.pick .list{overflow:auto;padding:0 8px 10px;flex:1;min-height:0}
+.pick .row{display:flex;align-items:center;gap:9px;padding:5px 8px;border-radius:5px;cursor:pointer;font:12.5px var(--mono);color:var(--ink-dim)}
+.pick .row:hover{background:var(--panel)}
+.pick .row.on{color:var(--ink)}
+.pick .row .box{width:14px;height:14px;border:1px solid var(--rule);border-radius:3px;flex:none;display:grid;place-items:center;font-size:10px;color:var(--bg)}
+.pick .row.on .box{background:var(--green);border-color:var(--green);color:#10231a}
+.pick .row .n{margin-left:auto;font:11px var(--sans);color:var(--ink-faint)}
+.pick footer{display:flex;align-items:center;gap:8px;padding:10px 16px;border-top:1px solid var(--rule)}
+.pick footer .sum{flex:1;font-size:12.5px;color:var(--ink-faint)}
 </style>
 </head>
 <body>
 <div class="shell">
   <div class="top-panel" id="top-panel">
-    <div class="top-head">
-      <h2>VRF / VSYS scope</h2>
-      <span class="count" id="scope-count"></span>
-      <span class="spacer"></span>
-      <label class="toggle" style="padding:3px 8px" title="Judge every interface only by its own VRF or virtual router. Firewall sub-interfaces will not inherit the VRF of the segment they sit on."><input type="checkbox" id="scope-strict"> Strict</label>
-      <label class="toggle" style="padding:3px 8px"><input type="checkbox" id="scope-nofw"> Firewalls exempt</label>
-      <label class="toggle" style="padding:3px 8px"><input type="checkbox" id="top-auto" checked> Auto-hide</label>
-      <button class="btn tiny" id="top-pin" title="Keep open">Pin</button>
-      <button class="btn tiny" id="tog-t" title="Collapse">▴</button>
+    <div class="qbar">
+      <span class="qbrand">NetPath</span>
+      <div class="q" id="qbox">
+        <div class="qtoks" id="qtoks"></div>
+        <input id="qinput" placeholder="add a filter…  vrf:PROD  -vrf:DEV  site:FRA  vlan:1250  ip:10.64.140.1" spellcheck="false" autocomplete="off">
+        <span class="qhelp" id="qhelp">whole project</span>
+      </div>
+      <button class="btn tiny" id="q-pick">Pick VRF / VSYS</button>
+      <label class="toggle" style="padding:3px 8px" title="Judge every interface only by its own VRF or virtual router."><input type="checkbox" id="scope-strict"> Strict</label>
+      <label class="toggle" style="padding:3px 8px"><input type="checkbox" id="scope-nofw"> FW exempt</label>
+      <button class="btn tiny" id="tog-t" title="Collapse" style="display:none">▴</button>
+      <input type="checkbox" id="top-auto" style="display:none">
+      <button id="top-pin" style="display:none"></button>
+      <span id="scope-count" style="display:none"></span>
     </div>
-    <div id="vrfvsys-body"></div>
+    <div id="vrfvsys-body" style="display:none"></div>
   </div>
   <div class="gutter-h" id="gut-t"></div>
 
@@ -439,7 +515,8 @@ table.fib td:first-child{color:var(--ink)}
       <p class="saved-note" id="autosave-note">Your work stays in this browser until you clear it.</p>
 
       <h2 class="sec">Devices <span id="dev-count" style="color:var(--ink-faint);font-weight:400"></span></h2>
-      <ul class="devs" id="devlist"></ul>
+      <div id="devtree"></div>
+      <ul class="devs" id="devlist" style="display:none"></ul>
       <p class="note" id="dev-empty">No devices yet.</p>
 
       <h2 class="sec">Find</h2>
@@ -613,11 +690,20 @@ table.fib td:first-child{color:var(--ink)}
     <button class="pan-toggle-h" id="tog-b" title="Minimize">▾</button>
   </div>
   <div class="bottom-panel" id="bottom-panel">
-    <div class="bottom-head">
-      <h2>Device readiness</h2>
-      <span class="count" id="health-count"></span>
+    <div class="gtabs">
+      <button class="gtab on" data-gtab="ifaces">Interfaces<i id="gn-ifaces"></i></button>
+      <button class="gtab" data-gtab="routes">Routes<i id="gn-routes"></i></button>
+      <button class="gtab" data-gtab="links">Links<i id="gn-links"></i></button>
+      <button class="gtab" data-gtab="warnings">Warnings<i id="gn-warnings"></i></button>
+      <button class="gtab" data-gtab="readiness">Readiness<i id="gn-readiness"></i></button>
+      <div class="gright">
+        <input id="gfilter" placeholder="Filter this table…" spellcheck="false">
+        <button class="btn tiny" id="gcsv">Export CSV</button>
+        <button class="btn tiny" id="tog-b" title="Minimize">▾</button>
+      </div>
     </div>
-    <div class="bottom-body" id="health-body"></div>
+    <div class="gbody" id="gbody"></div>
+    <div id="health-body" style="display:none"></div><span id="health-count" style="display:none"></span>
   </div>
 </div>
 
@@ -1944,8 +2030,11 @@ function buildModel(devices, opts){
     for(const x of tagged) (groups[x.t]=groups[x.t]||[]).push(x.m);
     const tags=Object.keys(groups);
     if(tags.length<2) continue;                  // everyone agrees
-    // the largest group wins; ties go to the lowest tag for determinism
-    tags.sort((a,b)=> groups[b].length-groups[a].length || (+a)-(+b));
+    // the largest group wins; on a tie the group with a switch/router in it is
+    // the authority (the firewall borrows its tag from the switch, never the
+    // reverse), then the lowest tag for determinism
+    const hasSw=(t)=>groups[t].some(m=>!isFirewall(m.dev))?1:0;
+    tags.sort((a,b)=> groups[b].length-groups[a].length || hasSw(b)-hasSw(a) || (+a)-(+b));
     const keep=tags[0];
     const odd=[];
     for(const t of tags.slice(1)) for(const m of groups[t]){
@@ -2527,6 +2616,7 @@ function segmentInScope(sn){
 }
 function ifaceInScope(i){
   if(!scopeActive() || !i) return true;
+  if(i.tagOdd) return false;                      // on no link at all
   const dev=i.dev;
   // firewalls can be exempted entirely — useful when the VRF names on the
   // routing side mean nothing to the firewall's own virtual routers
@@ -2759,6 +2849,428 @@ function renderVrfFilter(){
   bind('vrf-clear',()=>{ s.vo.clear(); s.so.clear(); refresh(); });
 }
 
+
+/* ============================================================
+   Console: query bar, site-grouped device tree, data grid
+   ============================================================ */
+STATE.q = STATE.q || {vrfIn:[], vrfEx:[], vsysIn:[], vsysEx:[],
+                      sites:new Set(), notSites:new Set(), vlans:new Set(), ips:[], text:[]};
+
+/* VRF and VSYS filters are kept as a list of patterns, not as a baked-out set
+   of names. That way several patterns accumulate — vrf:A_* then vrf:B_* means
+   both — and each can be removed on its own. The concrete off-list is derived
+   from the patterns every time, so adding a config later picks up new names. */
+function recomputeScope(){
+  scopeSets();
+  const q=STATE.q;
+  const doOne=(names, inc, exc, off)=>{
+    off.clear();
+    for(const n of names){
+      const included = !inc.length || inc.some(p=>globMatch(p,n));
+      const excluded = exc.some(p=>globMatch(p,n));
+      if(!included || excluded) off.add(n);
+    }
+  };
+  doOne(allVrfNames(),  q.vrfIn,  q.vrfEx,  STATE.vrfOff);
+  doOne(allVsysNames(), q.vsysIn, q.vsysEx, STATE.vsysOff);
+}
+
+/* Tokens: key:value or -key:value. vrf/vsys drive the existing scope sets;
+   site/vlan/ip/free-text narrow the device set on top of that. */
+function qTokens(){
+  const out=[]; const q=STATE.q;
+  for(const v of q.vrfIn)  out.push({k:'vrf',v,neg:false});
+  for(const v of q.vrfEx)  out.push({k:'vrf',v,neg:true});
+  for(const v of q.vsysIn) out.push({k:'vsys',v,neg:false});
+  for(const v of q.vsysEx) out.push({k:'vsys',v,neg:true});
+  for(const v of STATE.q.sites)    out.push({k:'site',v,neg:false});
+  for(const v of STATE.q.notSites) out.push({k:'site',v,neg:true});
+  for(const v of STATE.q.vlans)    out.push({k:'vlan',v:String(v),neg:false});
+  for(const v of STATE.q.ips)      out.push({k:'ip',v,neg:false});
+  for(const v of STATE.q.text)     out.push({k:'',v,neg:false});
+  return out;
+}
+function qApply(raw){
+  const t=String(raw||'').trim(); if(!t) return false;
+  const m=t.match(/^(-?)(vrf|vsys|site|vlan|ip):(.+)$/i);
+  scopeSets();
+  if(!m){ STATE.q.text.push(t); return true; }
+  const neg=m[1]==='-', k=m[2].toLowerCase(), v=m[3].trim();
+  if(k==='vrf'){
+    const arr = neg ? STATE.q.vrfEx : STATE.q.vrfIn;
+    if(!arr.includes(v)) arr.push(v);
+    recomputeScope();
+  } else if(k==='vsys'){
+    const arr = neg ? STATE.q.vsysEx : STATE.q.vsysIn;
+    if(!arr.includes(v)) arr.push(v);
+    recomputeScope();
+  } else if(k==='site'){ (neg?STATE.q.notSites:STATE.q.sites).add(v); }
+  else if(k==='vlan'){ const n=parseInt(v,10); if(n) STATE.q.vlans.add(n); }
+  else if(k==='ip'){ STATE.q.ips.push(v); }
+  return true;
+}
+function qRemove(tok){
+  scopeSets();
+  const pull=(a,v)=>{ const i=a.indexOf(v); if(i>=0) a.splice(i,1); };
+  if(tok.k==='vrf'){  pull(tok.neg?STATE.q.vrfEx:STATE.q.vrfIn, tok.v);  recomputeScope(); }
+  else if(tok.k==='vsys'){ pull(tok.neg?STATE.q.vsysEx:STATE.q.vsysIn, tok.v); recomputeScope(); }
+  else if(tok.k==='site'){ STATE.q.sites.delete(tok.v); STATE.q.notSites.delete(tok.v); }
+  else if(tok.k==='vlan') STATE.q.vlans.delete(parseInt(tok.v,10));
+  else if(tok.k==='ip') STATE.q.ips=STATE.q.ips.filter(x=>x!==tok.v);
+  else STATE.q.text=STATE.q.text.filter(x=>x!==tok.v);
+}
+function qClear(){ scopeSets(); STATE.vrfOff.clear(); STATE.vsysOff.clear();
+  STATE.q={vrfIn:[], vrfEx:[], vsysIn:[], vsysEx:[],
+           sites:new Set(), notSites:new Set(), vlans:new Set(), ips:[], text:[]}; }
+function qActive(){ return scopeActive() || STATE.q.sites.size || STATE.q.notSites.size || STATE.q.vlans.size || STATE.q.ips.length || STATE.q.text.length; }
+
+/* Does a device pass the site / vlan / ip / text part of the query? */
+function qDeviceOk(d){
+  const q=STATE.q;
+  if(q.sites.size || q.notSites.size){
+    const st=siteOf(d), nm=st?st.name:'';
+    if(q.sites.size && ![...q.sites].some(p=>globMatch(p,nm))) return false;
+    if(q.notSites.size && [...q.notSites].some(p=>globMatch(p,nm))) return false;
+  }
+  if(q.vlans.size){
+    const has=d.interfaces.some(i=>{ const v=vlanOfIface(i); return v && q.vlans.has(parseInt(v,10)); }) ||
+              (d.vlans && [...q.vlans].some(v=>d.vlans[v]));
+    if(!has) return false;
+  }
+  if(q.ips.length){
+    const hit=q.ips.some(ip=>{
+      const m=findMatches(ip);
+      const owners=m.filter(x=>x.owner);
+      return (owners.length?owners:m).some(x=>x.dev===d);
+    });
+    if(!hit) return false;
+  }
+  if(q.text.length){
+    const hay=(d.name+' '+d.interfaces.map(i=>i.name+' '+i.addrs.map(a=>int2ip(a.ip)).join(' ')).join(' ')).toLowerCase();
+    if(!q.text.every(t=>hay.indexOf(t.toLowerCase())>=0)) return false;
+  }
+  return true;
+}
+
+function renderQueryBar(){
+  const box=document.getElementById('qtoks'); if(!box) return;
+  const toks=qTokens();
+  box.innerHTML=toks.map((t,i)=>'<span class="qtok'+(t.neg?' neg':'')+'" data-qi="'+i+'" title="Click to remove">'+
+    (t.k?'<b>'+(t.neg?'-':'')+esc(t.k)+':</b>':'')+esc(t.v)+'<span class="x">\u00d7</span></span>').join('');
+  box.querySelectorAll('[data-qi]').forEach(el=>el.onclick=()=>{ qRemove(toks[+el.dataset.qi]); qRefresh(); });
+  // when names were ticked directly there is no pattern to show, so surface a
+  // single summary chip instead of nothing
+  const s2=scopeSets();
+  if(!toks.some(t=>t.k==='vrf'||t.k==='vsys') && (s2.vo.size||s2.so.size)){
+    const bits=[];
+    if(s2.vo.size)  bits.push(s2.vo.size+' VRF');
+    if(s2.so.size) bits.push(s2.so.size+' VSYS');
+    box.innerHTML += '<span class="qtok neg" id="qtok-picked" title="Click to clear"><b>-picked:</b>'+
+      bits.join(' + ')+' hidden<span class="x">×</span></span>';
+    const el=document.getElementById('qtok-picked');
+    if(el) el.onclick=()=>{ s2.vo.clear(); s2.so.clear(); qRefresh(); };
+  }
+  const help=document.getElementById('qhelp');
+  if(help){
+    const shown=STATE.devices.filter(d=>deviceInScope(d)&&qDeviceOk(d)).length;
+    help.textContent = qActive() ? shown+' of '+STATE.devices.length+' devices' : 'whole project';
+  }
+}
+function qRefresh(){ renderQueryBar(); renderDevTree(); renderGrid(); render(); autosave(); }
+
+function initQueryBar(){
+  const inp=document.getElementById('qinput'); if(!inp) return;
+  let sug=null, sugIdx=-1;
+  const closeSug=()=>{ if(sug){ sug.remove(); sug=null; } sugIdx=-1; };
+  const suggestions=(txt)=>{
+    const m=txt.match(/^(-?)(vrf|vsys|site|vlan|ip)?:?(.*)$/i);
+    const pre=m&&m[2]?m[2].toLowerCase():null, part=(m?m[3]:txt).toLowerCase(), neg=m&&m[1]==='-';
+    const out=[];
+    const add=(k,vals)=>{ for(const v of vals) if(!part || String(v).toLowerCase().indexOf(part)>=0) out.push((neg?'-':'')+k+':'+v); };
+    if(!pre || pre==='vrf')  add('vrf', allVrfNames());
+    if(!pre || pre==='vsys') add('vsys', allVsysNames());
+    if(!pre || pre==='site') add('site', groups().filter(g=>!g.parent).map(g=>g.name));
+    if(!pre && !part) return ['vrf:','-vrf:','vsys:','site:','-site:','vlan:','ip:'];
+    return out.slice(0,14);
+  };
+  const showSug=()=>{
+    closeSug();
+    const list=suggestions(inp.value.trim()); if(!list.length) return;
+    sug=document.createElement('div'); sug.className='qsuggest';
+    const r=inp.getBoundingClientRect(); sug.style.left=r.left+'px'; sug.style.top=(r.bottom+4)+'px';
+    sug.innerHTML=list.map(x=>'<div>'+esc(x).replace(/^(-?\w+:)/,'<b>$1</b>')+'</div>').join('');
+    sug.querySelectorAll('div').forEach((el,i)=>el.onmousedown=(ev)=>{ ev.preventDefault(); inp.value=list[i]; if(/:$/.test(list[i])){ showSug(); inp.focus(); } else { qApply(list[i]); inp.value=''; closeSug(); qRefresh(); } });
+    document.body.appendChild(sug);
+  };
+  inp.oninput=showSug;
+  inp.onfocus=showSug;
+  inp.onblur=()=>setTimeout(closeSug,150);
+  inp.onkeydown=(ev)=>{
+    const items=sug?[...sug.querySelectorAll('div')]:[];
+    if(ev.key==='ArrowDown'&&items.length){ ev.preventDefault(); sugIdx=Math.min(items.length-1,sugIdx+1); items.forEach((el,i)=>el.classList.toggle('on',i===sugIdx)); return; }
+    if(ev.key==='ArrowUp'&&items.length){ ev.preventDefault(); sugIdx=Math.max(0,sugIdx-1); items.forEach((el,i)=>el.classList.toggle('on',i===sugIdx)); return; }
+    if(ev.key==='Enter'){
+      ev.preventDefault();
+      if(sugIdx>=0 && items[sugIdx]){ const v=items[sugIdx].textContent; if(/:$/.test(v)){ inp.value=v; showSug(); return; } inp.value=v; }
+      if(qApply(inp.value)){ inp.value=''; closeSug(); qRefresh(); }
+    }
+    if(ev.key==='Escape'){ inp.value=''; closeSug(); }
+    if(ev.key==='Backspace' && !inp.value){ const t=qTokens(); if(t.length){ qRemove(t[t.length-1]); qRefresh(); } }
+  };
+  const pick=document.getElementById('q-pick');
+  if(pick) pick.onclick=openPicker;
+  const strictBox=document.getElementById('scope-strict');
+  if(strictBox){ strictBox.checked=!!STATE.scopeStrict; strictBox.onchange=()=>{ STATE.scopeStrict=strictBox.checked; qRefresh(); }; }
+  const noFw=document.getElementById('scope-nofw');
+  if(noFw){ noFw.checked=!!STATE.scopeIgnoreFw; noFw.onchange=()=>{ STATE.scopeIgnoreFw=noFw.checked; qRefresh(); }; }
+}
+
+
+/* ---------- bulk picker: tick the ones you want, or match a pattern ---------- */
+function openPicker(){
+  const back=document.createElement('div'); back.className='pick-back';
+  const box=document.createElement('div'); box.className='pick';
+  const vrfs=allVrfNames(), vsyses=allVsysNames();
+  scopeSets();
+  // work on a copy so Cancel really cancels
+  let onVrf=new Set(vrfs.filter(n=>!STATE.vrfOff.has(n)));
+  let onVsys=new Set(vsyses.filter(n=>!STATE.vsysOff.has(n)));
+  const usage=(kind,n)=>STATE.devices.filter(d=>d.interfaces.some(i=>
+    kind==='vrf' ? effVrf(i)===n : i.vsys===n)).length;
+
+  const col=(kind,names,onSet)=>{
+    const q=(document.getElementById('pk-f-'+kind)||{}).value||'';
+    const vis=names.filter(n=>!q.trim() || (q.indexOf('*')>=0 ? globMatch(q,n) : n.toLowerCase().indexOf(q.toLowerCase())>=0));
+    return '<h3>'+(kind==='vrf'?'VRF':'VSYS')+' <span>'+onSet.size+' of '+names.length+' shown</span></h3>'+
+      '<div class="tools">'+
+        '<input id="pk-f-'+kind+'" placeholder="filter or pattern, e.g. *_DR_INT" value="'+esc(q)+'">'+
+        '<button class="btn tiny" data-pk="all|'+kind+'">All</button>'+
+        '<button class="btn tiny" data-pk="none|'+kind+'">None</button>'+
+        '<button class="btn tiny" data-pk="inv|'+kind+'">Invert</button>'+
+        '<button class="btn tiny btn-go" data-pk="add|'+kind+'">Tick matching</button>'+
+        '<button class="btn tiny danger" data-pk="del|'+kind+'">Untick matching</button>'+
+      '</div>'+
+      '<div class="list">'+(vis.length?vis.map(n=>
+        '<div class="row'+(onSet.has(n)?' on':'')+'" data-pkn="'+esc(kind+'|'+n)+'">'+
+        '<span class="box">\u2713</span><span>'+esc(n)+'</span><span class="n">'+usage(kind,n)+' dev</span></div>').join('')
+        : '<div class="row" style="opacity:.6">nothing matches</div>')+'</div>';
+  };
+  const paint=()=>{
+    box.innerHTML=
+      '<header><h2>Choose what the diagram shows</h2><span class="sp"></span>'+
+      '<span style="font-size:12.5px;color:var(--ink-faint)">Ticked stays on the map</span></header>'+
+      '<div class="cols"><div class="col" id="pk-vrf">'+col('vrf',vrfs,onVrf)+'</div>'+
+      '<div class="col" id="pk-vsys">'+col('vsys',vsyses,onVsys)+'</div></div>'+
+      '<footer><span class="sum">'+onVrf.size+' VRF and '+onVsys.size+' VSYS ticked</span>'+
+      '<button class="btn" id="pk-cancel">Cancel</button>'+
+      '<button class="btn btn-go" id="pk-apply">Apply</button></footer>';
+    box.querySelectorAll('[data-pkn]').forEach(el=>el.onclick=()=>{
+      const [kind,n]=el.dataset.pkn.split('|');
+      const set = kind==='vrf'?onVrf:onVsys;
+      set.has(n)?set.delete(n):set.add(n);
+      paint();
+    });
+    box.querySelectorAll('[data-pk]').forEach(el=>el.onclick=()=>{
+      const [act,kind]=el.dataset.pk.split('|');
+      const names = kind==='vrf'?vrfs:vsyses;
+      const set = kind==='vrf'?onVrf:onVsys;
+      const q=(document.getElementById('pk-f-'+kind)||{}).value||'';
+      const match=(n)=>!q.trim() || (q.indexOf('*')>=0 ? globMatch(q,n) : n.toLowerCase().indexOf(q.toLowerCase())>=0);
+      if(act==='all')  names.forEach(n=>set.add(n));
+      if(act==='none') set.clear();
+      if(act==='inv')  names.forEach(n=>set.has(n)?set.delete(n):set.add(n));
+      if(act==='add')  names.filter(match).forEach(n=>set.add(n));
+      if(act==='del')  names.filter(match).forEach(n=>set.delete(n));
+      paint();
+    });
+    ['vrf','vsys'].forEach(kind=>{
+      const f=document.getElementById('pk-f-'+kind);
+      if(f) f.oninput=()=>{ const v=f.value, pos=f.selectionStart; paint();
+        const g=document.getElementById('pk-f-'+kind); if(g){ g.value=v; g.focus(); try{ g.setSelectionRange(pos,pos); }catch(e){} } };
+    });
+    document.getElementById('pk-cancel').onclick=close;
+    document.getElementById('pk-apply').onclick=()=>{
+      /* Ticking is the source of truth now, so replace the patterns with the
+         exact names that are off. */
+      STATE.q.vrfIn=[]; STATE.q.vrfEx=[]; STATE.q.vsysIn=[]; STATE.q.vsysEx=[];
+      scopeSets();
+      STATE.vrfOff.clear();  vrfs.filter(n=>!onVrf.has(n)).forEach(n=>STATE.vrfOff.add(n));
+      STATE.vsysOff.clear(); vsyses.filter(n=>!onVsys.has(n)).forEach(n=>STATE.vsysOff.add(n));
+      close(); qRefresh();
+    };
+  };
+  const close=()=>{ back.remove(); box.remove(); document.removeEventListener('keydown',esckey); };
+  const esckey=(ev)=>{ if(ev.key==='Escape') close(); };
+  back.onclick=close;
+  document.addEventListener('keydown',esckey);
+  document.body.appendChild(back); document.body.appendChild(box);
+  paint();
+}
+
+/* ---------- device tree, grouped by site ---------- */
+function renderDevTree(){
+  const box=document.getElementById('devtree'); if(!box) return;
+  const empty=document.getElementById('dev-empty');
+  if(!STATE.devices.length){ box.innerHTML=''; if(empty) empty.style.display=''; return; }
+  if(empty) empty.style.display='none';
+  const bySite={}; const order=[];
+  for(const d of STATE.devices){
+    const st=siteOf(d); const key=st?st.name:'\u200bUnplaced';
+    if(!bySite[key]){ bySite[key]=[]; order.push(key); }
+    bySite[key].push(d);
+  }
+  order.sort((a,b)=> a.startsWith('\u200b')?1 : b.startsWith('\u200b')?-1 : a.localeCompare(b));
+  let html='';
+  for(const key of order){
+    html+='<div class="site">'+esc(key.replace('\u200b',''))+' <span style="color:var(--ink-faint);font-weight:400">'+bySite[key].length+'</span></div>';
+    for(const d of bySite[key].sort((a,b)=>a.name.localeCompare(b.name))){
+      const inQ = deviceInScope(d) && qDeviceOk(d);
+      const kind = isFirewall(d)?'FW':(roleOf(d)==='switch'?'SW':'RTR');
+      html+='<div class="dev'+(STATE.selected===d.id?' on':'')+(inQ?'':' dim')+'" data-tdev="'+esc(d.id)+'">'+
+        '<span class="d" style="background:'+(readinessOf(d)?'var(--green)':'var(--red)')+'"></span>'+
+        '<span>'+esc(d.name)+'</span><span class="k">'+kind+'</span></div>';
+    }
+  }
+  box.innerHTML=html;
+  box.querySelectorAll('[data-tdev]').forEach(el=>el.onclick=()=>{
+    const d=STATE.devices.find(x=>x.id===el.dataset.tdev); if(d){ openRight(); showDevice(d); renderDevTree(); }
+  });
+  const cnt=document.getElementById('dev-count');
+  if(cnt) cnt.textContent='('+STATE.devices.length+')';
+}
+
+/* ---------- the grid: one table across every device ---------- */
+STATE.gtab = STATE.gtab || 'ifaces';
+STATE.gsort = STATE.gsort || {};
+function gridRows(tab){
+  const m=STATE.model; if(!m) return {cols:[],rows:[]};
+  const devs=STATE.devices.filter(d=>deviceInScope(d)&&qDeviceOk(d));
+  const link=(id,label)=>({html:'<span class="dv">'+esc(label)+'</span>', sort:label, dev:id});
+  if(tab==='ifaces'){
+    const rows=[];
+    for(const d of devs) for(const i of d.interfaces){
+      if(!ifaceInScope(i)) continue;
+      const peers=[];
+      for(const k in m.subnets){ const sn=m.subnets[k];
+        if(sn.members.some(x=>x.iface===i)) for(const o of sn.members) if(o.iface!==i && !o.iface.tagOdd) peers.push(o.dev.name+' '+o.iface.name); }
+      const v=vlanOfIface(i)||'';
+      rows.push({dev:d.id, cells:[
+        {html:'<span class="dv">'+esc(d.name)+'</span>', sort:d.name},
+        {html:esc(i.name), sort:i.name},
+        {html:esc(i.addrs.map(a=>int2ip(a.ip)+'/'+a.len).join(', ')), sort:i.addrs.length?i.addrs[0].ip:0},
+        {html:esc(v), sort:parseInt(v,10)||0},
+        {html:esc(isFirewall(d)?(effVrf(i)||''):(i.vrf||'default')), sort:effVrf(i)||''},
+        {html:esc((i.zone||'')+(i.vsys?' / '+i.vsys:'')), sort:i.zone||''},
+        {html:esc(peers.slice(0,3).join(', ')+(peers.length>3?' +'+(peers.length-3):'')), sort:peers.length},
+        {html:i.tagOdd?'<span class="tg w">tag mismatch</span>':(peers.length?'<span class="tg l3">L3</span>':''), sort:i.tagOdd?2:(peers.length?1:0)}
+      ]});
+    }
+    return {cols:['Device','Interface','Address','VLAN','VRF','Zone / VSYS','Links to',''], rows};
+  }
+  if(tab==='routes'){
+    const rows=[];
+    for(const d of devs) for(const r of (d.fib||[])){
+      if(!routeInScope(r,d)) continue;
+      rows.push({dev:d.id, cells:[
+        {html:'<span class="dv">'+esc(d.name)+'</span>', sort:d.name},
+        {html:esc(cidr(r.net,r.len)), sort:r.net},
+        {html:esc(r.nextHop!=null?int2ip(r.nextHop):(r.iface||'\u2014')), sort:r.nextHop||0},
+        {html:'<span class="tg">'+esc(r.type)+'</span>', sort:r.type},
+        {html:esc(r.vrf||'default'), sort:r.vrf||''}
+      ]});
+    }
+    return {cols:['Device','Prefix','Via','Source','VRF'], rows};
+  }
+  if(tab==='links'){
+    const rows=[]; const seen=new Set();
+    const vis=new Set(devs.map(d=>d.id));
+    for(const k in m.subnets){ const sn=m.subnets[k];
+      const mem=sn.members.filter(x=>vis.has(x.dev.id)&&!x.iface.tagOdd&&ifaceInScope(x.iface));
+      for(let i=0;i<mem.length;i++) for(let j=i+1;j<mem.length;j++){
+        const a=mem[i], b=mem[j]; if(a.dev===b.dev || crossSiteFw(a.dev,b.dev)) continue;
+        rows.push({dev:a.dev.id, cells:[
+          {html:'<span class="dv">'+esc(a.dev.name)+'</span>', sort:a.dev.name},{html:esc(a.iface.name),sort:a.iface.name},
+          {html:'<span class="dv">'+esc(b.dev.name)+'</span>', sort:b.dev.name},{html:esc(b.iface.name),sort:b.iface.name},
+          {html:esc(k), sort:sn.net},{html:'<span class="tg l3">L3</span>',sort:'L3'},
+          {html:esc(effVrf(a.iface)||''), sort:effVrf(a.iface)||''}
+        ], pair:[a.dev,b.dev]});
+      }
+    }
+    for(const k in (m.l2links||{})){ const L=m.l2links[k];
+      if(!vis.has(L.a.dev.id)||!vis.has(L.b.dev.id)||!l2InScope(m,L)) continue;
+      rows.push({dev:L.a.dev.id, cells:[
+        {html:'<span class="dv">'+esc(L.a.dev.name)+'</span>', sort:L.a.dev.name},{html:esc(L.a.port),sort:L.a.port},
+        {html:'<span class="dv">'+esc(L.b.dev.name)+'</span>', sort:L.b.dev.name},{html:esc(L.b.port),sort:L.b.port},
+        {html:'',sort:''},{html:'<span class="tg l2">L2'+(l2IsTrunk(L)?' trunk':'')+'</span>',sort:'L2'},{html:'',sort:''}
+      ], pair:[L.a.dev,L.b.dev]});
+    }
+    return {cols:['Device A','Port','Device B','Port','Subnet','Type','VRF'], rows};
+  }
+  if(tab==='warnings'){
+    const rows=[];
+    const vis=new Set(devs.map(d=>d.id));
+    for(const w of (m.warnings||[])){
+      if(w.devId && !vis.has(w.devId)) continue;
+      const d=w.devId?STATE.devices.find(x=>x.id===w.devId):null;
+      rows.push({dev:w.devId, cells:[
+        {html:d?'<span class="dv">'+esc(d.name)+'</span>':'', sort:d?d.name:''},
+        {html:esc(w.text||w.msg||String(w)), sort:w.text||''},
+        {html:w.line?'line '+w.line:'', sort:w.line||0}
+      ]});
+    }
+    return {cols:['Device','Warning','Where'], rows};
+  }
+  if(tab==='readiness'){
+    const rows=[];
+    for(const d of STATE.devices){
+      const cfg=!!(d.rawText||'').trim(), tbl=!!(d.manualRoutes&&d.manualRoutes.length), nb=!!(d.neighbors&&d.neighbors.length);
+      const t=(ok,l)=>'<span class="tg '+(ok?'ok':'w')+'">'+l+'</span>';
+      rows.push({dev:d.id, cells:[
+        {html:'<span class="dv">'+esc(d.name)+'</span>', sort:d.name},
+        {html:t(cfg,'config'), sort:cfg?1:0},{html:t(tbl,'routing table'), sort:tbl?1:0},{html:t(nb,'CDP / LLDP'), sort:nb?1:0},
+        {html:(cfg&&tbl&&nb)?'<span class="tg ok">ready</span>':'<span class="tg w">incomplete</span>', sort:(cfg&&tbl&&nb)?1:0}
+      ]});
+    }
+    return {cols:['Device','Config','Routing table','Neighbors','Status'], rows};
+  }
+  return {cols:[],rows:[]};
+}
+function renderGrid(){
+  const body=document.getElementById('gbody'); if(!body) return;
+  document.querySelectorAll('.gtab').forEach(b=>b.classList.toggle('on', b.dataset.gtab===STATE.gtab));
+  // counts on every tab
+  for(const t of ['ifaces','routes','links','warnings','readiness']){
+    const el=document.getElementById('gn-'+t); if(el) el.textContent=gridRows(t).rows.length;
+  }
+  let {cols,rows}=gridRows(STATE.gtab);
+  const f=(document.getElementById('gfilter')||{}).value||'';
+  if(f.trim()){ const q=f.toLowerCase(); rows=rows.filter(r=>r.cells.some(c=>String(c.sort).toLowerCase().indexOf(q)>=0 || c.html.toLowerCase().indexOf(q)>=0)); }
+  const so=STATE.gsort[STATE.gtab];
+  if(so){ rows.sort((a,b)=>{ const x=a.cells[so.col].sort, y=b.cells[so.col].sort; const r= typeof x==='number'&&typeof y==='number' ? x-y : String(x).localeCompare(String(y)); return so.dir*r; }); }
+  if(!rows.length){ body.innerHTML='<div class="gempty">Nothing here'+(qActive()?' within the current filter':'')+'.</div>'; return; }
+  body.innerHTML='<table><thead><tr>'+cols.map((c,i)=>'<th data-col="'+i+'"'+(so&&so.col===i?' class="sorted"':'')+'>'+esc(c)+(so&&so.col===i?(so.dir>0?' \u25b4':' \u25be'):'')+'</th>').join('')+'</tr></thead><tbody>'+
+    rows.map((r,i)=>'<tr data-ri="'+i+'"'+(r.dev===STATE.selected?' class="on"':'')+'>'+r.cells.map(c=>'<td'+(c.html.indexOf('class="dv"')>=0?' class="dv"':'')+'>'+c.html+'</td>').join('')+'</tr>').join('')+
+    '</tbody></table>';
+  body.querySelectorAll('th').forEach(th=>th.onclick=()=>{ const c=+th.dataset.col; const cur=STATE.gsort[STATE.gtab]; STATE.gsort[STATE.gtab]={col:c, dir:cur&&cur.col===c?-cur.dir:1}; renderGrid(); });
+  body.querySelectorAll('tr[data-ri]').forEach(tr=>tr.onclick=(ev)=>{
+    const r=rows[+tr.dataset.ri];
+    if(r.pair){ openLink(r.pair[0], r.pair[1]); return; }
+    const d=STATE.devices.find(x=>x.id===r.dev); if(d){ openRight(); showDevice(d); renderDevTree(); renderGrid(); }
+  });
+}
+function initGrid(){
+  document.querySelectorAll('.gtab').forEach(b=>b.onclick=()=>{ STATE.gtab=b.dataset.gtab; renderGrid(); });
+  const f=document.getElementById('gfilter'); if(f) f.oninput=()=>renderGrid();
+  const csv=document.getElementById('gcsv'); if(csv) csv.onclick=()=>{
+    const {cols,rows}=gridRows(STATE.gtab);
+    const strip=(h)=>h.replace(/<[^>]+>/g,'').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"');
+    const line=(arr)=>arr.map(x=>'"'+String(x).replace(/"/g,'""')+'"').join(',');
+    const txt=[line(cols)].concat(rows.map(r=>line(r.cells.map(c=>strip(c.html))))).join('\n');
+    const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([txt],{type:'text/csv'}));
+    a.download='netpath-'+STATE.gtab+'.csv'; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+  };
+}
+
 /* Rotate the current view's saved layout about its centre. */
 function rotateView(deg){
   const ns=STATE.posNS||'simple|';
@@ -2783,10 +3295,10 @@ function l2IsTrunk(L){
 }
 
 const THEME_DEFAULT={
-  canvasBg:'#0e1621', canvasGrid:false, gridStyle:'dots',
-  devBg:'#1c2c3e', devText:'#d3dfec',
+  canvasBg:'#232b34', canvasGrid:true, gridStyle:'lines',
+  devBg:'#1b222a', devText:'#e8edf2',
   roleRouter:'#3a5273', roleSwitch:'#3f7a63', roleFirewall:'#8a6a2e',
-  zoneBg:'#16202e', zoneText:'#7f93aa', zoneBorder:'#33485f', zoneGrid:false,
+  zoneBg:'#1e262f', zoneText:'#8a9bad', zoneBorder:'#35404c', zoneGrid:false,
   boxBorderW:2, boxW:null, boxH:null,          // null = auto-sized from the label
   devFontSize:13, devBold:false, zoneFontSize:12, zoneBold:false,
   linkWidth:1.4,
@@ -3000,8 +3512,8 @@ function render(){
                      : view==='find' ? found.has(d.id)
                      : view==='vrf' ? true          // the scope filter alone decides here
                      : d.show!==false;
-  // the VRF/VSYS scope narrows every view, not just the dedicated one
-  const vis = d => baseVis(d) && deviceInScope(d);
+  // the scope and the query narrow every view, not just the dedicated one
+  const vis = d => baseVis(d) && deviceInScope(d) && qDeviceOk(d);
 
   /* Traced path only: rebuild the scene from the trace itself rather than the
      full model, so you get just the devices on the path with the interfaces
@@ -3515,7 +4027,7 @@ function render(){
   /* Filtering must not rearrange anything: a filtered diagram reads the same
      saved positions as the topology, so devices stay exactly where they are
      and simply come and go. */
-  STATE.posNS = (view==='find'||view==='sel'||view==='vrf'||scopeActive())
+  STATE.posNS = (view==='find'||view==='sel'||view==='vrf'||qActive())
     ? 'simple|' : view+'|';
   STATE.posWriteNS = view+'|';
   const keyOf = e => nodePosKey(e.data);
@@ -4566,6 +5078,9 @@ function rebuild(){
   renderClouds();
   renderHealth();
   renderVrfFilter();
+  renderQueryBar();
+  renderDevTree();
+  renderGrid();
   render();
   renderWarnings();
   const sel=document.getElementById('startdev');
@@ -5192,6 +5707,7 @@ function showFind(){
 
 function showDevice(d, opts){
   opts = opts || {};
+  setTimeout(()=>{ renderDevTree(); if(document.getElementById('gbody')) renderGrid(); },0);
   openRight();
   if(STATE.selected !== d.id){ STATE.devTab='overview'; STATE.editingConfig=false; STATE.renaming=false; STATE.devSubTab='interfaces'; }
   if(opts.subTab) STATE.devSubTab=opts.subTab;   // caller asked for a specific tab
@@ -6087,10 +6603,10 @@ function renderHealth(){
    ============================================================ */
 const PANEL={left:290, right:400, leftMin:200, rightMin:280, minStage:120,
              bottom:220, bottomMin:90, bottomMax:520,
-             top:150, topMin:80, topMax:420, topCollapsed:34};
+             top:44, topMin:44, topMax:44, topCollapsed:44};
 STATE.ui = STATE.ui || {left:PANEL.left, right:PANEL.right, leftOpen:true, rightOpen:true,
-                        bottom:PANEL.bottom, bottomOpen:true,
-                        top:PANEL.top, topOpen:true, topPinned:false, topAuto:true};
+                        bottom:300, bottomOpen:true,
+                        top:44, topOpen:true, topPinned:true, topAuto:false};
 
 function applyPanels(){
   const u=STATE.ui;
@@ -6104,8 +6620,7 @@ function applyPanels(){
   document.documentElement.style.setProperty('--right', (u.rightOpen ? u.right : 0)+'px');
   document.documentElement.style.setProperty('--bottom', (u.bottomOpen ? (u.bottom||PANEL.bottom) : 0)+'px');
   // collapsed still shows the header strip, so there is always something to grab
-  document.documentElement.style.setProperty('--top',
-    (u.topOpen ? (u.top||PANEL.top) : PANEL.topCollapsed)+'px');
+  document.documentElement.style.setProperty('--top','44px');
   const l=document.getElementById('tog-l'), r=document.getElementById('tog-r'),
         b=document.getElementById('tog-b'), t=document.getElementById('tog-t');
   if(t){ t.textContent = u.topOpen?'▴':'▾'; t.title = (u.topOpen?'Collapse':'Expand')+' the scope panel'; }
@@ -6312,6 +6827,9 @@ function projectObject(){
     scopeIgnoreFw: !!STATE.scopeIgnoreFw,
     scopeStrict: !!STATE.scopeStrict,
     vrfOff:[...(STATE.vrfOff||[])],
+    q:{vrfIn:STATE.q.vrfIn, vrfEx:STATE.q.vrfEx, vsysIn:STATE.q.vsysIn, vsysEx:STATE.q.vsysEx,
+       sites:[...STATE.q.sites], notSites:[...STATE.q.notSites], vlans:[...STATE.q.vlans], ips:STATE.q.ips, text:STATE.q.text},
+    gtab:STATE.gtab,
     vsysOff:[...(STATE.vsysOff||[])],
     clouds:STATE.clouds||[],
     groups:groups(),
@@ -6354,6 +6872,9 @@ function loadProject(obj){
   STATE.scopeIgnoreFw = !!obj.scopeIgnoreFw;
   STATE.scopeStrict = !!obj.scopeStrict;
   STATE.vrfOff  = new Set(obj.vrfOff  || []);
+  const q=obj.q||{}; STATE.q={vrfIn:q.vrfIn||[], vrfEx:q.vrfEx||[], vsysIn:q.vsysIn||[], vsysEx:q.vsysEx||[],
+    sites:new Set(q.sites||[]), notSites:new Set(q.notSites||[]), vlans:new Set(q.vlans||[]), ips:q.ips||[], text:q.text||[]};
+  if(obj.gtab) STATE.gtab=obj.gtab;
   STATE.vsysOff = new Set(obj.vsysOff || []);
   applyPanels();
   initTheme();
@@ -6690,6 +7211,8 @@ function initTheme(){
 }
 initPanels();
 initTheme();
+initQueryBar();
+initGrid();
 if(!restore()) rebuild();
 </script>
 </body>
