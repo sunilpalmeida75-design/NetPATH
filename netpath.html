@@ -2515,7 +2515,12 @@ function autoRouteEdges(cy, mode){
     if(!s||!t) return;
     const dx=t.x-s.x, dy=t.y-s.y, L=Math.hypot(dx,dy);
     const key=e.data('ekey'), fan=e.data('fan')||0;
-    const ortho = mode==='ortho';
+    if(mode==='straight'){          // no bend, no detour: a plain direct line
+      e.data('ortho',0); e.data('bend',0);
+      e.data('segD','0'); e.data('segW','0.5');
+      return;
+    }
+    const ortho = mode!=='curve';   // right angles unless a curve was asked for
     e.data('ortho', ortho?1:0);
     if(L<1){ e.data('bend',0); e.data('segD','0'); e.data('segW','0.5'); return; }
     const ux=dx/L, uy=dy/L, nx=-uy, ny=ux;
@@ -3896,9 +3901,9 @@ function render(){
       if(d) showDevice(d);
     });
     cyp.on('tap','node[kind="subnet"]', evt=>showSegment(evt.target.data('net')||evt.target.data('label')));
-    cyp.on('layoutstop', ()=>autoRouteEdges(cyp));
-    cyp.on('position','node', ()=>{ if(cyp._rt) return; cyp._rt=setTimeout(()=>{ cyp._rt=null; autoRouteEdges(cyp); },60); });
-    setTimeout(()=>autoRouteEdges(cyp),0);
+    cyp.on('layoutstop', ()=>autoRouteEdges(cyp,'ortho'));
+    cyp.on('position','node', ()=>{ if(cyp._rt) return; cyp._rt=setTimeout(()=>{ cyp._rt=null; autoRouteEdges(cyp,'ortho'); },60); });
+    setTimeout(()=>autoRouteEdges(cyp,'ortho'),0);
     cyp.on('dbltap','edge', evt=>onEdgeTap(cyp, evt.target));
     STATE.cy=cyp; STATE.edgeFor=edgeFor; STATE.edgePair={}; STATE.viewIsPath=true;
     paintTrace(res);
@@ -4057,9 +4062,9 @@ function render(){
       layout:{name:'preset', padding:60, fit: !(anchored && vpL)}
     });
     if(anchored && vpL){ cyl.zoom(vpL.zoom); cyl.pan(vpL.pan); }
-    // link detail is the one screen that uses right-angle routing
-    setTimeout(()=>autoRouteEdges(cyl,'ortho'),0);
-    cyl.on('position','node', ()=>{ if(cyl._rt) return; cyl._rt=setTimeout(()=>{ cyl._rt=null; autoRouteEdges(cyl,'ortho'); },60); });
+    // link detail shows a handful of connections in columns: straight lines
+    setTimeout(()=>autoRouteEdges(cyl,'straight'),0);
+    cyl.on('position','node', ()=>{ if(cyl._rt) return; cyl._rt=setTimeout(()=>{ cyl._rt=null; autoRouteEdges(cyl,'straight'); },60); });
     cyl.on('tap','node[kind="device"]', evt=>{
       const d=model.devices.find(x=>x.id===evt.target.id());
       if(d) showDevice(d);
@@ -4395,13 +4400,13 @@ function render(){
       const next=Math.round(Math.max(5,Math.min(95,f*100)));
       if(frac!==null && next!==frac) moved=true;
       if(frac===null) frac=next; else frac=next;
-      STATE.bends[k]=frac; autoRouteEdges(cy);
+      STATE.bends[k]=frac; autoRouteEdges(cy,'ortho');
     };
     const up=()=>{
       cy.off('mousemove', move); cy.off('mouseup', up); cy.off('tapend', up);
       cy.userPanningEnabled(true); cy.boxSelectionEnabled(true);
       if(moved){ autosave(); }
-      else { delete STATE.bends[k]; autoRouteEdges(cy); autosave(); }   // a click without a drag hands it back to auto-routing
+      else { delete STATE.bends[k]; autoRouteEdges(cy,'ortho'); autosave(); }   // a click without a drag hands it back to auto-routing
     };
     cy.userPanningEnabled(false); cy.boxSelectionEnabled(false);
     cy.on('mousemove', move); cy.on('mouseup', up); cy.on('tapend', up);
@@ -4437,11 +4442,11 @@ function render(){
      arranged them that way — which is what collapsed the map into a column.
      Bind to this graph and this namespace so a quick view switch cannot write
      one view's layout into another. */
-  cy.on('layoutstop', ()=>{ autoRouteEdges(cy); });
-  setTimeout(()=>autoRouteEdges(cy), 0);
+  cy.on('layoutstop', ()=>{ autoRouteEdges(cy,'ortho'); });
+  setTimeout(()=>autoRouteEdges(cy,'ortho'), 0);
   cy.on('position', 'node', ()=>{
     if(STATE._routeTimer) return;
-    STATE._routeTimer=setTimeout(()=>{ STATE._routeTimer=null; autoRouteEdges(cy); }, 60);
+    STATE._routeTimer=setTimeout(()=>{ STATE._routeTimer=null; autoRouteEdges(cy,'ortho'); }, 60);
   });
   cy.one('layoutstop', ()=>{ capturePositions(cy, writeNS); autosave(); });
 
