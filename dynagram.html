@@ -639,9 +639,6 @@ body.zen .sb-show{position:fixed;right:14px;top:10px}
         <input type="range" id="th-borderW" min="1" max="6" step="1" style="flex:1;accent-color:var(--cyan)"></label>
       <label class="auth">Link thickness
         <input type="range" id="th-linkWidth" min="0.5" max="6" step="0.5" style="flex:1;accent-color:var(--cyan)"></label>
-      <label class="auth">Rounded link corners
-        <input type="range" id="th-linkCorner" min="0" max="26" step="2" style="flex:1;accent-color:var(--cyan)">
-        <span id="th-linkCorner-v" style="font-family:var(--mono);font-size:11.5px;color:var(--ink-faint);min-width:32px;text-align:right"></span></label>
       <label class="auth">Text fills the box
         <input type="range" id="th-textFill" min="0.4" max="0.95" step="0.05" style="flex:1;accent-color:var(--cyan)">
         <span id="th-textFill-v" style="font-family:var(--mono);font-size:11.5px;color:var(--ink-faint);min-width:32px;text-align:right"></span></label>
@@ -676,7 +673,11 @@ body.zen .sb-show{position:fixed;right:14px;top:10px}
         </select></label>
       <label class="auth"><input type="checkbox" id="th-zoneGrid">
         <span>Dotted grid inside zone and site boxes</span></label>
-      <button class="btn tiny" id="th-reset" style="margin-top:8px">Reset all colours</button>
+      <div class="rt-form" style="margin-top:8px">
+        <button class="btn tiny" id="th-boxes-global">Use global size for every box</button>
+        <button class="btn tiny" id="th-reset">Reset everything</button>
+      </div>
+      <p class="cfg-note" style="margin:2px 0 0">The first clears box sizes set on individual devices. The second also clears their colours and fonts, and returns the theme to its defaults.</p>
 
       <h2 class="sec">Providers</h2>
       <label class="auth" style="margin-top:0"><input type="checkbox" id="opt-autowan" checked>
@@ -2896,7 +2897,6 @@ function applyBends(els){
       // sensible defaults until autoRouteEdges measures the real geometry
       el.data.segD = el.data.segD || '0';
       el.data.segW = el.data.segW || '0.5';
-      el.data.segR = el.data.segR || '0';
       el.data.sep  = el.data.sep  || 'outside-to-node';
       el.data.tep  = el.data.tep  || 'outside-to-node';
     });
@@ -3018,12 +3018,12 @@ function autoRouteEdges(cy, mode){
     const key=e.data('ekey'), fan=e.data('fan')||0;
     if(mode==='straight'){          // no bend, no detour: a plain direct line
       e.data('ortho',0); e.data('bend',0);
-      e.data('segD','0'); e.data('segW','0.5'); e.data('segR','0');
+      e.data('segD','0'); e.data('segW','0.5');
       return;
     }
     const ortho = mode!=='curve';   // right angles unless a curve was asked for
     e.data('ortho', ortho?1:0);
-    if(L<1){ e.data('bend',0); e.data('segD','0'); e.data('segW','0.5'); e.data('segR','0'); return; }
+    if(L<1){ e.data('bend',0); e.data('segD','0'); e.data('segW','0.5'); return; }
     const ux=dx/L, uy=dy/L, nx=-uy, ny=ux;
 
     // the endpoints, and any zone either endpoint sits inside, are never solid
@@ -3091,17 +3091,6 @@ function autoRouteEdges(cy, mode){
         ds.push(Math.round(vx*nx+vy*ny));
       }
       e.data('segD', ds.join(' ')); e.data('segW', ws.join(' '));
-      /* One radius per corner. A corner cannot round by more than half of the
-         shorter leg meeting it, or the curve overshoots and the run bulges. */
-      const want=Math.max(0, TH('linkCorner')||0);
-      const all=[[A.x,A.y], ...pts, [B.x,B.y]];
-      const radii=[];
-      for(let i=1;i<all.length-1;i++){
-        const legA=Math.hypot(all[i][0]-all[i-1][0], all[i][1]-all[i-1][1]);
-        const legB=Math.hypot(all[i+1][0]-all[i][0], all[i+1][1]-all[i][1]);
-        radii.push(Math.round(Math.max(0, Math.min(want, legA/2, legB/2))));
-      }
-      e.data('segR', radii.length?radii.join(' '):'0');
     };
     STATE.waypoints = STATE.waypoints || {};
     STATE.freeLinks  = STATE.freeLinks  || {};
@@ -4348,7 +4337,6 @@ const THEME_DEFAULT={
   showRole:true,                               // a "Router"/"Switch"/"Firewall" line above the name
   linkIntra:'#4a6076', linkInter:'#c98a3e',   // within a site, and between sites
   linkDown:'#e0625f',                         // an end is administratively down
-  linkCorner:10,                              // how much a link's bends are eased
   boxBorderW:2, boxW:null, boxH:null,          // null = auto-sized from the label
   devFontSize:15, devBold:false, zoneFontSize:13, zoneBold:false,
   devFont:'Arial, Helvetica, sans-serif', zoneFont:'Arial, Helvetica, sans-serif',
@@ -4363,7 +4351,7 @@ const THEME_VISIO={
   roleRouter:'#1f7a4d', roleSwitch:'#1f7a4d', roleFirewall:'#1f7a4d',
   zoneBg:'#ffffff', zoneText:'#4a6b80', zoneBorder:'#1f7a4d', zoneGrid:false,
   textFill:0.8, showRole:true,
-  linkIntra:'#8496a6', linkInter:'#c07a22', linkDown:'#c8453f', linkCorner:10,
+  linkIntra:'#8496a6', linkInter:'#c07a22', linkDown:'#c8453f',
   boxBorderW:3, boxW:null, boxH:null,
   devFontSize:15, devBold:false, zoneFontSize:13, zoneBold:false,
   devFont:'Arial, Helvetica, sans-serif', zoneFont:'Arial, Helvetica, sans-serif',
@@ -4480,17 +4468,6 @@ function applyTheme(){
   render();   // device/zone colours and the zone grid are baked into element data
 }
 
-/* Whether this build of Cytoscape can round the corners of a segmented edge. */
-const ROUND_OK = (()=>{
-  try{
-    const cyLib = (typeof cytoscape!=='undefined') ? cytoscape
-                : (typeof window!=='undefined' ? window.cytoscape : null);
-    const v=String((cyLib&&cyLib.version)||'');
-    const m=v.match(/^(\d+)\.(\d+)/);
-    return m ? (+m[1]>3 || (+m[1]===3 && +m[2]>=26)) : false;
-  }catch(e){ return false; }
-})();
-
 function graphStyle(){
   return [
       {selector:'node[kind="device"]', style:{
@@ -4576,14 +4553,8 @@ function graphStyle(){
         'source-arrow-color':TH('linkDown'),'target-arrow-color':TH('linkDown'),
         'color':TH('linkDown'),'opacity':0.85}},
       {selector:'edge[ortho = 1]', style:{
-        /* Rounded corners rather than hard right angles — the same runs, just
-           eased where they turn. round-segments arrived in Cytoscape 3.26, so
-           fall back to sharp corners on anything older rather than losing the
-           orthogonal routing altogether. */
-        'curve-style':ROUND_OK?'round-segments':'segments','edge-distances':'node-position',
-        'segment-distances':'data(segD)','segment-weights':'data(segW)',
-        // the corner radius property is segment-radii; `radius` is not valid here
-        'segment-radii':'data(segR)'}},
+        'curve-style':'segments','edge-distances':'node-position',
+        'segment-distances':'data(segD)','segment-weights':'data(segW)'}},
       {selector:'edge[kind="ha"]', style:{
         'line-color':'#8a6a2e','line-style':'dotted','width':2,'curve-style':'unbundled-bezier',
         'color':'#c49a4e','font-size':9,'text-wrap':'wrap','z-index':2}},
@@ -8993,13 +8964,6 @@ function initTheme(){
     gs.value=STATE.theme.gridStyle||'dots';
     gs.onchange=()=>{ STATE.theme.gridStyle=gs.value; applyTheme(); autosave(); };
   }
-  const lc=document.getElementById('th-linkCorner'), lcv=document.getElementById('th-linkCorner-v');
-  if(lc){
-    const show=()=>{ if(lcv) lcv.textContent=(STATE.theme.linkCorner!=null?STATE.theme.linkCorner:10)+'px'; };
-    lc.value=STATE.theme.linkCorner!=null?STATE.theme.linkCorner:10; show();
-    lc.oninput=()=>{ STATE.theme.linkCorner=parseInt(lc.value,10); show(); applyTheme(); };
-    lc.onchange=()=>{ applyTheme(); autosave(); };
-  }
   const tf=document.getElementById('th-textFill'), tfv=document.getElementById('th-textFill-v');
   if(tf){
     const show=()=>{ if(tfv) tfv.textContent=Math.round((STATE.theme.textFill||0.8)*100)+'%'; };
@@ -9024,6 +8988,18 @@ function initTheme(){
     bwW.oninput=applyGlobalBox;   bwH.oninput=applyGlobalBox;   // see it as you type
     const br=document.getElementById('th-box-reset');
     if(br) br.onclick=()=>{ bwW.value=''; bwH.value=''; applyGlobalBox(); };
+    /* Devices resized by hand keep their own size, which is usually what you
+       want — until you set a global size and wonder why some boxes ignored it. */
+    const bg2=document.getElementById('th-boxes-global');
+    if(bg2) bg2.onclick=()=>{
+      pushUndo();
+      let n=0;
+      for(const d of STATE.devices){ if(d.boxW||d.boxH){ delete d.boxW; delete d.boxH; n++; } }
+      render(); autosave();
+      const note=document.getElementById('autosave-note');
+      if(note) note.textContent = n ? (n+' device'+(n===1?'':'s')+' reset to the global size')
+                                    : 'Every device was already using the global size';
+    };
   }
   const fontOpts=(sel,cur)=>{ sel.innerHTML=FONTS.map(([v,l])=>
     '<option value="'+esc(v)+'"'+(v===cur?' selected':'')+'>'+esc(l)+'</option>').join(''); };
@@ -9056,8 +9032,6 @@ function initTheme(){
     if(bw) bw.value=STATE.theme.boxBorderW||2;
     if(gs) gs.value=STATE.theme.gridStyle||'dots';
     if(lwEl) lwEl.value=STATE.theme.linkWidth||1.4;
-    if(lc){ lc.value=STATE.theme.linkCorner!=null?STATE.theme.linkCorner:10;
-            if(lcv) lcv.textContent=(STATE.theme.linkCorner!=null?STATE.theme.linkCorner:10)+'px'; }
     if(tf){ tf.value=STATE.theme.textFill||0.8; if(tfv) tfv.textContent=Math.round((STATE.theme.textFill||0.8)*100)+'%'; }
     if(bwW) bwW.value=STATE.theme.boxW||'';
     if(bwH) bwH.value=STATE.theme.boxH||'';
@@ -9074,8 +9048,14 @@ function initTheme(){
   /* Reset clears the per-device and per-zone overrides too, otherwise a box
      someone recoloured once can never be brought back to the default. */
   document.getElementById('th-reset').onclick=()=>{
-    for(const d of STATE.devices){ delete d.bg; delete d.fg; }
-    for(const g of groups()){ delete g.bg; delete g.fg; }
+    /* Clear every per-device and per-zone override, so the global settings —
+       colours, typeface, text size and box size — apply to everything again. */
+    pushUndo();
+    for(const d of STATE.devices){
+      delete d.bg; delete d.fg; delete d.font; delete d.fontSize; delete d.bold;
+      delete d.boxW; delete d.boxH;
+    }
+    for(const g of groups()){ delete g.bg; delete g.fg; delete g.font; delete g.fontSize; delete g.bold; }
     applyPreset(THEME_DEFAULT);
     renderGroups();
   };
