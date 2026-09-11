@@ -630,6 +630,7 @@ body.zen .sb-show{position:fixed;right:14px;top:10px}
         <label>Zone border <input type="color" id="th-zoneBorder"></label>
         <label>Link in zone <input type="color" id="th-linkIntra"></label>
         <label>Link between <input type="color" id="th-linkInter"></label>
+        <label>Shutdown link <input type="color" id="th-linkDown"></label>
         <label>Router <input type="color" id="th-roleRouter"></label>
         <label>Switch <input type="color" id="th-roleSwitch"></label>
         <label>Firewall <input type="color" id="th-roleFirewall"></label>
@@ -638,6 +639,9 @@ body.zen .sb-show{position:fixed;right:14px;top:10px}
         <input type="range" id="th-borderW" min="1" max="6" step="1" style="flex:1;accent-color:var(--cyan)"></label>
       <label class="auth">Link thickness
         <input type="range" id="th-linkWidth" min="0.5" max="6" step="0.5" style="flex:1;accent-color:var(--cyan)"></label>
+      <label class="auth">Rounded link corners
+        <input type="range" id="th-linkCorner" min="0" max="26" step="2" style="flex:1;accent-color:var(--cyan)">
+        <span id="th-linkCorner-v" style="font-family:var(--mono);font-size:11.5px;color:var(--ink-faint);min-width:32px;text-align:right"></span></label>
       <label class="auth">Text fills the box
         <input type="range" id="th-textFill" min="0.4" max="0.95" step="0.05" style="flex:1;accent-color:var(--cyan)">
         <span id="th-textFill-v" style="font-family:var(--mono);font-size:11.5px;color:var(--ink-faint);min-width:32px;text-align:right"></span></label>
@@ -735,6 +739,7 @@ body.zen .sb-show{position:fixed;right:14px;top:10px}
         <button class="btn" id="sb-menu-btn" title="More options">⋯</button>
         <div class="sb-menu" id="sb-menu">
           <div class="sb-h">Show</div>
+          <label class="toggle" title="Links that only exist through an interface that is shut down"><input type="checkbox" id="opt-showdown" checked> Show shutdown links</label>
           <label class="toggle"><input type="checkbox" id="opt-nolinks"> Hide links</label>
           <label class="toggle"><input type="checkbox" id="opt-select"> Select devices</label>
           <label class="toggle" title="Freeze every link exactly as it is now"><input type="checkbox" id="opt-locklinks"> Lock links</label>
@@ -2058,6 +2063,21 @@ function buildModel(devices, opts){
         (subnets[key] = subnets[key] || {net:netOf(a.ip,a.len), len:a.len, key, members:[]})
           .members.push({dev:d, iface:i, addr:a});
       }
+    }
+  }
+
+  /* A shut interface is not a connection. The segment is kept, because the
+     addressing is still worth seeing, but it is marked down so the map can
+     draw it as dead rather than pretending traffic could cross it. */
+  for(const k in subnets){
+    const sn=subnets[k];
+    const live=sn.members.filter(m=>!m.iface.shutdown);
+    sn.downMembers=sn.members.filter(m=>m.iface.shutdown);
+    sn.down = sn.downMembers.length>0 && live.length<2;
+    if(sn.downMembers.length && live.length>=1){
+      for(const m of sn.downMembers)
+        warn(m.dev.name+' '+m.iface.name+' is on '+k+' but administratively shut down, '+
+             'so it is not a working connection.', m.dev.id, m.iface.line);
     }
   }
 
@@ -4313,6 +4333,8 @@ const THEME_DEFAULT={
   textFill:0.8,                                // how much of a box its label fills
   showRole:true,                               // a "Router"/"Switch"/"Firewall" line above the name
   linkIntra:'#4a6076', linkInter:'#c98a3e',   // within a site, and between sites
+  linkDown:'#e0625f',                         // an end is administratively down
+  linkCorner:10,                              // how much a link's bends are eased
   boxBorderW:2, boxW:null, boxH:null,          // null = auto-sized from the label
   devFontSize:15, devBold:false, zoneFontSize:13, zoneBold:false,
   devFont:'Arial, Helvetica, sans-serif', zoneFont:'Arial, Helvetica, sans-serif',
@@ -4327,7 +4349,7 @@ const THEME_VISIO={
   roleRouter:'#1f7a4d', roleSwitch:'#1f7a4d', roleFirewall:'#1f7a4d',
   zoneBg:'#ffffff', zoneText:'#4a6b80', zoneBorder:'#1f7a4d', zoneGrid:false,
   textFill:0.8, showRole:true,
-  linkIntra:'#8496a6', linkInter:'#c07a22',
+  linkIntra:'#8496a6', linkInter:'#c07a22', linkDown:'#c8453f', linkCorner:10,
   boxBorderW:3, boxW:null, boxH:null,
   devFontSize:15, devBold:false, zoneFontSize:13, zoneBold:false,
   devFont:'Arial, Helvetica, sans-serif', zoneFont:'Arial, Helvetica, sans-serif',
@@ -4444,6 +4466,17 @@ function applyTheme(){
   render();   // device/zone colours and the zone grid are baked into element data
 }
 
+/* Whether this build of Cytoscape can round the corners of a segmented edge. */
+const ROUND_OK = (()=>{
+  try{
+    const cyLib = (typeof cytoscape!=='undefined') ? cytoscape
+                : (typeof window!=='undefined' ? window.cytoscape : null);
+    const v=String((cyLib&&cyLib.version)||'');
+    const m=v.match(/^(\d+)\.(\d+)/);
+    return m ? (+m[1]>3 || (+m[1]===3 && +m[2]>=26)) : false;
+  }catch(e){ return false; }
+})();
+
 function graphStyle(){
   return [
       {selector:'node[kind="device"]', style:{
@@ -4524,9 +4557,18 @@ function graphStyle(){
       {selector:'node[gkind="site"]', style:{
         'background-opacity':TH('zoneGrid')?0.35:1,
         'background-color':'data(bg)','border-color':'data(bd)'}},
+      {selector:'edge[down = 1]', style:{
+        'line-color':TH('linkDown'),'line-style':'dashed','width':1.6,
+        'source-arrow-color':TH('linkDown'),'target-arrow-color':TH('linkDown'),
+        'color':TH('linkDown'),'opacity':0.85}},
       {selector:'edge[ortho = 1]', style:{
-        'curve-style':'segments','edge-distances':'node-position',
-        'segment-distances':'data(segD)','segment-weights':'data(segW)'}},
+        /* Rounded corners rather than hard right angles — the same runs, just
+           eased where they turn. round-segments arrived in Cytoscape 3.26, so
+           fall back to sharp corners on anything older rather than losing the
+           orthogonal routing altogether. */
+        'curve-style':ROUND_OK?'round-segments':'segments','edge-distances':'node-position',
+        'segment-distances':'data(segD)','segment-weights':'data(segW)',
+        'radius':TH('linkCorner')}},
       {selector:'edge[kind="ha"]', style:{
         'line-color':'#8a6a2e','line-style':'dotted','width':2,'curve-style':'unbundled-bezier',
         'color':'#c49a4e','font-size':9,'text-wrap':'wrap','z-index':2}},
@@ -4625,7 +4667,9 @@ function render(){
     const link=(src,tgt,ifc,mapKey)=>{
       const m=ifMeta(ifc);
       const id='e'+(++e);
-      els.push({data:{id, source:src, target:tgt, kind:'link', label:m.label, meta:m.meta}});
+      // link detail marks a shut port the same way the topology does
+      els.push({data:{id, source:src, target:tgt, kind:'link', label:m.label, meta:m.meta,
+                      down: (ifc && ifc.shutdown)?1:0}});
       if(mapKey) edgeFor[mapKey]=id;
       return id;
     };
@@ -4833,12 +4877,14 @@ function render(){
         els.push({data:{id:sid, label:s.key, net:s.key, kind:'subnet'}, position:p});
         for(const m of s.a){
           const id='e'+(++e), p=port(m);
-          els.push({data:{id, source:a.id, target:sid, kind:'link', label:p.label, meta:p.meta, item:item.key}});
+          els.push({data:{id, source:a.id, target:sid, kind:'link', label:p.label, meta:p.meta,
+                          item:item.key, down: m.iface.shutdown?1:0}});
           edgeFor[a.id+'::'+m.iface.name]=id;
         }
         for(const m of s.b){
           const id='e'+(++e), p=port(m);
-          els.push({data:{id, source:sid, target:b.id, kind:'link', label:p.label, meta:p.meta, item:item.key}});
+          els.push({data:{id, source:sid, target:b.id, kind:'link', label:p.label, meta:p.meta,
+                          item:item.key, down: m.iface.shutdown?1:0}});
           edgeFor[b.id+'::'+m.iface.name]=id;
         }
       } else {
@@ -5009,6 +5055,10 @@ function render(){
        several VRFs, and selecting one of them must not drag in the others.
        An interface whose VLAN tag disagrees with the rest is not on this
        link at all. */
+    /* A segment whose only connection is through a shut port is drawn dead,
+       or left out entirely when the toggle is off. */
+    const showDown=(document.getElementById('opt-showdown')||{checked:true}).checked;
+    if(sn.down && !showDown) continue;
     let members=sn.members.filter(m=>vis(m.dev) && !m.iface.tagOdd && ifaceInScope(m.iface));
     /* A firewall stays on this segment only if something in its own site is
        also on it. Otherwise the segment reaches into another datacentre and
@@ -5045,17 +5095,20 @@ function render(){
             id=pairEdge[pk];
             if(!id){
               id='e'+(++e); pairEdge[pk]=id;
-              els.push({data:{id, source:a.dev.id, target:b.dev.id, kind:'p2p', label:''}});
+              els.push({data:{id, source:a.dev.id, target:b.dev.id, kind:'p2p', label:'',
+                              down: (a.iface.shutdown||b.iface.shutdown)?1:0}});
             }
           } else {
             id='e'+(++e);
             /* The port name belongs at the end it describes, the way a drawn
                diagram does it — reading a crowded midpoint label to work out
                which port is which end is the thing that slows you down. */
+            const dead = a.iface.shutdown || b.iface.shutdown;
             els.push({data:{id, source:a.dev.id, target:b.dev.id, kind:'p2p', net:k,
-              label: k,
-              sLab: members.length===2 ? shortIf(a.iface.name) : '',
-              tLab: members.length===2 ? shortIf(b.iface.name) : ''}});
+              label: dead ? k+'  (shut down)' : k,
+              down: dead?1:0,
+              sLab: (members.length===2 ? shortIf(a.iface.name) : '') + (a.iface.shutdown?' \u2717':''),
+              tLab: (members.length===2 ? shortIf(b.iface.name) : '') + (b.iface.shutdown?' \u2717':'')}});
           }
           edgePair[a.dev.id+'::'+a.iface.name+'::'+b.dev.id]=id;
           edgePair[b.dev.id+'::'+b.iface.name+'::'+a.dev.id]=id;
@@ -7745,6 +7798,7 @@ document.getElementById('add-paste').onclick=()=>{
 document.getElementById('opt-view').onchange=()=>{ render(); autosave(); };
 document.getElementById('opt-select').onchange=()=>{ render(); updateSelBtn(); };
 document.getElementById('opt-nolinks').onchange=()=>{ render(); autosave(); };
+document.getElementById('opt-showdown').onchange=()=>{ render(); autosave(); };
 document.getElementById('opt-locklinks').onchange=function(){
   STATE.linksLocked=this.checked;
   if(!STATE.linksLocked && STATE.cy) autoRouteEdges(STATE.cy,'ortho');
@@ -8897,7 +8951,7 @@ function initTheme(){
              devText:'th-devText', zoneBg:'th-zoneBg', zoneText:'th-zoneText',
              zoneBorder:'th-zoneBorder', roleRouter:'th-roleRouter',
              roleSwitch:'th-roleSwitch', roleFirewall:'th-roleFirewall',
-             linkIntra:'th-linkIntra', linkInter:'th-linkInter'};
+             linkIntra:'th-linkIntra', linkInter:'th-linkInter', linkDown:'th-linkDown'};
   for(const k in map){
     const el=document.getElementById(map[k]);
     if(!el) continue;
@@ -8923,6 +8977,13 @@ function initTheme(){
   if(gs){
     gs.value=STATE.theme.gridStyle||'dots';
     gs.onchange=()=>{ STATE.theme.gridStyle=gs.value; applyTheme(); autosave(); };
+  }
+  const lc=document.getElementById('th-linkCorner'), lcv=document.getElementById('th-linkCorner-v');
+  if(lc){
+    const show=()=>{ if(lcv) lcv.textContent=(STATE.theme.linkCorner!=null?STATE.theme.linkCorner:10)+'px'; };
+    lc.value=STATE.theme.linkCorner!=null?STATE.theme.linkCorner:10; show();
+    lc.oninput=()=>{ STATE.theme.linkCorner=parseInt(lc.value,10); show(); applyTheme(); };
+    lc.onchange=()=>{ applyTheme(); autosave(); };
   }
   const tf=document.getElementById('th-textFill'), tfv=document.getElementById('th-textFill-v');
   if(tf){
@@ -8977,6 +9038,8 @@ function initTheme(){
     if(bw) bw.value=STATE.theme.boxBorderW||2;
     if(gs) gs.value=STATE.theme.gridStyle||'dots';
     if(lwEl) lwEl.value=STATE.theme.linkWidth||1.4;
+    if(lc){ lc.value=STATE.theme.linkCorner!=null?STATE.theme.linkCorner:10;
+            if(lcv) lcv.textContent=(STATE.theme.linkCorner!=null?STATE.theme.linkCorner:10)+'px'; }
     if(tf){ tf.value=STATE.theme.textFill||0.8; if(tfv) tfv.textContent=Math.round((STATE.theme.textFill||0.8)*100)+'%'; }
     if(bwW) bwW.value=STATE.theme.boxW||'';
     if(bwH) bwH.value=STATE.theme.boxH||'';
