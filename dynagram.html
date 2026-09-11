@@ -645,11 +645,13 @@ body.zen .sb-show{position:fixed;right:14px;top:10px}
       <label class="auth">Text fills the box
         <input type="range" id="th-textFill" min="0.4" max="0.95" step="0.05" style="flex:1;accent-color:var(--cyan)">
         <span id="th-textFill-v" style="font-family:var(--mono);font-size:11.5px;color:var(--ink-faint);min-width:32px;text-align:right"></span></label>
-      <div class="rt-form" style="margin-top:6px">
-        <input type="number" id="th-boxW" placeholder="auto width" min="70" max="500">
-        <input type="number" id="th-boxH" placeholder="auto height" min="36" max="300">
+      <h3 class="sub">Size of every device box</h3>
+      <div class="rt-form" style="margin-top:2px">
+        <input type="number" id="th-boxW" placeholder="width (auto)" min="70" max="500">
+        <input type="number" id="th-boxH" placeholder="height (auto)" min="36" max="300">
+        <button class="btn tiny" id="th-box-reset" title="Back to sizing each box around its own name">Auto</button>
       </div>
-      <p class="cfg-note" style="margin:2px 0 6px">Global box size for every device — leave blank for automatic. A device with its own size still wins.</p>
+      <p class="cfg-note" style="margin:2px 0 8px">Applies to every device at once; the text is scaled to fit. Leave blank to size each box around its own name. A device given its own size still wins.</p>
       <div class="rt-form">
         <input type="number" id="th-devFontSize" placeholder="device text size" min="9" max="24">
         <input type="number" id="th-zoneFontSize" placeholder="zone text size" min="9" max="24">
@@ -2894,6 +2896,7 @@ function applyBends(els){
       // sensible defaults until autoRouteEdges measures the real geometry
       el.data.segD = el.data.segD || '0';
       el.data.segW = el.data.segW || '0.5';
+      el.data.segR = el.data.segR || '0';
       el.data.sep  = el.data.sep  || 'outside-to-node';
       el.data.tep  = el.data.tep  || 'outside-to-node';
     });
@@ -3015,12 +3018,12 @@ function autoRouteEdges(cy, mode){
     const key=e.data('ekey'), fan=e.data('fan')||0;
     if(mode==='straight'){          // no bend, no detour: a plain direct line
       e.data('ortho',0); e.data('bend',0);
-      e.data('segD','0'); e.data('segW','0.5');
+      e.data('segD','0'); e.data('segW','0.5'); e.data('segR','0');
       return;
     }
     const ortho = mode!=='curve';   // right angles unless a curve was asked for
     e.data('ortho', ortho?1:0);
-    if(L<1){ e.data('bend',0); e.data('segD','0'); e.data('segW','0.5'); return; }
+    if(L<1){ e.data('bend',0); e.data('segD','0'); e.data('segW','0.5'); e.data('segR','0'); return; }
     const ux=dx/L, uy=dy/L, nx=-uy, ny=ux;
 
     // the endpoints, and any zone either endpoint sits inside, are never solid
@@ -3088,6 +3091,17 @@ function autoRouteEdges(cy, mode){
         ds.push(Math.round(vx*nx+vy*ny));
       }
       e.data('segD', ds.join(' ')); e.data('segW', ws.join(' '));
+      /* One radius per corner. A corner cannot round by more than half of the
+         shorter leg meeting it, or the curve overshoots and the run bulges. */
+      const want=Math.max(0, TH('linkCorner')||0);
+      const all=[[A.x,A.y], ...pts, [B.x,B.y]];
+      const radii=[];
+      for(let i=1;i<all.length-1;i++){
+        const legA=Math.hypot(all[i][0]-all[i-1][0], all[i][1]-all[i-1][1]);
+        const legB=Math.hypot(all[i+1][0]-all[i][0], all[i+1][1]-all[i][1]);
+        radii.push(Math.round(Math.max(0, Math.min(want, legA/2, legB/2))));
+      }
+      e.data('segR', radii.length?radii.join(' '):'0');
     };
     STATE.waypoints = STATE.waypoints || {};
     STATE.freeLinks  = STATE.freeLinks  || {};
@@ -4568,7 +4582,8 @@ function graphStyle(){
            orthogonal routing altogether. */
         'curve-style':ROUND_OK?'round-segments':'segments','edge-distances':'node-position',
         'segment-distances':'data(segD)','segment-weights':'data(segW)',
-        'radius':TH('linkCorner')}},
+        // the corner radius property is segment-radii; `radius` is not valid here
+        'segment-radii':'data(segR)'}},
       {selector:'edge[kind="ha"]', style:{
         'line-color':'#8a6a2e','line-style':'dotted','width':2,'curve-style':'unbundled-bezier',
         'color':'#c49a4e','font-size':9,'text-wrap':'wrap','z-index':2}},
@@ -9006,6 +9021,9 @@ function initTheme(){
       applyTheme(); autosave();
     };
     bwW.onchange=applyGlobalBox; bwH.onchange=applyGlobalBox;
+    bwW.oninput=applyGlobalBox;   bwH.oninput=applyGlobalBox;   // see it as you type
+    const br=document.getElementById('th-box-reset');
+    if(br) br.onclick=()=>{ bwW.value=''; bwH.value=''; applyGlobalBox(); };
   }
   const fontOpts=(sel,cur)=>{ sel.innerHTML=FONTS.map(([v,l])=>
     '<option value="'+esc(v)+'"'+(v===cur?' selected':'')+'>'+esc(l)+'</option>').join(''); };
