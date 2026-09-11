@@ -5268,34 +5268,10 @@ function render(){
   cy.on('dbltap','edge', evt=>onEdgeTap(cy, evt.target));
   /* Drag a link sideways to pull it clear of another. The bend is stored per
      link so it survives re-renders and is saved with the project. */
-  cy.on('mousedown','edge', evt=>{
-    const edge=evt.target, k=edge.data('ekey');
-    if(!k) return;
-    const start=evt.renderedPosition||evt.position;
-    const from=edge.data('bend')||0;
-    let moved=false, frac=null;
-    const move=(e)=>{
-      const p=e.position||e.renderedPosition;
-      const s0=edge.source().position(), t0=edge.target().position();
-      const dx=t0.x-s0.x, dy=t0.y-s0.y;
-      /* Dragging slides the link's channel along the span: for a mostly
-         horizontal link that is where its vertical run sits, and vice versa. */
-      const horizFirst=Math.abs(dx)>=Math.abs(dy);
-      const f = horizFirst ? (p.x-s0.x)/(dx||1) : (p.y-s0.y)/(dy||1);
-      const next=Math.round(Math.max(5,Math.min(95,f*100)));
-      if(frac!==null && next!==frac) moved=true;
-      if(frac===null) frac=next; else frac=next;
-      STATE.bends[k]=frac; autoRouteEdges(cy,'ortho');
-    };
-    const up=()=>{
-      cy.off('mousemove', move); cy.off('mouseup', up); cy.off('tapend', up);
-      cy.userPanningEnabled(true); cy.boxSelectionEnabled(true);
-      if(moved){ autosave(); }
-      else { delete STATE.bends[k]; autoRouteEdges(cy,'ortho'); autosave(); }   // a click without a drag hands it back to auto-routing
-    };
-    cy.userPanningEnabled(false); cy.boxSelectionEnabled(false);
-    cy.on('mousemove', move); cy.on('mouseup', up); cy.on('tapend', up);
-  });
+  /* The bend-drag handler that used to live here predated waypoints. It
+     matched every edge mousedown and ran first, so the waypoint drag and
+     the end-dot drag below it never fired — which is why links could not
+     be moved at all. Removed; those two handle it now. */
   /* Right-click a link to steer it: turn it at that point, run it straight
      point to point, or recolour it. */
   cy.on('cxttap','edge', evt=>{
