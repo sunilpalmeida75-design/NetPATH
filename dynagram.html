@@ -729,6 +729,12 @@ body.zen .sb-show{position:fixed;right:14px;top:10px}
           <option value="l2">L2 only</option>
         </select>
       </label>
+      <label class="toggle">Links
+        <select id="opt-linkstyle">
+          <option value="ortho" selected>Right angles</option>
+          <option value="direct">Direct lines</option>
+        </select>
+      </label>
       <button class="btn" id="viewback" style="display:none">← Back</button>
       <button class="btn" id="analyse" style="display:none">Analyse selected</button>
       <span class="sb-gap"></span>
@@ -754,6 +760,7 @@ body.zen .sb-show{position:fixed;right:14px;top:10px}
           <div class="sb-row">
             <button class="btn" id="rot-l" title="Rotate left">⟲</button>
             <button class="btn" id="rot-r" title="Rotate right">⟳</button>
+            <button class="btn" id="reroute" title="Re-route every link around the boxes and zones (R)">Re-route links</button>
           </div>
           <div class="sb-h">Export</div>
           <div class="sb-row">
@@ -2733,6 +2740,21 @@ function trace(model, srcStr, dstStr, startId, opts){
     let nextIn=null;
     if(route.nextHop!=null){
       const own=ownerOf(model, route.nextHop); nextIn = own?own.iface:null;
+      /* A next-hop that is an HSRP or VRRP virtual address belongs to no real
+         interface, so the owner lookup finds nothing. Fall back to the active
+         member's interface — otherwise the arriving interface is unknown, the
+         VRF defaults to the global table, and a perfectly good route inside a
+         VRF looks like no route at all. */
+      if(!nextIn){
+        const v=vipOwner(model, route.nextHop);
+        if(v && v.dev===nextDev) nextIn=v.iface;
+      }
+      /* Still nothing: match the next-hop against the arriving device's own
+         connected subnets, which is what a real router would do. */
+      if(!nextIn && nextDev){
+        nextIn = nextDev.interfaces.find(i=>
+          i.addrs.some(a=>a.len<32 && inNet(route.nextHop, netOf(a.ip,a.len), a.len))) || null;
+      }
     } else if(outIf){
       const a=outIf.addrs.find(x=>x.len<32);
       if(a) nextIn = nextDev.interfaces.find(i=>i.addrs.some(b=>b.len<32 && netOf(b.ip,b.len)===netOf(a.ip,a.len)))||null;
@@ -2917,6 +2939,8 @@ function applyBends(els){
    Endpoints are then spread along the sides of each box, so several links
    arriving at one device meet its edge at separate points instead of stacking
    on the centre. */
+/* A small stable hash, so a link always starts from the same channel. */
+function hashStr(t){ let h=0; for(let i=0;i<t.length;i++){ h=(h*31 + t.charCodeAt(i))|0; } return h; }
 function zoneAncestors(node){
   const out=new Set();
   let p=node.parent && node.parent();
@@ -2997,6 +3021,37 @@ function autoRouteEdges(cy, mode){
 
   const {dev, zone}=routeObstacles(cy);
   const M=ROUTE_M, snap=(v)=>Math.round(v/ROUTE_GRID)*ROUTE_GRID;
+  /* Channels already in use, so two links never share one and read as a single
+     line. A run is only a clash if it overlaps along its length as well as
+     sitting at the same coordinate, so each lane records the span it occupies. */
+  const lanes={h:[], v:[]};
+  const laneFree=(axis,coord,a,b)=>{
+    const lo=Math.min(a,b), hi=Math.max(a,b);
+    // two runs closer than this read as a single thick line
+    return !lanes[axis].some(L=>Math.abs(L.c-coord)<ROUTE_GRID &&
+                                Math.max(lo,L.lo) < Math.min(hi,L.hi)-4);
+  };
+  const laneTake=(axis,coord,a,b)=>lanes[axis].push({c:coord, lo:Math.min(a,b), hi:Math.max(a,b)});
+  /* Does the straight line a->b pass through this box? The leg test below only
+     handles axis-aligned runs; a direct link is a diagonal, so it needs a real
+     segment-against-rectangle check. */
+  const segHitsBox=(ax,ay,bx,by,b,pad)=>{
+    const x1=b.x-b.hw-pad, x2=b.x+b.hw+pad, y1=b.y-b.hh-pad, y2=b.y+b.hh+pad;
+    if(Math.max(ax,bx)<x1 || Math.min(ax,bx)>x2 || Math.max(ay,by)<y1 || Math.min(ay,by)>y2) return false;
+    const inside=(x,y)=>x>=x1 && x<=x2 && y>=y1 && y<=y2;
+    if(inside(ax,ay) || inside(bx,by)) return true;
+    // Liang-Barsky: does the segment overlap the rectangle at all?
+    let t0=0, t1=1;
+    const dx=bx-ax, dy=by-ay;
+    const clip=(p,q)=>{
+      if(p===0) return q>=0;
+      const r=q/p;
+      if(p<0){ if(r>t1) return false; if(r>t0) t0=r; }
+      else    { if(r<t0) return false; if(r<t1) t1=r; }
+      return true;
+    };
+    return clip(-dx, ax-x1) && clip(dx, x2-ax) && clip(-dy, ay-y1) && clip(dy, y2-ay);
+  };
   const legHits=(ax,ay,bx,by,b,pad)=>
     Math.max(ax,bx) >= b.x-b.hw-pad && Math.min(ax,bx) <= b.x+b.hw+pad &&
     Math.max(ay,by) >= b.y-b.hh-pad && Math.min(ay,by) <= b.y+b.hh+pad;
@@ -3021,6 +3076,7 @@ function autoRouteEdges(cy, mode){
       e.data('segD','0'); e.data('segW','0.5');
       return;
     }
+
     const ortho = mode!=='curve';   // right angles unless a curve was asked for
     e.data('ortho', ortho?1:0);
     if(L<1){ e.data('bend',0); e.data('segD','0'); e.data('segW','0.5'); return; }
@@ -3088,7 +3144,9 @@ function autoRouteEdges(cy, mode){
       for(const [px,py] of pts){
         const vx=px-s.x, vy=py-s.y;
         ws.push(((vx*ux+vy*uy)/L).toFixed(4));
-        ds.push(Math.round(vx*nx+vy*ny));
+        // keep two decimals: rounding to whole pixels put a visible kink in a
+        // link that should be dead straight
+        ds.push(+(vx*nx+vy*ny).toFixed(2));
       }
       e.data('segD', ds.join(' ')); e.data('segW', ws.join(' '));
     };
@@ -3098,6 +3156,39 @@ function autoRouteEdges(cy, mode){
     /* A link the user has drawn point to point ignores the right-angle rule
        entirely: it runs straight from one end to the other, through any
        waypoints they placed. */
+    /* "Direct lines" draws a link as straight runs, inclines and all — but it
+       still follows any points the user dragged onto it, which is why this sits
+       after the waypoints are known rather than returning early. Only links
+       whose two ends share a zone are drawn this way; anything crossing a zone
+       boundary keeps its right angles. */
+    /* In "Direct lines" a link is drawn straight whenever the straight line is
+       actually clear — including between zones. Bends are only for links whose
+       direct line would cut through a zone they have nothing to do with, or
+       through another device. */
+    let directNow=false;
+    if(STATE.linkStyle==='direct'){
+      const skipD=new Set([S.id(), T.id()]);
+      const inZonesD=new Set([...zoneAncestors(S), ...zoneAncestors(T)]);
+      for(const z of inZonesD) skipD.add(z);
+      const obsD=dev.concat(zone.filter(z=>!inZonesD.has(z.id)));
+      directNow = !obsD.some(b=>!skipD.has(b.id) && segHitsBox(A.x,A.y,B.x,B.y,b,M*0.5));
+    }
+    if(directNow && !(key && STATE.freeLinks[key])){
+      /* Keep the segment style: it draws straight lines through whatever points
+         it is given, which is what a direct link needs and is also what lets a
+         dragged point show up. Switching to the bezier style here would make
+         the link ignore its waypoints. */
+      e.data('ortho',1); e.data('bend',0);
+      const wps=(key && STATE.waypoints[key]) ? STATE.waypoints[key].map(w=>[w.x,w.y]) : [];
+      /* The segment style needs at least one point. It has to be the midpoint
+         between the real landing points, not the midpoint of the centre-to-
+         centre line: endpoints are spread along the box edges, so a point on
+         the centre line puts a visible kink in the link. */
+      if(wps.length) toSeg(wps);
+      else toSeg([[ (A.x+B.x)/2, (A.y+B.y)/2 ]]);
+      return;
+    }
+
     if(key && STATE.freeLinks[key]){
       const wps=(STATE.waypoints[key]||[]).map(w=>[w.x,w.y]);
       toSeg(wps);
@@ -3135,20 +3226,66 @@ function autoRouteEdges(cy, mode){
       const pts=[[A.x,A.y], corner, [B.x,B.y]];
       if(pathHits(pts,obstacles,skip,M)===0){ toSeg(pts.slice(1,-1)); return; }
     }
+    /* Start each link at a slightly different point along the span. Beginning
+       every one at the midpoint means they all contend for the same lane and
+       then have to be nudged apart. */
+    const spread=[0.5,0.42,0.58,0.34,0.66,0.26,0.74,0.18,0.82,0.12,0.88];
+    const seed=Math.abs(hashStr(String(key||e.id()))) % spread.length;
     const fracs = hand!=null ? [Math.max(0.05,Math.min(0.95,hand/100))]
-                             : [0.5,0.4,0.6,0.3,0.7,0.2,0.8,0.12,0.88];
+                             : spread.slice(seed).concat(spread.slice(0,seed));
     const fanShift = fan ? (fan>0?0.08:-0.08)*Math.ceil(Math.abs(fan)/55) : 0;
     let best=null;
     for(const f0 of fracs){
-      const f=Math.max(0.05,Math.min(0.95,f0+fanShift));
-      let pts;
-      if(horizFirst){ const cx=snap(A.x+ABx*f); pts=[[A.x,A.y],[cx,A.y],[cx,B.y],[B.x,B.y]]; }
-      else          { const cy2=snap(A.y+ABy*f); pts=[[A.x,A.y],[A.x,cy2],[B.x,cy2],[B.x,B.y]]; }
-      const hits=pathHits(pts,obstacles,skip,M);
-      const cost=hits*100+Math.abs(f-0.5);
-      if(!best||cost<best.cost) best={pts,hits,cost};
-      if(hits===0) break;
+      /* Try the ideal channel, then step away from it in both directions until
+         one is free. Without this several links snap to the same grid line and
+         stack on top of each other, which reads as one thick link. */
+      /* Look for a free lane near the ideal channel, not anywhere on the
+         canvas. Searching too far buys a clear lane at the cost of a link that
+         wanders across the diagram, which is worse to read than two lines
+         sharing a lane. */
+      const NUDGES=[0];
+      for(let k=1;k<=20;k++){ NUDGES.push(k/2); NUDGES.push(-k/2); }
+      for(const nudge of NUDGES){
+        const f=Math.max(0.05,Math.min(0.95,f0+fanShift));
+        let pts, axis, coord, spanA, spanB;
+        if(horizFirst){
+          coord=snap(A.x+ABx*f)+nudge*ROUTE_GRID; axis='v'; spanA=A.y; spanB=B.y;
+          pts=[[A.x,A.y],[coord,A.y],[coord,B.y],[B.x,B.y]];
+        } else {
+          coord=snap(A.y+ABy*f)+nudge*ROUTE_GRID; axis='h'; spanA=A.x; spanB=B.x;
+          pts=[[A.x,A.y],[A.x,coord],[B.x,coord],[B.x,B.y]];
+        }
+        const hits=pathHits(pts,obstacles,skip,M);
+        let clash=laneFree(axis,coord,spanA,spanB)?0:1;
+        for(let i=0;i<pts.length-1;i++){
+          const [ax,ay]=pts[i], [bx,by]=pts[i+1];
+          if(Math.abs(ay-by)<0.6 && Math.abs(ax-bx)>6){ if(!laneFree('h',ay,ax,bx)) clash++; }
+          else if(Math.abs(ax-bx)<0.6 && Math.abs(ay-by)>6){ if(!laneFree('v',ax,ay,by)) clash++; }
+        }
+        /* Crossing a box is worst, sharing a lane is next, and after that the
+           shortest, most direct path wins — otherwise links wander. */
+        let len=0;
+        for(let i=0;i<pts.length-1;i++) len+=Math.abs(pts[i+1][0]-pts[i][0])+Math.abs(pts[i+1][1]-pts[i][1]);
+        const direct=Math.abs(B.x-A.x)+Math.abs(B.y-A.y);
+        const detour=Math.max(0,len-direct)/100;     // extra distance, in units of 100px
+        /* A path that wanders far is rejected outright rather than merely
+           penalised, so no link ever loops across the diagram to find a lane. */
+        if(detour>6) continue;                       // more than 600px off: not worth it
+        const cost=hits*100 + clash*25 + detour*3 + Math.abs(f-0.5) + Math.abs(nudge)*0.15;
+        if(!best||cost<best.cost) best={pts,hits,cost,axis,coord,spanA,spanB};
+        if(hits===0 && !clash) break;
+      }
+      if(best && best.hits===0 && best.cost<30) break;
     }
+    /* Reserve every straight run of the chosen path, not just its main
+       channel: the short approach legs beside a box overlap each other too. */
+    const reserveAll=(pts)=>{
+      for(let i=0;i<pts.length-1;i++){
+        const [ax,ay]=pts[i], [bx,by]=pts[i+1];
+        if(Math.abs(ay-by)<0.6 && Math.abs(ax-bx)>6) laneTake('h',ay,ax,bx);
+        else if(Math.abs(ax-bx)<0.6 && Math.abs(ay-by)>6) laneTake('v',ax,ay,by);
+      }
+    };
     if(best.hits>0 && hand==null){
       let pts=null;
       if(horizFirst){
@@ -3206,6 +3343,38 @@ function autoRouteEdges(cy, mode){
         if(h===0) break;
       }
     }
+    /* The detour fallbacks above pick a lane without consulting the allocator,
+       so a final pass slides the chosen path's interior runs off any lane that
+       is already taken. Without this two detours share a line and read as one. */
+    const clashing=(pts)=>{
+      for(let i=0;i<pts.length-1;i++){
+        const [ax,ay]=pts[i], [bx,by]=pts[i+1];
+        if(Math.abs(ay-by)<0.6 && Math.abs(ax-bx)>6){ if(!laneFree('h',ay,ax,bx)) return true; }
+        else if(Math.abs(ax-bx)<0.6 && Math.abs(ay-by)>6){ if(!laneFree('v',ax,ay,by)) return true; }
+      }
+      return false;
+    };
+    if(clashing(best.pts)){
+      /* A Z path has one interior coordinate: the x of its vertical channel or
+         the y of its horizontal one. Slide just that until the run sits in a
+         free lane and still clears every box. */
+      const P=best.pts;
+      if(P.length===4){
+        const vertical = Math.abs(P[1][0]-P[2][0])<0.6;   // channel runs up/down
+        for(let k=1;k<=14;k++){
+          let found=false;
+          for(const dir of [1,-1]){
+            const off=dir*k*(ROUTE_GRID/2);
+            const q = vertical
+              ? [P[0], [P[1][0]+off, P[1][1]], [P[2][0]+off, P[2][1]], P[3]]
+              : [P[0], [P[1][0], P[1][1]+off], [P[2][0], P[2][1]+off], P[3]];
+            if(pathHits(q,obstacles,skip,M)===0 && !clashing(q)){ best.pts=q; found=true; break; }
+          }
+          if(found) break;
+        }
+      }
+    }
+    reserveAll(best.pts);
     toSeg(best.pts.slice(1,-1));
   });
 }
@@ -4378,11 +4547,22 @@ function shade(hex, amt){
   r=Math.max(0,Math.min(255,mix(r))); g=Math.max(0,Math.min(255,mix(g))); b=Math.max(0,Math.min(255,mix(b)));
   return '#'+[r,g,b].map(x=>x.toString(16).padStart(2,'0')).join('');
 }
+/* What kind of box this is.
+
+   The old rule only called something a switch if it had no routes at all,
+   which made every layer-3 switch a "Router" — and a datacentre switch that
+   does no routing barely exists. What actually distinguishes a switch is
+   switched ports and VLANs, not the absence of routing. */
 function roleOf(d){
   if(!d) return 'router';
   if(d.vendor==='palo-alto') return 'firewall';
-  const routes = d.fib && d.fib.some(f=>f.type!=='connected');
-  if(d.isSwitch && !routes && !d.interfaces.some(i=>i.addrs.length && !/^vlan/i.test(i.name))) return 'switch';
+  if(d.isFirewall || /(^|[-_])(fw|firewall|asa|palo|pan)([-_]|\d|$)/i.test(d.name||'')) return 'firewall';
+
+  /* Switched ports or SVIs are what make a switch. A VLAN database on its own
+     is not enough — a router can declare VLANs it never switches. */
+  const hasSwitchports = d.interfaces.some(i=>i.switchport || i.l2);
+  const hasSvi         = d.interfaces.some(i=>/^vlan\s*\d+/i.test(i.name||''));
+  if(hasSwitchports || hasSvi) return 'switch';
   return 'router';
 }
 function roleColor(role){
@@ -5410,8 +5590,19 @@ function render(){
      arranged them that way — which is what collapsed the map into a column.
      Bind to this graph and this namespace so a quick view switch cannot write
      one view's layout into another. */
-  cy.on('layoutstop', ()=>{ autoRouteEdges(cy,'ortho'); });
-  setTimeout(()=>autoRouteEdges(cy,'ortho'), 0);
+  /* Routing needs real geometry. A zone is a compound node whose size is only
+     known once Cytoscape has laid out its children, and a box's size is only
+     known once its label has been measured. Routing too early means zones look
+     like zero-sized points and get treated as nothing to avoid, which is how
+     links end up cutting straight through them and under boxes. So route once
+     the graph is ready, again after the layout settles, and once more on the
+     next frame when every size is final. */
+  const reroute=()=>autoRouteEdges(cy,'ortho');
+  cy.on('layoutstop', reroute);
+  if(typeof cy.ready==='function') cy.ready(()=>{ reroute(); requestAnimationFrame(reroute); });
+  else reroute();
+  setTimeout(reroute, 120);
+  setTimeout(reroute, 400);
   cy.on('position', 'node', ()=>{
     if(STATE._routeTimer) return;
     STATE._routeTimer=setTimeout(()=>{ STATE._routeTimer=null; autoRouteEdges(cy,'ortho'); }, 60);
@@ -7760,6 +7951,11 @@ document.getElementById('add-paste').onclick=()=>{
 document.getElementById('opt-view').onchange=()=>{ render(); autosave(); };
 document.getElementById('opt-select').onchange=()=>{ render(); updateSelBtn(); };
 document.getElementById('opt-nolinks').onchange=()=>{ render(); autosave(); };
+document.getElementById('opt-linkstyle').onchange=function(){
+  STATE.linkStyle=this.value;
+  if(STATE.cy) autoRouteEdges(STATE.cy,'ortho');
+  render(); autosave();
+};
 document.getElementById('opt-showdown').onchange=()=>{ render(); autosave(); };
 document.getElementById('opt-locklinks').onchange=function(){
   STATE.linksLocked=this.checked;
@@ -7844,6 +8040,10 @@ window.addEventListener('keydown',(ev)=>{
   else if((ev.key==='f'||ev.key==='F') && !ev.ctrlKey && !ev.metaKey && !ev.altKey){
     ev.preventDefault(); setZen(!STATE.zen);
   }
+  else if((ev.key==='r'||ev.key==='R') && !ev.ctrlKey && !ev.metaKey && !ev.altKey){
+    ev.preventDefault();
+    const b=document.getElementById('reroute'); if(b) b.click();
+  }
 });
 /* The control bar folds away into a single corner button, so the diagram gets
    the window when you are reading it rather than adjusting it. */
@@ -7863,6 +8063,14 @@ if(sbBtn && sbMenu){
     if(!sbMenu.contains(ev.target) && ev.target!==sbBtn) sbMenu.classList.remove('on');
   });
 }
+document.getElementById('reroute').onclick=()=>{
+  if(!STATE.cy) return;
+  pushUndo();
+  STATE.linksLocked=false;
+  const lb=document.getElementById('opt-locklinks'); if(lb) lb.checked=false;
+  autoRouteEdges(STATE.cy,'ortho');
+  autosave();
+};
 document.getElementById('zoom-in').onclick=()=>zoomBy(1.25);
 document.getElementById('zoom-out').onclick=()=>zoomBy(1/1.25);
 document.getElementById('exp-report').onclick=()=>exportChangeReport();
@@ -8580,6 +8788,7 @@ function projectObject(){
     linksLocked: !!STATE.linksLocked,
     flowText: STATE.flowText||'',
     zen: !!STATE.zen,
+    linkStyle: STATE.linkStyle||'ortho',
     barHidden: !!STATE.barHidden,
     bends:STATE.bends||{},
     lineWidths:STATE.lineWidths||{},
@@ -8665,6 +8874,9 @@ function loadProject(obj){
   STATE.linksLocked = !!obj.linksLocked;
   STATE.flowText = obj.flowText||'';
   if(obj.zen) setTimeout(()=>setZen(true),0);
+  STATE.linkStyle = obj.linkStyle || 'ortho';
+  const lsSel=document.getElementById('opt-linkstyle');
+  if(lsSel) lsSel.value=STATE.linkStyle;
   if(obj.barHidden) setTimeout(()=>setBarHidden(true),0);
   STATE.flowResults=[];
   STATE.parked = Array.isArray(obj.parked) ? obj.parked : [];
@@ -8833,73 +9045,77 @@ document.getElementById('clear-all').onclick=()=>{
 };
 
 /* ---- example lab ---- */
-const SAMPLE_CORE = `hostname CORE-SW
-!
-interface Vlan10
- description Users
- ip address 10.10.10.1 255.255.255.0
-!
-interface Vlan20
- description Servers
- ip address 10.10.20.1 255.255.255.0
-!
-interface GigabitEthernet0/1
- description to EDGE-RTR
- ip address 172.16.0.1 255.255.255.252
-!
-interface Loopback0
- ip address 10.255.255.1 255.255.255.255
-!
-router ospf 1
- network 10.10.0.0 0.0.255.255 area 0
- network 172.16.0.0 0.0.0.3 area 0
-!
-ip route 0.0.0.0 0.0.0.0 172.16.0.2
-`;
-const SAMPLE_EDGE = `hostname EDGE-RTR
-!
-interface GigabitEthernet0/0
- description to CORE-SW
- ip address 172.16.0.2 255.255.255.252
-!
-interface GigabitEthernet0/1
- description to FW inside
- ip address 172.16.1.1 255.255.255.252
-!
-interface Loopback0
- ip address 10.255.255.2 255.255.255.255
-!
-router ospf 1
- network 172.16.0.0 0.0.0.255 area 0
-!
-ip route 10.10.10.0 255.255.255.0 172.16.0.1
-ip route 10.10.20.0 255.255.255.0 172.16.0.1
-ip route 0.0.0.0 0.0.0.0 172.16.1.2
-`;
-const SAMPLE_FW = `set deviceconfig system hostname PA-FW1
-set network interface ethernet ethernet1/1 layer3 ip 172.16.1.2/30
-set network interface ethernet ethernet1/2 layer3 ip 203.0.113.2/30
-set network interface ethernet ethernet1/3 layer3 ip 192.168.50.1/24
-set zone INSIDE network layer3 [ ethernet1/1 ]
-set zone OUTSIDE network layer3 [ ethernet1/2 ]
-set zone DMZ network layer3 [ ethernet1/3 ]
-set network virtual-router default interface [ ethernet1/1 ethernet1/2 ethernet1/3 ]
-set network virtual-router default routing-table ip static-route DEFAULT destination 0.0.0.0/0
-set network virtual-router default routing-table ip static-route DEFAULT nexthop ip-address 203.0.113.1
-set network virtual-router default routing-table ip static-route CAMPUS destination 10.10.0.0/16
-set network virtual-router default routing-table ip static-route CAMPUS nexthop ip-address 172.16.1.1
-set address SERVERS ip-netmask 10.10.20.0/24
-set rulebase security rules Users-to-DMZ from [ INSIDE ] to [ DMZ ] source any destination any action allow
-set rulebase security rules Block-Servers-Out from [ INSIDE ] to [ OUTSIDE ] source [ SERVERS ] destination any action deny
-set rulebase security rules Outbound from [ INSIDE ] to [ OUTSIDE ] source any destination any action allow
-`;
+const LAB_ZONES = [{"id": "g_fra", "name": "Frankfurt DC", "parent": null}, {"id": "g_fra_inet", "name": "FRA Internet-Out", "parent": "g_fra"}, {"id": "g_fra_dmz", "name": "FRA DMZ", "parent": "g_fra"}, {"id": "g_fra_int", "name": "FRA Internal", "parent": "g_fra"}, {"id": "g_lon", "name": "London DC", "parent": null}, {"id": "g_lon_inet", "name": "LON Internet-Out", "parent": "g_lon"}, {"id": "g_lon_dmz", "name": "LON DMZ", "parent": "g_lon"}, {"id": "g_lon_int", "name": "LON Internal", "parent": "g_lon"}];
+const LAB_DEVICES = [
+  {name:"FRA-DC1-RTR-INET-01.cfg", group:"g_fra_inet", text:"hostname FRA-DC1-RTR-INET-01\n!\nip vrf MGMT\n!\nvlan 100\n name INET-TRANSIT\n!\ninterface GigabitEthernet0/0\n description To ISP AS64500 circuit 1\n ip address 198.51.100.1 255.255.255.252\n no shutdown\n!\ninterface GigabitEthernet0/1\n description To FRA-DC1-FW-EXT-01 ae1.100\n ip address 10.10.1.1 255.255.255.0\n standby 100 ip 10.10.1.254\n standby 100 priority 110\n standby 100 preempt\n no shutdown\n!\ninterface GigabitEthernet0/2\n description Peer link to FRA-DC1-RTR-INET-02\n ip address 10.10.199.1 255.255.255.252\n no shutdown\n!\ninterface GigabitEthernet0/4\n description Out-of-band management to FRA-DC1-SW-INT-01\n ip vrf forwarding MGMT\n ip address 10.10.9.1 255.255.255.252\n no shutdown\n!\ninterface GigabitEthernet0/3\n description Spare - not in service\n ip address 10.10.250.1 255.255.255.252\n shutdown\n!\nrouter bgp 65010\n bgp router-id 10.10.199.1\n neighbor 198.51.100.2 remote-as 64500\n neighbor 10.10.199.2 remote-as 65010\n neighbor 10.10.199.2 next-hop-self\n network 10.10.0.0 mask 255.255.0.0\n!\nip route 10.10.0.0 255.255.0.0 10.10.1.10\nip route 0.0.0.0 0.0.0.0 198.51.100.2\n!\nip access-list extended INET-IN\n deny ip 10.0.0.0 0.255.255.255 any\n permit tcp any 10.10.20.0 0.0.0.255 eq 443\n permit ip any any\n!\ninterface GigabitEthernet0/0\n ip access-group INET-IN in\n"},
+  {name:"FRA-DC1-FW-EXT-01.set", group:"g_fra_dmz", text:"set deviceconfig system hostname FRA-DC1-FW-EXT-01\nset network interface aggregate-ethernet ae1 layer3 units ae1.100 ip 10.10.1.10/24\nset network interface aggregate-ethernet ae1 layer3 units ae1.100 tag 100\nset network interface aggregate-ethernet ae1 layer3 units ae1.200 ip 10.10.2.10/24\nset network interface aggregate-ethernet ae1 layer3 units ae1.200 tag 200\nset network interface aggregate-ethernet ae1 layer3 units ae1.300 ip 10.10.3.10/24\nset network interface aggregate-ethernet ae1 layer3 units ae1.300 tag 300\nset network interface ethernet ethernet1/7 layer3 ip 10.10.254.1/30\nset vsys vsys1 zone OUTSIDE network layer3 [ ae1.100 ]\nset vsys vsys1 zone DMZ network layer3 [ ae1.200 ]\nset vsys vsys1 zone INSIDE network layer3 [ ae1.300 ]\nset network virtual-router VR-MAIN interface [ ae1.100 ae1.200 ae1.300 ethernet1/7 ]\nset network virtual-router VR-MAIN routing-table ip static-route DEFAULT destination 0.0.0.0/0\nset network virtual-router VR-MAIN routing-table ip static-route DEFAULT nexthop ip-address 10.10.1.254\nset network virtual-router VR-MAIN routing-table ip static-route INTERNAL destination 10.10.30.0/24\nset network virtual-router VR-MAIN routing-table ip static-route INTERNAL nexthop ip-address 10.10.3.254\nset network virtual-router VR-MAIN routing-table ip static-route USERS destination 10.10.40.0/24\nset network virtual-router VR-MAIN routing-table ip static-route USERS nexthop ip-address 10.10.3.254\nset network virtual-router VR-MAIN routing-table ip static-route DMZNET destination 10.10.20.0/24\nset network virtual-router VR-MAIN routing-table ip static-route DMZNET nexthop ip-address 10.10.2.254\nset network virtual-router VR-MAIN protocol bgp local-as 65010\nset network virtual-router VR-MAIN protocol bgp router-id 10.10.254.1\nset network virtual-router VR-MAIN protocol bgp peer-group CORE type ibgp peer-as 65010\nset network virtual-router VR-MAIN protocol bgp peer-group CORE peer CORE-01 peer-address ip 10.10.254.2\nset network virtual-router VR-MAIN protocol bgp peer-group CORE peer CORE-01 local-address interface ethernet1/7\nset address DMZ-WEB ip-netmask 10.10.20.0/24\nset address INTERNAL-NET ip-netmask 10.10.0.0/16\nset address SERVERS ip-netmask 10.10.30.0/24\nset rulebase security rules Inbound-Web from [ OUTSIDE ] to [ DMZ ] source any destination [ DMZ-WEB ] application [ web-browsing ssl ] action allow\nset rulebase security rules DMZ-to-Servers from [ DMZ ] to [ INSIDE ] source [ DMZ-WEB ] destination [ SERVERS ] action allow\nset rulebase security rules Internal-to-DMZ from [ INSIDE ] to [ DMZ ] source [ INTERNAL-NET ] destination any action allow\nset rulebase security rules Internal-Out from [ INSIDE ] to [ OUTSIDE ] source [ INTERNAL-NET ] destination any action allow\nset rulebase security rules Deny-DMZ-to-Internet from [ DMZ ] to [ OUTSIDE ] source any destination any action deny\n"},
+  {name:"FRA-DC1-SW-DMZ-01.cfg", group:"g_fra_dmz", text:"hostname FRA-DC1-SW-DMZ-01\n!\nip vrf DMZ\n!\nvlan 200\n name DMZ-TRANSIT\nvlan 220\n name DMZ-WEB\nvlan 999\n name PEER-KEEPALIVE\n!\ninterface Vlan200\n description To FRA-DC1-FW-EXT ae1.200\n ip vrf forwarding DMZ\n ip address 10.10.2.251 255.255.255.0\n standby 200 ip 10.10.2.254\n standby 200 priority 110\n no shutdown\n!\ninterface Vlan220\n description DMZ web servers\n ip vrf forwarding DMZ\n ip address 10.10.20.251 255.255.255.0\n standby 220 ip 10.10.20.254\n standby 220 priority 110\n no shutdown\n!\ninterface Ethernet1/1\n description To FRA-DC1-FW-EXT-01 ae1\n switchport\n switchport mode trunk\n switchport trunk allowed vlan 200,220\n channel-group 1 mode active\n no shutdown\n!\ninterface Ethernet1/2\n description To FRA-DC1-FW-EXT-02 ae1\n switchport\n switchport mode trunk\n switchport trunk allowed vlan 200,220\n channel-group 1 mode active\n no shutdown\n!\ninterface Ethernet1/47\n description vPC peer-link to FRA-DC1-SW-DMZ-02\n switchport\n switchport mode trunk\n no shutdown\n!\ninterface Ethernet1/48\n description Decommissioned server port\n switchport\n switchport access vlan 220\n shutdown\n!\nip route vrf DMZ 0.0.0.0 0.0.0.0 10.10.2.10\nip route vrf DMZ 10.10.30.0 255.255.255.0 10.10.2.10\n"},
+  {name:"FRA-DC1-SW-INT-01.cfg", group:"g_fra_int", text:"hostname FRA-DC1-SW-INT-01\n!\nip vrf INTERNAL\nip vrf MGMT\n!\nvlan 300\n name INT-TRANSIT\nvlan 330\n name SERVERS\nvlan 340\n name USERS\n!\ninterface Vlan300\n description To FRA-DC1-FW-EXT ae1.300\n ip vrf forwarding INTERNAL\n ip address 10.10.3.251 255.255.255.0\n standby 300 ip 10.10.3.254\n standby 300 priority 110\n no shutdown\n!\ninterface Vlan330\n description Server VLAN\n ip vrf forwarding INTERNAL\n ip address 10.10.30.251 255.255.255.0\n standby 330 ip 10.10.30.254\n standby 330 priority 110\n no shutdown\n!\ninterface Vlan340\n description User VLAN\n ip vrf forwarding INTERNAL\n ip address 10.10.40.251 255.255.255.0\n standby 340 ip 10.10.40.254\n no shutdown\n!\ninterface Ethernet1/1\n description To FRA-DC1-FW-EXT-01 ae1\n switchport\n switchport mode trunk\n switchport trunk allowed vlan 300,330,340\n no shutdown\n!\ninterface Ethernet1/5\n description DCI to LON-DC1-SW-INT-01\n no switchport\n ip vrf forwarding INTERNAL\n ip address 10.99.1.1 255.255.255.252\n no shutdown\n!\ninterface Ethernet1/47\n description vPC peer-link to FRA-DC1-SW-INT-02\n switchport\n switchport mode trunk\n no shutdown\n!\ninterface Ethernet1/9\n description Out-of-band management to FRA-DC1-RTR-INET-01\n no switchport\n ip vrf forwarding MGMT\n ip address 10.10.9.2 255.255.255.252\n no shutdown\n!\ninterface Ethernet1/7\n description Firewall BGP peering\n no switchport\n ip address 10.10.254.2 255.255.255.252\n no shutdown\n!\nrouter bgp 65010\n bgp router-id 10.10.254.2\n neighbor 10.10.254.1 remote-as 65010\n neighbor 10.10.254.1 update-source Ethernet1/7\n network 10.10.30.0 mask 255.255.255.0\n network 10.10.40.0 mask 255.255.255.0\n!\nip route vrf INTERNAL 0.0.0.0 0.0.0.0 10.10.3.10\nip route vrf INTERNAL 10.10.20.0 255.255.255.0 10.10.3.10\nip route vrf INTERNAL 10.20.30.0 255.255.255.0 10.99.1.2\nip route vrf INTERNAL 10.20.40.0 255.255.255.0 10.99.1.2\nip route vrf MGMT 0.0.0.0 0.0.0.0 10.10.9.1\n"},
+  {name:"FRA-DC1-RTR-INET-02.cfg", group:"g_fra_inet", text:"hostname FRA-DC1-RTR-INET-02\n!\nip vrf MGMT\n!\nvlan 100\n name INET-TRANSIT\n!\ninterface GigabitEthernet0/0\n description To ISP AS64500 circuit 2\n ip address 198.51.100.5 255.255.255.252\n no shutdown\n!\ninterface GigabitEthernet0/1\n description To FRA-DC1-FW-EXT-01 ae1.100\n ip address 10.10.1.2 255.255.255.0\n standby 100 ip 10.10.1.254\n standby 100 priority 100\n standby 100 preempt\n no shutdown\n!\ninterface GigabitEthernet0/2\n description Peer link to FRA-DC1-RTR-INET-01\n ip address 10.10.199.2 255.255.255.252\n no shutdown\n!\ninterface GigabitEthernet0/4\n description Out-of-band management to FRA-DC1-SW-INT-02\n ip vrf forwarding MGMT\n ip address 10.10.9.5 255.255.255.252\n no shutdown\n!\ninterface GigabitEthernet0/3\n description Spare - not in service\n ip address 10.10.250.2 255.255.255.252\n shutdown\n!\nrouter bgp 65010\n bgp router-id 10.10.199.2\n neighbor 198.51.100.6 remote-as 64500\n neighbor 10.10.199.1 remote-as 65010\n neighbor 10.10.199.1 next-hop-self\n network 10.10.0.0 mask 255.255.0.0\n!\nip route 10.10.0.0 255.255.0.0 10.10.1.10\nip route 0.0.0.0 0.0.0.0 198.51.100.6\n!\nip access-list extended INET-IN\n deny ip 10.0.0.0 0.255.255.255 any\n permit tcp any 10.10.20.0 0.0.0.255 eq 443\n permit ip any any\n!\ninterface GigabitEthernet0/0\n ip access-group INET-IN in\n"},
+  {name:"FRA-DC1-FW-EXT-02.set", group:"g_fra_dmz", text:"set deviceconfig system hostname FRA-DC1-FW-EXT-02\nset network interface aggregate-ethernet ae1 layer3 units ae1.100 ip 10.10.1.11/24\nset network interface aggregate-ethernet ae1 layer3 units ae1.100 tag 100\nset network interface aggregate-ethernet ae1 layer3 units ae1.200 ip 10.10.2.11/24\nset network interface aggregate-ethernet ae1 layer3 units ae1.200 tag 200\nset network interface aggregate-ethernet ae1 layer3 units ae1.300 ip 10.10.3.11/24\nset network interface aggregate-ethernet ae1 layer3 units ae1.300 tag 300\nset network interface ethernet ethernet1/7 layer3 ip 10.10.254.5/30\nset vsys vsys1 zone OUTSIDE network layer3 [ ae1.100 ]\nset vsys vsys1 zone DMZ network layer3 [ ae1.200 ]\nset vsys vsys1 zone INSIDE network layer3 [ ae1.300 ]\nset network virtual-router VR-MAIN interface [ ae1.100 ae1.200 ae1.300 ethernet1/7 ]\nset network virtual-router VR-MAIN routing-table ip static-route DEFAULT destination 0.0.0.0/0\nset network virtual-router VR-MAIN routing-table ip static-route DEFAULT nexthop ip-address 10.10.1.254\nset network virtual-router VR-MAIN routing-table ip static-route INTERNAL destination 10.10.30.0/24\nset network virtual-router VR-MAIN routing-table ip static-route INTERNAL nexthop ip-address 10.10.3.254\nset network virtual-router VR-MAIN routing-table ip static-route USERS destination 10.10.40.0/24\nset network virtual-router VR-MAIN routing-table ip static-route USERS nexthop ip-address 10.10.3.254\nset network virtual-router VR-MAIN routing-table ip static-route DMZNET destination 10.10.20.0/24\nset network virtual-router VR-MAIN routing-table ip static-route DMZNET nexthop ip-address 10.10.2.254\nset network virtual-router VR-MAIN protocol bgp local-as 65010\nset network virtual-router VR-MAIN protocol bgp router-id 10.10.254.5\nset network virtual-router VR-MAIN protocol bgp peer-group CORE type ibgp peer-as 65010\nset network virtual-router VR-MAIN protocol bgp peer-group CORE peer CORE-01 peer-address ip 10.10.254.6\nset network virtual-router VR-MAIN protocol bgp peer-group CORE peer CORE-01 local-address interface ethernet1/7\nset address DMZ-WEB ip-netmask 10.10.20.0/24\nset address INTERNAL-NET ip-netmask 10.10.0.0/16\nset address SERVERS ip-netmask 10.10.30.0/24\nset rulebase security rules Inbound-Web from [ OUTSIDE ] to [ DMZ ] source any destination [ DMZ-WEB ] application [ web-browsing ssl ] action allow\nset rulebase security rules DMZ-to-Servers from [ DMZ ] to [ INSIDE ] source [ DMZ-WEB ] destination [ SERVERS ] action allow\nset rulebase security rules Internal-to-DMZ from [ INSIDE ] to [ DMZ ] source [ INTERNAL-NET ] destination any action allow\nset rulebase security rules Internal-Out from [ INSIDE ] to [ OUTSIDE ] source [ INTERNAL-NET ] destination any action allow\nset rulebase security rules Deny-DMZ-to-Internet from [ DMZ ] to [ OUTSIDE ] source any destination any action deny\n"},
+  {name:"FRA-DC1-SW-DMZ-02.cfg", group:"g_fra_dmz", text:"hostname FRA-DC1-SW-DMZ-02\n!\nip vrf DMZ\n!\nvlan 200\n name DMZ-TRANSIT\nvlan 220\n name DMZ-WEB\nvlan 999\n name PEER-KEEPALIVE\n!\ninterface Vlan200\n description To FRA-DC1-FW-EXT ae1.200\n ip vrf forwarding DMZ\n ip address 10.10.2.252 255.255.255.0\n standby 200 ip 10.10.2.254\n standby 200 priority 100\n no shutdown\n!\ninterface Vlan220\n description DMZ web servers\n ip vrf forwarding DMZ\n ip address 10.10.20.252 255.255.255.0\n standby 220 ip 10.10.20.254\n standby 220 priority 100\n no shutdown\n!\ninterface Ethernet1/1\n description To FRA-DC1-FW-EXT-01 ae1\n switchport\n switchport mode trunk\n switchport trunk allowed vlan 200,220\n channel-group 1 mode active\n no shutdown\n!\ninterface Ethernet1/2\n description To FRA-DC1-FW-EXT-02 ae1\n switchport\n switchport mode trunk\n switchport trunk allowed vlan 200,220\n channel-group 1 mode active\n no shutdown\n!\ninterface Ethernet1/47\n description vPC peer-link to FRA-DC1-SW-DMZ-01\n switchport\n switchport mode trunk\n no shutdown\n!\ninterface Ethernet1/48\n description Decommissioned server port\n switchport\n switchport access vlan 220\n shutdown\n!\nip route vrf DMZ 0.0.0.0 0.0.0.0 10.10.2.11\nip route vrf DMZ 10.10.30.0 255.255.255.0 10.10.2.11\n"},
+  {name:"FRA-DC1-SW-INT-02.cfg", group:"g_fra_int", text:"hostname FRA-DC1-SW-INT-02\n!\nip vrf INTERNAL\nip vrf MGMT\n!\nvlan 300\n name INT-TRANSIT\nvlan 330\n name SERVERS\nvlan 340\n name USERS\n!\ninterface Vlan300\n description To FRA-DC1-FW-EXT ae1.300\n ip vrf forwarding INTERNAL\n ip address 10.10.3.252 255.255.255.0\n standby 300 ip 10.10.3.254\n standby 300 priority 100\n no shutdown\n!\ninterface Vlan330\n description Server VLAN\n ip vrf forwarding INTERNAL\n ip address 10.10.30.252 255.255.255.0\n standby 330 ip 10.10.30.254\n standby 330 priority 100\n no shutdown\n!\ninterface Vlan340\n description User VLAN\n ip vrf forwarding INTERNAL\n ip address 10.10.40.252 255.255.255.0\n standby 340 ip 10.10.40.254\n no shutdown\n!\ninterface Ethernet1/1\n description To FRA-DC1-FW-EXT-01 ae1\n switchport\n switchport mode trunk\n switchport trunk allowed vlan 300,330,340\n no shutdown\n!\ninterface Ethernet1/5\n description DCI to LON-DC1-SW-INT-02\n no switchport\n ip vrf forwarding INTERNAL\n ip address 10.99.2.1 255.255.255.252\n no shutdown\n!\ninterface Ethernet1/47\n description vPC peer-link to FRA-DC1-SW-INT-01\n switchport\n switchport mode trunk\n no shutdown\n!\ninterface Ethernet1/9\n description Out-of-band management to FRA-DC1-RTR-INET-02\n no switchport\n ip vrf forwarding MGMT\n ip address 10.10.9.6 255.255.255.252\n no shutdown\n!\ninterface Ethernet1/7\n description Firewall BGP peering\n no switchport\n ip address 10.10.254.6 255.255.255.252\n no shutdown\n!\nrouter bgp 65010\n bgp router-id 10.10.254.6\n neighbor 10.10.254.5 remote-as 65010\n neighbor 10.10.254.5 update-source Ethernet1/7\n network 10.10.30.0 mask 255.255.255.0\n network 10.10.40.0 mask 255.255.255.0\n!\nip route vrf INTERNAL 0.0.0.0 0.0.0.0 10.10.3.11\nip route vrf INTERNAL 10.10.20.0 255.255.255.0 10.10.3.11\nip route vrf INTERNAL 10.20.30.0 255.255.255.0 10.99.2.2\nip route vrf INTERNAL 10.20.40.0 255.255.255.0 10.99.2.2\nip route vrf MGMT 0.0.0.0 0.0.0.0 10.10.9.5\n"},
+  {name:"LON-DC1-RTR-INET-01.cfg", group:"g_lon_inet", text:"hostname LON-DC1-RTR-INET-01\n!\nip vrf MGMT\n!\nvlan 100\n name INET-TRANSIT\n!\ninterface GigabitEthernet0/0\n description To ISP AS64501 circuit 1\n ip address 203.0.113.1 255.255.255.252\n no shutdown\n!\ninterface GigabitEthernet0/1\n description To LON-DC1-FW-EXT-01 ae1.100\n ip address 10.20.1.1 255.255.255.0\n standby 100 ip 10.20.1.254\n standby 100 priority 110\n standby 100 preempt\n no shutdown\n!\ninterface GigabitEthernet0/2\n description Peer link to LON-DC1-RTR-INET-02\n ip address 10.20.199.1 255.255.255.252\n no shutdown\n!\ninterface GigabitEthernet0/4\n description Out-of-band management to LON-DC1-SW-INT-01\n ip vrf forwarding MGMT\n ip address 10.20.9.1 255.255.255.252\n no shutdown\n!\ninterface GigabitEthernet0/3\n description Spare - not in service\n ip address 10.20.250.1 255.255.255.252\n shutdown\n!\nrouter bgp 65020\n bgp router-id 10.20.199.1\n neighbor 203.0.113.2 remote-as 64501\n neighbor 10.20.199.2 remote-as 65020\n neighbor 10.20.199.2 next-hop-self\n network 10.20.0.0 mask 255.255.0.0\n!\nip route 10.20.0.0 255.255.0.0 10.20.1.10\nip route 0.0.0.0 0.0.0.0 203.0.113.2\n!\nip access-list extended INET-IN\n deny ip 10.0.0.0 0.255.255.255 any\n permit tcp any 10.20.20.0 0.0.0.255 eq 443\n permit ip any any\n!\ninterface GigabitEthernet0/0\n ip access-group INET-IN in\n"},
+  {name:"LON-DC1-FW-EXT-01.set", group:"g_lon_dmz", text:"set deviceconfig system hostname LON-DC1-FW-EXT-01\nset network interface aggregate-ethernet ae1 layer3 units ae1.100 ip 10.20.1.10/24\nset network interface aggregate-ethernet ae1 layer3 units ae1.100 tag 100\nset network interface aggregate-ethernet ae1 layer3 units ae1.200 ip 10.20.2.10/24\nset network interface aggregate-ethernet ae1 layer3 units ae1.200 tag 200\nset network interface aggregate-ethernet ae1 layer3 units ae1.300 ip 10.20.3.10/24\nset network interface aggregate-ethernet ae1 layer3 units ae1.300 tag 300\nset network interface ethernet ethernet1/7 layer3 ip 10.20.254.1/30\nset vsys vsys1 zone OUTSIDE network layer3 [ ae1.100 ]\nset vsys vsys1 zone DMZ network layer3 [ ae1.200 ]\nset vsys vsys1 zone INSIDE network layer3 [ ae1.300 ]\nset network virtual-router VR-MAIN interface [ ae1.100 ae1.200 ae1.300 ethernet1/7 ]\nset network virtual-router VR-MAIN routing-table ip static-route DEFAULT destination 0.0.0.0/0\nset network virtual-router VR-MAIN routing-table ip static-route DEFAULT nexthop ip-address 10.20.1.254\nset network virtual-router VR-MAIN routing-table ip static-route INTERNAL destination 10.20.30.0/24\nset network virtual-router VR-MAIN routing-table ip static-route INTERNAL nexthop ip-address 10.20.3.254\nset network virtual-router VR-MAIN routing-table ip static-route USERS destination 10.20.40.0/24\nset network virtual-router VR-MAIN routing-table ip static-route USERS nexthop ip-address 10.20.3.254\nset network virtual-router VR-MAIN routing-table ip static-route DMZNET destination 10.20.20.0/24\nset network virtual-router VR-MAIN routing-table ip static-route DMZNET nexthop ip-address 10.20.2.254\nset network virtual-router VR-MAIN protocol bgp local-as 65020\nset network virtual-router VR-MAIN protocol bgp router-id 10.20.254.1\nset network virtual-router VR-MAIN protocol bgp peer-group CORE type ibgp peer-as 65020\nset network virtual-router VR-MAIN protocol bgp peer-group CORE peer CORE-01 peer-address ip 10.20.254.2\nset network virtual-router VR-MAIN protocol bgp peer-group CORE peer CORE-01 local-address interface ethernet1/7\nset address DMZ-WEB ip-netmask 10.20.20.0/24\nset address INTERNAL-NET ip-netmask 10.20.0.0/16\nset address SERVERS ip-netmask 10.20.30.0/24\nset rulebase security rules Inbound-Web from [ OUTSIDE ] to [ DMZ ] source any destination [ DMZ-WEB ] application [ web-browsing ssl ] action allow\nset rulebase security rules DMZ-to-Servers from [ DMZ ] to [ INSIDE ] source [ DMZ-WEB ] destination [ SERVERS ] action allow\nset rulebase security rules Internal-to-DMZ from [ INSIDE ] to [ DMZ ] source [ INTERNAL-NET ] destination any action allow\nset rulebase security rules Internal-Out from [ INSIDE ] to [ OUTSIDE ] source [ INTERNAL-NET ] destination any action allow\nset rulebase security rules Deny-DMZ-to-Internet from [ DMZ ] to [ OUTSIDE ] source any destination any action deny\n"},
+  {name:"LON-DC1-SW-DMZ-01.cfg", group:"g_lon_dmz", text:"hostname LON-DC1-SW-DMZ-01\n!\nip vrf DMZ\n!\nvlan 200\n name DMZ-TRANSIT\nvlan 220\n name DMZ-WEB\nvlan 999\n name PEER-KEEPALIVE\n!\ninterface Vlan200\n description To LON-DC1-FW-EXT ae1.200\n ip vrf forwarding DMZ\n ip address 10.20.2.251 255.255.255.0\n standby 200 ip 10.20.2.254\n standby 200 priority 110\n no shutdown\n!\ninterface Vlan220\n description DMZ web servers\n ip vrf forwarding DMZ\n ip address 10.20.20.251 255.255.255.0\n standby 220 ip 10.20.20.254\n standby 220 priority 110\n no shutdown\n!\ninterface Ethernet1/1\n description To LON-DC1-FW-EXT-01 ae1\n switchport\n switchport mode trunk\n switchport trunk allowed vlan 200,220\n channel-group 1 mode active\n no shutdown\n!\ninterface Ethernet1/2\n description To LON-DC1-FW-EXT-02 ae1\n switchport\n switchport mode trunk\n switchport trunk allowed vlan 200,220\n channel-group 1 mode active\n no shutdown\n!\ninterface Ethernet1/47\n description vPC peer-link to LON-DC1-SW-DMZ-02\n switchport\n switchport mode trunk\n no shutdown\n!\ninterface Ethernet1/48\n description Decommissioned server port\n switchport\n switchport access vlan 220\n shutdown\n!\nip route vrf DMZ 0.0.0.0 0.0.0.0 10.20.2.10\nip route vrf DMZ 10.20.30.0 255.255.255.0 10.20.2.10\n"},
+  {name:"LON-DC1-SW-INT-01.cfg", group:"g_lon_int", text:"hostname LON-DC1-SW-INT-01\n!\nip vrf INTERNAL\nip vrf MGMT\n!\nvlan 300\n name INT-TRANSIT\nvlan 330\n name SERVERS\nvlan 340\n name USERS\n!\ninterface Vlan300\n description To LON-DC1-FW-EXT ae1.300\n ip vrf forwarding INTERNAL\n ip address 10.20.3.251 255.255.255.0\n standby 300 ip 10.20.3.254\n standby 300 priority 110\n no shutdown\n!\ninterface Vlan330\n description Server VLAN\n ip vrf forwarding INTERNAL\n ip address 10.20.30.251 255.255.255.0\n standby 330 ip 10.20.30.254\n standby 330 priority 110\n no shutdown\n!\ninterface Vlan340\n description User VLAN\n ip vrf forwarding INTERNAL\n ip address 10.20.40.251 255.255.255.0\n standby 340 ip 10.20.40.254\n no shutdown\n!\ninterface Ethernet1/1\n description To LON-DC1-FW-EXT-01 ae1\n switchport\n switchport mode trunk\n switchport trunk allowed vlan 300,330,340\n no shutdown\n!\ninterface Ethernet1/5\n description DCI to FRA-DC1-SW-INT-01\n no switchport\n ip vrf forwarding INTERNAL\n ip address 10.99.1.2 255.255.255.252\n no shutdown\n!\ninterface Ethernet1/47\n description vPC peer-link to LON-DC1-SW-INT-02\n switchport\n switchport mode trunk\n no shutdown\n!\ninterface Ethernet1/9\n description Out-of-band management to LON-DC1-RTR-INET-01\n no switchport\n ip vrf forwarding MGMT\n ip address 10.20.9.2 255.255.255.252\n no shutdown\n!\ninterface Ethernet1/7\n description Firewall BGP peering\n no switchport\n ip address 10.20.254.2 255.255.255.252\n no shutdown\n!\nrouter bgp 65020\n bgp router-id 10.20.254.2\n neighbor 10.20.254.1 remote-as 65020\n neighbor 10.20.254.1 update-source Ethernet1/7\n network 10.20.30.0 mask 255.255.255.0\n network 10.20.40.0 mask 255.255.255.0\n!\nip route vrf INTERNAL 0.0.0.0 0.0.0.0 10.20.3.10\nip route vrf INTERNAL 10.20.20.0 255.255.255.0 10.20.3.10\nip route vrf INTERNAL 10.10.30.0 255.255.255.0 10.99.1.1\nip route vrf INTERNAL 10.10.40.0 255.255.255.0 10.99.1.1\nip route vrf MGMT 0.0.0.0 0.0.0.0 10.20.9.1\n"},
+  {name:"LON-DC1-RTR-INET-02.cfg", group:"g_lon_inet", text:"hostname LON-DC1-RTR-INET-02\n!\nip vrf MGMT\n!\nvlan 100\n name INET-TRANSIT\n!\ninterface GigabitEthernet0/0\n description To ISP AS64501 circuit 2\n ip address 203.0.113.5 255.255.255.252\n no shutdown\n!\ninterface GigabitEthernet0/1\n description To LON-DC1-FW-EXT-01 ae1.100\n ip address 10.20.1.2 255.255.255.0\n standby 100 ip 10.20.1.254\n standby 100 priority 100\n standby 100 preempt\n no shutdown\n!\ninterface GigabitEthernet0/2\n description Peer link to LON-DC1-RTR-INET-01\n ip address 10.20.199.2 255.255.255.252\n no shutdown\n!\ninterface GigabitEthernet0/4\n description Out-of-band management to LON-DC1-SW-INT-02\n ip vrf forwarding MGMT\n ip address 10.20.9.5 255.255.255.252\n no shutdown\n!\ninterface GigabitEthernet0/3\n description Spare - not in service\n ip address 10.20.250.2 255.255.255.252\n shutdown\n!\nrouter bgp 65020\n bgp router-id 10.20.199.2\n neighbor 203.0.113.6 remote-as 64501\n neighbor 10.20.199.1 remote-as 65020\n neighbor 10.20.199.1 next-hop-self\n network 10.20.0.0 mask 255.255.0.0\n!\nip route 10.20.0.0 255.255.0.0 10.20.1.10\nip route 0.0.0.0 0.0.0.0 203.0.113.6\n!\nip access-list extended INET-IN\n deny ip 10.0.0.0 0.255.255.255 any\n permit tcp any 10.20.20.0 0.0.0.255 eq 443\n permit ip any any\n!\ninterface GigabitEthernet0/0\n ip access-group INET-IN in\n"},
+  {name:"LON-DC1-FW-EXT-02.set", group:"g_lon_dmz", text:"set deviceconfig system hostname LON-DC1-FW-EXT-02\nset network interface aggregate-ethernet ae1 layer3 units ae1.100 ip 10.20.1.11/24\nset network interface aggregate-ethernet ae1 layer3 units ae1.100 tag 100\nset network interface aggregate-ethernet ae1 layer3 units ae1.200 ip 10.20.2.11/24\nset network interface aggregate-ethernet ae1 layer3 units ae1.200 tag 200\nset network interface aggregate-ethernet ae1 layer3 units ae1.300 ip 10.20.3.11/24\nset network interface aggregate-ethernet ae1 layer3 units ae1.300 tag 300\nset network interface ethernet ethernet1/7 layer3 ip 10.20.254.5/30\nset vsys vsys1 zone OUTSIDE network layer3 [ ae1.100 ]\nset vsys vsys1 zone DMZ network layer3 [ ae1.200 ]\nset vsys vsys1 zone INSIDE network layer3 [ ae1.300 ]\nset network virtual-router VR-MAIN interface [ ae1.100 ae1.200 ae1.300 ethernet1/7 ]\nset network virtual-router VR-MAIN routing-table ip static-route DEFAULT destination 0.0.0.0/0\nset network virtual-router VR-MAIN routing-table ip static-route DEFAULT nexthop ip-address 10.20.1.254\nset network virtual-router VR-MAIN routing-table ip static-route INTERNAL destination 10.20.30.0/24\nset network virtual-router VR-MAIN routing-table ip static-route INTERNAL nexthop ip-address 10.20.3.254\nset network virtual-router VR-MAIN routing-table ip static-route USERS destination 10.20.40.0/24\nset network virtual-router VR-MAIN routing-table ip static-route USERS nexthop ip-address 10.20.3.254\nset network virtual-router VR-MAIN routing-table ip static-route DMZNET destination 10.20.20.0/24\nset network virtual-router VR-MAIN routing-table ip static-route DMZNET nexthop ip-address 10.20.2.254\nset network virtual-router VR-MAIN protocol bgp local-as 65020\nset network virtual-router VR-MAIN protocol bgp router-id 10.20.254.5\nset network virtual-router VR-MAIN protocol bgp peer-group CORE type ibgp peer-as 65020\nset network virtual-router VR-MAIN protocol bgp peer-group CORE peer CORE-01 peer-address ip 10.20.254.6\nset network virtual-router VR-MAIN protocol bgp peer-group CORE peer CORE-01 local-address interface ethernet1/7\nset address DMZ-WEB ip-netmask 10.20.20.0/24\nset address INTERNAL-NET ip-netmask 10.20.0.0/16\nset address SERVERS ip-netmask 10.20.30.0/24\nset rulebase security rules Inbound-Web from [ OUTSIDE ] to [ DMZ ] source any destination [ DMZ-WEB ] application [ web-browsing ssl ] action allow\nset rulebase security rules DMZ-to-Servers from [ DMZ ] to [ INSIDE ] source [ DMZ-WEB ] destination [ SERVERS ] action allow\nset rulebase security rules Internal-to-DMZ from [ INSIDE ] to [ DMZ ] source [ INTERNAL-NET ] destination any action allow\nset rulebase security rules Internal-Out from [ INSIDE ] to [ OUTSIDE ] source [ INTERNAL-NET ] destination any action allow\nset rulebase security rules Deny-DMZ-to-Internet from [ DMZ ] to [ OUTSIDE ] source any destination any action deny\n"},
+  {name:"LON-DC1-SW-DMZ-02.cfg", group:"g_lon_dmz", text:"hostname LON-DC1-SW-DMZ-02\n!\nip vrf DMZ\n!\nvlan 200\n name DMZ-TRANSIT\nvlan 220\n name DMZ-WEB\nvlan 999\n name PEER-KEEPALIVE\n!\ninterface Vlan200\n description To LON-DC1-FW-EXT ae1.200\n ip vrf forwarding DMZ\n ip address 10.20.2.252 255.255.255.0\n standby 200 ip 10.20.2.254\n standby 200 priority 100\n no shutdown\n!\ninterface Vlan220\n description DMZ web servers\n ip vrf forwarding DMZ\n ip address 10.20.20.252 255.255.255.0\n standby 220 ip 10.20.20.254\n standby 220 priority 100\n no shutdown\n!\ninterface Ethernet1/1\n description To LON-DC1-FW-EXT-01 ae1\n switchport\n switchport mode trunk\n switchport trunk allowed vlan 200,220\n channel-group 1 mode active\n no shutdown\n!\ninterface Ethernet1/2\n description To LON-DC1-FW-EXT-02 ae1\n switchport\n switchport mode trunk\n switchport trunk allowed vlan 200,220\n channel-group 1 mode active\n no shutdown\n!\ninterface Ethernet1/47\n description vPC peer-link to LON-DC1-SW-DMZ-01\n switchport\n switchport mode trunk\n no shutdown\n!\ninterface Ethernet1/48\n description Decommissioned server port\n switchport\n switchport access vlan 220\n shutdown\n!\nip route vrf DMZ 0.0.0.0 0.0.0.0 10.20.2.11\nip route vrf DMZ 10.20.30.0 255.255.255.0 10.20.2.11\n"},
+  {name:"LON-DC1-SW-INT-02.cfg", group:"g_lon_int", text:"hostname LON-DC1-SW-INT-02\n!\nip vrf INTERNAL\nip vrf MGMT\n!\nvlan 300\n name INT-TRANSIT\nvlan 330\n name SERVERS\nvlan 340\n name USERS\n!\ninterface Vlan300\n description To LON-DC1-FW-EXT ae1.300\n ip vrf forwarding INTERNAL\n ip address 10.20.3.252 255.255.255.0\n standby 300 ip 10.20.3.254\n standby 300 priority 100\n no shutdown\n!\ninterface Vlan330\n description Server VLAN\n ip vrf forwarding INTERNAL\n ip address 10.20.30.252 255.255.255.0\n standby 330 ip 10.20.30.254\n standby 330 priority 100\n no shutdown\n!\ninterface Vlan340\n description User VLAN\n ip vrf forwarding INTERNAL\n ip address 10.20.40.252 255.255.255.0\n standby 340 ip 10.20.40.254\n no shutdown\n!\ninterface Ethernet1/1\n description To LON-DC1-FW-EXT-01 ae1\n switchport\n switchport mode trunk\n switchport trunk allowed vlan 300,330,340\n no shutdown\n!\ninterface Ethernet1/5\n description DCI to FRA-DC1-SW-INT-02\n no switchport\n ip vrf forwarding INTERNAL\n ip address 10.99.2.2 255.255.255.252\n no shutdown\n!\ninterface Ethernet1/47\n description vPC peer-link to LON-DC1-SW-INT-01\n switchport\n switchport mode trunk\n no shutdown\n!\ninterface Ethernet1/9\n description Out-of-band management to LON-DC1-RTR-INET-02\n no switchport\n ip vrf forwarding MGMT\n ip address 10.20.9.6 255.255.255.252\n no shutdown\n!\ninterface Ethernet1/7\n description Firewall BGP peering\n no switchport\n ip address 10.20.254.6 255.255.255.252\n no shutdown\n!\nrouter bgp 65020\n bgp router-id 10.20.254.6\n neighbor 10.20.254.5 remote-as 65020\n neighbor 10.20.254.5 update-source Ethernet1/7\n network 10.20.30.0 mask 255.255.255.0\n network 10.20.40.0 mask 255.255.255.0\n!\nip route vrf INTERNAL 0.0.0.0 0.0.0.0 10.20.3.11\nip route vrf INTERNAL 10.20.20.0 255.255.255.0 10.20.3.11\nip route vrf INTERNAL 10.10.30.0 255.255.255.0 10.99.2.1\nip route vrf INTERNAL 10.10.40.0 255.255.255.0 10.99.2.1\nip route vrf MGMT 0.0.0.0 0.0.0.0 10.20.9.5\n"},
+];
+
+/* Two datacentres, each with an Internet-Out, a DMZ and an Internal zone, every
+   device in a redundant pair, and everything crossing the firewall pair. The
+   two sites meet over a DCI between their internal cores. */
 document.getElementById('load-sample').onclick=()=>{
-  STATE.devices=[]; STATE.lastTrace=null;
-  addText(SAMPLE_CORE,'core-sw.cfg');
-  addText(SAMPLE_EDGE,'edge-rtr.cfg');
-  addText(SAMPLE_FW,'pa-fw1.set');
-  document.getElementById('src').value='10.10.10.50';
-  document.getElementById('dst').value='192.168.50.20';
+  STATE.devices=[]; STATE.lastTrace=null; STATE.positions={};
+  STATE.groups = LAB_ZONES.map(z=>({id:z.id, name:z.name, parent:z.parent, padding:34}));
+  for(const d of LAB_DEVICES){
+    addText(d.text, d.name);
+    const dev=STATE.devices[STATE.devices.length-1];
+    if(dev) dev.groupId=d.group;
+  }
+  /* Lay it out the way the network is drawn on a whiteboard: the internet at
+     the top, the DMZ under it, internal at the bottom, and the two sites side
+     by side so the DCI runs straight across. Each pair sits on the same row so
+     the redundant halves line up. */
+  const COL={FRA:0, LON:1};
+  const SITE_W=1700;          // horizontal gap between the two datacentres
+  const ROW={inet:0, dmz:520, dmz_core:820, int:1240};
+  /* The DMZ cores are offset sideways from the firewalls above them. Stacked in
+     one column they sit directly between the firewall and the internal core, so
+     every firewall-to-internal link has to detour around them — which is what
+     produced the long looping lines. */
+  const SHIFT={dmz_core:330};
+  const pos={};
+  for(const d of LAB_DEVICES){
+    const dc = d.name.slice(0,3);
+    const n  = /-0(\d)\./.test(d.name) ? parseInt(RegExp.$1,10) : 1;
+    const x0 = COL[dc]*SITE_W + (n===1 ? 0 : 620);
+    let y, xs=0;
+    if(/RTR-INET/.test(d.name))     y=ROW.inet;
+    else if(/FW-EXT/.test(d.name))  y=ROW.dmz;
+    else if(/SW-DMZ/.test(d.name)){ y=ROW.dmz_core; xs=SHIFT.dmz_core; }
+    else                            y=ROW.int;
+    pos['simple|dev:'+d.name.replace(/\.(cfg|set)$/,'')]={x:x0+xs, y:y};
+  }
+  STATE.positions=pos;
+
+  document.getElementById('src').value='10.10.40.5';
+  document.getElementById('dst').value='10.10.20.9';
+  const fl=document.getElementById('flow-list');
+  if(fl) fl.value=[
+    '10.10.40.5 -> 10.10.20.9   # FRA user to FRA DMZ web',
+    '10.10.40.5 -> 8.8.8.8      # FRA user out to the internet',
+    '10.10.30.5 -> 10.20.30.9   # FRA server to LON server over the DCI',
+    '10.10.20.9 -> 10.10.30.5   # FRA DMZ back to an internal server',
+    '10.10.20.9 -> 8.8.8.8      # DMZ straight to the internet, should be denied',
+    '10.20.40.7 -> 10.20.20.3   # LON user to LON DMZ web'
+  ].join('\n');
+  STATE.flowText=fl?fl.value:'';
+  renderGroups();
+  rebuild();
 };
 
 /* cytoscape offline guard */
