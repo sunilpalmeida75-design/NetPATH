@@ -1,0 +1,889 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wardrobe AI</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--primary:#2563eb;--bg:#f5f5f5;--surface:#fff;--text:#1a1a1a;--muted:#666;--border:#e0e0e0;--ok:#2e7d32;--warn:#e65100;--danger:#c62828}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text)}
+.container{background:var(--surface);min-height:100vh;display:flex;flex-direction:column;max-width:640px;margin:0 auto}
+.screen{display:none;flex:1;padding:1.25rem;overflow-y:auto}
+.screen.active{display:flex;flex-direction:column}
+.header{padding-bottom:.75rem;border-bottom:1px solid var(--border);margin-bottom:1rem}
+.header h1{font-size:22px;margin-bottom:.25rem}
+.header p{font-size:13px;color:var(--muted)}
+button{padding:10px 16px;border-radius:6px;border:1px solid var(--border);background:var(--surface);cursor:pointer;font-size:14px;font-weight:500}
+button:hover{background:#f0f0f0}
+button.primary{background:var(--primary);color:#fff;border-color:var(--primary);width:100%;padding:12px;margin-bottom:.5rem}
+button.primary:disabled{opacity:.5;cursor:not-allowed}
+button.sm{padding:5px 10px;font-size:12px}
+.back{background:none;border:none;padding:4px 8px 4px 0;font-size:14px;color:var(--muted);cursor:pointer;margin-bottom:.25rem}
+.back:hover{background:none;color:var(--text)}
+input,select,textarea{width:100%;padding:10px;border:1px solid var(--border);border-radius:6px;font-size:14px;font-family:inherit;margin-bottom:.75rem;background:#fff}
+label{display:block;font-size:13px;font-weight:500;margin-bottom:6px}
+.box{border-radius:6px;padding:.85rem;margin:.75rem 0;font-size:13px;line-height:1.5}
+.box.info{background:#f0f7ff;border:1px solid #d0e8ff;color:#0c447c}
+.box.ok{background:#e8f5e9;border:1px solid #81c784;color:var(--ok)}
+.box.warn{background:#fff3e0;border:1px solid #ffb74d;color:var(--warn)}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin:.5rem 0}
+.tile{aspect-ratio:1;border-radius:6px;background:#f0f0f0;border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:20px;cursor:pointer;overflow:hidden;position:relative}
+.tile img{width:100%;height:100%;object-fit:cover}
+.tile .badge{position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,.62);color:#fff;font-size:8px;padding:1px 2px;text-align:center;line-height:1.2;white-space:nowrap;overflow:hidden}
+.tile .dot{position:absolute;top:3px;right:3px;width:8px;height:8px;border-radius:50%;border:1px solid #fff}
+.tile .dot.new{background:var(--warn)}
+.tile .dot.err{background:var(--danger)}
+.card{background:#f9f9f9;border:1px solid var(--border);border-radius:8px;padding:.9rem;margin-bottom:.75rem}
+.tag{display:inline-block;background:#e3f2fd;color:#1976d2;padding:3px 8px;border-radius:4px;font-size:12px;margin:2px 4px 2px 0}
+.tag.sug{background:#fff3e0;color:#8a4b00}
+.tag.sub{background:#f1efe8;color:#5f5e5a}
+.spinner{width:24px;height:24px;border:2px solid var(--border);border-top-color:var(--primary);border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 1rem}
+@keyframes spin{to{transform:rotate(360deg)}}
+.center{flex:1;display:flex;align-items:center;justify-content:center;text-align:center}
+.muted{font-size:12px;color:var(--muted)}
+.render{width:100%;aspect-ratio:3/4;background:#f0f0f0;border:1px solid var(--border);border-radius:8px;display:flex;align-items:center;justify-content:center;overflow:hidden;margin-bottom:.75rem}
+.render img{width:100%;height:100%;object-fit:cover}
+.combo{position:relative;margin-bottom:.75rem}
+.combo input{margin-bottom:0}
+.combo ul{list-style:none;position:absolute;z-index:20;left:0;right:0;top:100%;background:#fff;border:1px solid var(--border);border-top:none;border-radius:0 0 6px 6px;max-height:200px;overflow-y:auto;display:none;box-shadow:0 4px 12px rgba(0,0,0,.08)}
+.combo.open ul{display:block}
+.combo li{padding:8px 10px;font-size:13px;font-family:monospace;cursor:pointer;border-bottom:1px solid #f0f0f0;display:flex;justify-content:space-between;gap:8px}
+.combo li:hover,.combo li.hi{background:#eef4ff}
+.combo li .p{font-family:inherit;color:var(--muted);font-size:11px;white-space:nowrap}
+.combo li.none{color:var(--muted);cursor:default;font-family:inherit}
+.modes{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:.5rem 0 1rem}
+.mode{border:1px solid var(--border);border-radius:8px;padding:.7rem;cursor:pointer;background:#fff}
+.mode.on{border:2px solid var(--primary);background:#f0f7ff}
+.mode b{font-size:13px;display:block;margin-bottom:.2rem}
+.mode span{font-size:11px;color:var(--muted);line-height:1.35;display:block}
+.row{display:flex;gap:8px}
+.row button{flex:1}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:.6rem}
+.chip{padding:5px 11px;border:1px solid var(--border);border-radius:14px;font-size:12px;cursor:pointer;background:#fff;white-space:nowrap}
+.chip.on{background:var(--primary);color:#fff;border-color:var(--primary)}
+.bar{height:6px;background:var(--border);border-radius:3px;overflow:hidden;margin:.6rem 0}
+.bar i{display:block;height:100%;background:var(--primary);width:0;transition:width .25s}
+.itemrow{display:grid;grid-template-columns:52px 1fr;gap:.6rem;align-items:start;padding:.55rem 0;border-bottom:1px solid var(--border)}
+.itemrow img{width:52px;height:52px;object-fit:cover;border-radius:5px}
+.itemrow .d{font-size:12px;line-height:1.45}
+.itemrow .t{font-size:11px;color:var(--muted);margin-top:.2rem}
+.stat{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);padding:2px 0}
+</style>
+</head>
+<body>
+<div class="container">
+
+<div class="screen active" id="s-key">
+  <div class="header"><h1>Wardrobe AI</h1><p>OpenRouter key</p></div>
+  <div class="box info">Get a key at <b>openrouter.ai/keys</b>. Stored in this browser only.</div>
+  <label>OpenRouter API key</label>
+  <input type="password" id="orkey" placeholder="sk-or-v1-...">
+  <div id="key-status"></div>
+  <button class="primary" onclick="loadModels()">Fetch my models →</button>
+  <button onclick="go('s-catalog')" id="skip-btn" style="display:none">Skip — go to my wardrobe</button>
+</div>
+
+<div class="screen" id="s-models">
+  <button class="back" onclick="go('s-key')">← Back</button>
+  <div class="header"><h1>Models</h1><p>Type to filter each box</p></div>
+  <div class="box info" id="model-count">Loading…</div>
+  <label>Analyst — reads each garment photo once <span class="muted">(vision)</span></label>
+  <div class="combo" id="combo-vision"><input type="text" placeholder="Type to filter…" autocomplete="off"><ul></ul></div>
+  <label>Stylist — builds outfits from saved text <span class="muted">(text only, cheap)</span></label>
+  <div class="combo" id="combo-text"><input type="text" placeholder="Type to filter…" autocomplete="off"><ul></ul></div>
+  <label>Renderer — puts the outfit on your anchor <span class="muted">(image output)</span></label>
+  <div class="combo" id="combo-image"><input type="text" placeholder="Type to filter…" autocomplete="off"><ul></ul></div>
+  <p class="muted" style="margin:-.4rem 0 .75rem" id="price-note"></p>
+  <label>Aspect ratio</label>
+  <select id="aspect">
+    <option value="3:4">3:4 — 864×1184 (full body)</option>
+    <option value="4:5">4:5 — 896×1152</option>
+    <option value="9:16">9:16 — 768×1344</option>
+    <option value="1:1">1:1 — 1024×1024</option>
+  </select>
+  <label>What the renderer receives</label>
+  <select id="rendersrc">
+    <option value="photos">Garment photos as references — best fidelity</option>
+    <option value="desc">Saved descriptions only — cheapest</option>
+  </select>
+  <label>Parallel analysis requests</label>
+  <select id="concurrency">
+    <option value="2">2 — safest for tight rate limits</option>
+    <option value="4">4 — recommended</option>
+    <option value="6">6 — fastest, may hit 429s</option>
+  </select>
+  <button class="primary" onclick="saveModels()">Continue →</button>
+</div>
+
+<div class="screen" id="s-anchor">
+  <button class="back" onclick="go('s-models')">← Back to models</button>
+  <div class="header"><h1>Your anchor</h1><p>Set once, saved permanently</p></div>
+  <div class="box info">One clear full-body photo, front-on.</div>
+  <div class="grid" style="grid-template-columns:repeat(2,1fr)">
+    <div class="tile" id="anchor-tile" style="aspect-ratio:3/4" onclick="document.getElementById('anchor-in').click()">＋</div>
+  </div>
+  <input type="file" id="anchor-in" accept="image/*" style="display:none" onchange="setAnchor()">
+  <div id="anchor-note"></div>
+  <div style="flex:1"></div>
+  <button class="primary" onclick="go('s-catalog')">Continue →</button>
+</div>
+
+<div class="screen" id="s-catalog">
+  <button class="back" onclick="go('s-anchor')">← Back to anchor</button>
+  <div class="header"><h1>Your wardrobe</h1><p id="catalog-sub">Saved in this browser</p></div>
+  <div id="storage-note"></div>
+
+  <div class="row" style="margin-bottom:.6rem">
+    <button onclick="document.getElementById('file-in').click()">+ Add photos</button>
+    <button onclick="go('s-details')">Descriptions</button>
+  </div>
+  <input type="file" id="file-in" accept="image/*" multiple style="display:none" onchange="addPhotos()">
+
+  <input type="text" id="search" placeholder="Search colour, type, material…" oninput="renderCatalog()" style="margin-bottom:.5rem">
+  <div class="chips" id="type-chips"></div>
+  <div id="import-progress"></div>
+  <div class="grid" id="gallery"></div>
+  <div id="more-wrap"></div>
+  <p class="muted" id="count">0 items</p>
+  <div id="analyze-note"></div>
+
+  <label style="margin-top:.8rem">Occasion <span class="muted">(optional — narrows a big wardrobe)</span></label>
+  <input type="text" id="brief" placeholder="e.g. office in Dubai summer, weekend dinner">
+
+  <label>Styling mode</label>
+  <div class="modes">
+    <div class="mode" id="mode-strict" onclick="setMode('strict')">
+      <b>Strict wardrobe</b>
+      <span>Only what you own. No top → white vest, no bottom → shorts, no shoes → barefoot.</span>
+    </div>
+    <div class="mode" id="mode-suggest" onclick="setMode('suggest')">
+      <b>Suggestion</b>
+      <span>Fills gaps with pieces you don't own and labels them.</span>
+    </div>
+  </div>
+
+  <div style="flex:1"></div>
+  <button class="primary" onclick="runFlow()" id="style-btn">Build outfits →</button>
+  <div class="row" style="margin-bottom:.5rem">
+    <button onclick="describeMissing()">Describe pending</button>
+    <button onclick="retryFailed()" id="retry-btn">Retry failed</button>
+  </div>
+  <div class="row" style="margin-bottom:.5rem">
+    <button onclick="exportCatalog()">Export backup</button>
+    <button onclick="document.getElementById('import-in').click()">Import backup</button>
+  </div>
+  <input type="file" id="import-in" accept="application/json" style="display:none" onchange="importCatalog()">
+  <div class="row">
+    <button onclick="go('s-models')">Change models</button>
+    <button onclick="clearCatalog()">Clear wardrobe</button>
+  </div>
+</div>
+
+<div class="screen" id="s-details">
+  <button class="back" onclick="go('s-catalog')">← Back to wardrobe</button>
+  <div class="header"><h1>Descriptions</h1><p>Written once, reused forever. Edit any that are wrong.</p></div>
+  <input type="text" id="dsearch" placeholder="Search…" oninput="showDetails()" style="margin-bottom:.5rem">
+  <div id="details-list" style="flex:1"></div>
+  <div id="dmore"></div>
+  <button class="primary" onclick="go('s-catalog')">Done</button>
+</div>
+
+<div class="screen" id="s-working">
+  <button class="back" onclick="cancelWork()">← Cancel</button>
+  <div class="header"><h1 id="work-title">Working</h1><p id="work-sub">Talking to OpenRouter…</p></div>
+  <div style="flex:1;display:flex;flex-direction:column;justify-content:center">
+    <div style="text-align:center"><div class="spinner"></div>
+      <p id="work-status">Starting…</p>
+      <div class="bar"><i id="work-bar"></i></div>
+      <p class="muted" id="work-detail"></p>
+    </div>
+  </div>
+</div>
+
+<div class="screen" id="s-outfits">
+  <button class="back" onclick="go('s-catalog')">← Back to wardrobe</button>
+  <div class="header"><h1>Outfits</h1><p id="outfit-counter"></p></div>
+  <div style="flex:1" id="outfit-display"></div>
+  <div class="row" style="margin-bottom:.5rem">
+    <button onclick="shiftOutfit(-1)">← Prev</button>
+    <button onclick="shiftOutfit(1)">Next →</button>
+  </div>
+  <button onclick="go('s-models')">Change models</button>
+</div>
+
+</div>
+<script>
+const S={items:[],outfits:[],i:0,renders:{},imageModels:[],meta:{},anchor:'',show:60,dshow:25,filter:'',cancel:false};
+const OR='https://openrouter.ai/api/v1';
+const FRAME='Full-body standing fashion lookbook photograph, framed head to toe. The entire figure is inside the frame with clear empty space above the head and below the feet — do not crop at the ankles, knees, shins or waist. Weight on one leg, shoulders square to camera, arms relaxed at sides, chin level, confident natural posture. Shot at eye level, 85mm lens, evenly lit plain light-grey studio backdrop, sharp focus.';
+const MAXEDGE=1024, THUMB=220, JPEGQ=0.82;
+
+const go=id=>{document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active');
+  if(id==='s-details')showDetails(); if(id==='s-catalog')renderCatalog()};
+const ls=(k,v)=>v===undefined?(localStorage.getItem(k)||''):localStorage.setItem(k,v);
+const okey=()=>ls('or-key'),visionModel=()=>ls('or-vision'),textModel=()=>ls('or-text'),imageModel=()=>ls('or-image');
+const aspect=()=>ls('or-aspect')||'3:4',mode=()=>ls('mode')||'strict',renderSrc=()=>ls('or-rendersrc')||'photos';
+const concurrency=()=>parseInt(ls('or-conc')||'4',10);
+
+/* ============ image downscaling ============
+   A 4MB phone photo becomes ~120KB at 1024px. Without this, 100 garments
+   would be 400MB+ of base64 in IndexedDB and the browser starts evicting. */
+function shrink(file,maxEdge,quality){
+  return new Promise((res,rej)=>{
+    const img=new Image();
+    img.onload=()=>{
+      let{width:w,height:h}=img;
+      const scale=Math.min(1,maxEdge/Math.max(w,h));
+      w=Math.round(w*scale);h=Math.round(h*scale);
+      const c=document.createElement('canvas');c.width=w;c.height=h;
+      const x=c.getContext('2d');
+      x.fillStyle='#fff';x.fillRect(0,0,w,h);
+      x.drawImage(img,0,0,w,h);
+      res(c.toDataURL('image/jpeg',quality));
+      URL.revokeObjectURL(img.src);
+    };
+    img.onerror=()=>rej(new Error('could not read image'));
+    img.src=typeof file==='string'?file:URL.createObjectURL(file);
+  });
+}
+const kb=s=>Math.round(String(s).length*0.75/1024);
+
+/* ============ storage ============
+   Opened without a fixed version: probe whatever version exists, and only
+   bump it if a store is missing. A hard-coded version throws VersionError
+   against a newer existing DB, and a blocked upgrade hangs forever if
+   another tab of this app is open. */
+let DB=null,READY=null,DBERR='';
+function openDB(){
+  return new Promise((res,rej)=>{
+    if(!window.indexedDB){rej(new Error('IndexedDB is unavailable. Private browsing mode blocks it.'));return}
+    let probe;
+    try{probe=indexedDB.open('wardrobe-ai')}catch(e){rej(e);return}
+    probe.onerror=()=>rej(probe.error||new Error('could not open database'));
+    probe.onblocked=()=>rej(new Error('Another tab has this app open. Close the other tabs and reload.'));
+    probe.onsuccess=()=>{
+      const db=probe.result;
+      const missing=['items','meta'].filter(s=>!db.objectStoreNames.contains(s));
+      if(!missing.length){res(db);return}
+      const next=db.version+1;
+      db.close();
+      let up;
+      try{up=indexedDB.open('wardrobe-ai',next)}catch(e){rej(e);return}
+      up.onupgradeneeded=e=>{
+        const d=e.target.result;
+        if(!d.objectStoreNames.contains('items'))d.createObjectStore('items',{keyPath:'id',autoIncrement:true});
+        if(!d.objectStoreNames.contains('meta'))d.createObjectStore('meta',{keyPath:'k'});
+      };
+      up.onsuccess=()=>res(up.result);
+      up.onerror=()=>rej(up.error||new Error('upgrade failed'));
+      up.onblocked=()=>rej(new Error('Another tab has this app open. Close the other tabs and reload.'));
+    };
+  });
+}
+function ready(){
+  if(!READY)READY=openDB().then(d=>{DB=d;DBERR='';return d})
+    .catch(e=>{DBERR=e.message||String(e);READY=null;throw e});
+  return READY;
+}
+async function stx(s,m){const db=await ready();return db.transaction(s,m).objectStore(s)}
+const dbAll=async s=>{const o=await stx(s,'readonly');return new Promise((r,j)=>{const q=o.getAll();q.onsuccess=()=>r(q.result||[]);q.onerror=()=>j(q.error)})};
+const dbGet=async(s,k)=>{const o=await stx(s,'readonly');return new Promise((r,j)=>{const q=o.get(k);q.onsuccess=()=>r(q.result);q.onerror=()=>j(q.error)})};
+const dbPut=async(s,v)=>{const o=await stx(s,'readwrite');return new Promise((r,j)=>{const q=o.put(v);q.onsuccess=()=>r(q.result);q.onerror=()=>j(q.error)})};
+const dbAdd=async(s,v)=>{const o=await stx(s,'readwrite');return new Promise((r,j)=>{const q=o.add(v);q.onsuccess=()=>r(q.result);q.onerror=()=>j(q.error)})};
+const dbDel=async(s,k)=>{const o=await stx(s,'readwrite');return new Promise((r,j)=>{const q=o.delete(k);q.onsuccess=()=>r();q.onerror=()=>j(q.error)})};
+const dbClear=async s=>{const o=await stx(s,'readwrite');return new Promise((r,j)=>{const q=o.clear();q.onsuccess=()=>r();q.onerror=()=>j(q.error)})};
+
+function dbFail(where,e){
+  const msg=(e&&e.message)||String(e);
+  const el=document.getElementById('storage-note');
+  const html='<div class="box warn"><b>Storage unavailable.</b><br>'+escapeHtml(msg)+
+    '<br><br>Nothing can be saved until this is fixed. Common causes: another tab of this app is open, '+
+    'or the browser is in private mode. <button class="sm" style="margin-top:.4rem" onclick="location.reload()">Reload</button></div>';
+  if(el)el.innerHTML=html;
+  console.error('storage failure at '+where+':',e);
+  return msg;
+}
+
+/* iOS Safari wipes IndexedDB after 7 days without a visit. Home-screen web
+   apps are exempt, and they use a SEPARATE store — so installing must happen
+   before the catalog is built, not after. */
+const isIOS=()=>/iPad|iPhone|iPod/.test(navigator.userAgent)||
+  (navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);
+const isStandalone=()=>window.navigator.standalone===true||
+  (window.matchMedia&&window.matchMedia('(display-mode: standalone)').matches);
+
+async function storageBanner(){
+  const el=document.getElementById('storage-note');
+  if(!el)return;
+  let msg='';
+  if(isIOS()&&!isStandalone()){
+    msg='<div class="box warn"><b>Add this to your Home Screen before adding garments.</b><br>'+
+      'In Safari, iOS deletes saved data after 7 days without a visit. Home-screen apps are exempt — '+
+      'but they use a separate store, so anything you save here in Safari will not appear in the installed app. '+
+      'Tap Share → Add to Home Screen, open it from the icon, then build your wardrobe.</div>';
+  }else if(isIOS()&&isStandalone()){
+    msg='<div class="box ok">Running from the Home Screen — your wardrobe is exempt from Safari\'s 7-day data deletion.</div>';
+  }
+  if(navigator.storage&&navigator.storage.estimate){
+    try{
+      const e=await navigator.storage.estimate();
+      const used=(e.usage/1048576).toFixed(1), quota=(e.quota/1048576).toFixed(0);
+      let persisted=false;
+      if(navigator.storage.persisted)persisted=await navigator.storage.persisted();
+      msg+='<p class="muted" style="margin-top:.3rem">Browser reports '+used+' MB used of '+quota+' MB available'+
+        (persisted?' · marked persistent (protected from automatic eviction)':' · best-effort storage, may be evicted under disk pressure')+'.</p>';
+    }catch(e){}
+  }
+  el.innerHTML=msg;
+}
+
+async function boot(){
+  if(okey())document.getElementById('orkey').value=okey();
+  setMode(mode());
+  try{
+    await ready();
+    S.items=(await dbAll('items')).sort((a,b)=>a.id-b.id);
+    const a=await dbGet('meta','anchor');S.anchor=a?a.v:'';
+  }catch(e){
+    renderCatalog();
+    go('s-catalog');
+    dbFail('boot',e);
+    return;
+  }
+  if(S.anchor)document.getElementById('anchor-tile').innerHTML='<img src="'+S.anchor+'">';
+  renderCatalog();
+  if(S.items.length&&okey()&&textModel())document.getElementById('skip-btn').style.display='block';
+  if(navigator.storage&&navigator.storage.persist){try{await navigator.storage.persist()}catch(e){}}
+  storageBanner();
+}
+window.addEventListener('DOMContentLoaded',boot);
+
+/* ============ api ============ */
+async function or(body){
+  const r=await fetch(OR+'/chat/completions',{method:'POST',
+    headers:{'Authorization':'Bearer '+okey(),'Content-Type':'application/json',
+             'HTTP-Referer':location.origin||'https://localhost','X-Title':'Wardrobe AI'},
+    body:JSON.stringify(body)});
+  const d=await r.json().catch(()=>({}));
+  if(r.status===429){const e=new Error('rate limited');e.retry=true;throw e}
+  if(!r.ok||d.error)throw new Error((d.error&&(d.error.message||d.error))||('HTTP '+r.status));
+  return d;
+}
+const msgOf=d=>((d.choices||[])[0]||{}).message||{};
+const finishOf=d=>((d.choices||[])[0]||{}).finish_reason||'';
+function textOf(d){const m=msgOf(d);let c=m.content;
+  if(Array.isArray(c))c=c.map(p=>typeof p==='string'?p:(p&&(p.text||p.content))||'').join('');
+  if(!c||!String(c).trim())c=m.reasoning||m.reasoning_content||'';return String(c||'')}
+const imageOf=d=>{const im=(msgOf(d).images||[])[0];if(!im)return null;
+  return (im.image_url&&im.image_url.url)||(im.imageUrl&&im.imageUrl.url)||im.url||null};
+function extractJSON(t){
+  let s=String(t).replace(/```[a-z]*/gi,'').trim();
+  const start=s.search(/[\[{]/);
+  if(start<0)throw new Error('no JSON found: '+s.slice(0,120));
+  const open=s[start],close=open==='['?']':'}';
+  let depth=0,inStr=false,esc=false;
+  for(let i=start;i<s.length;i++){const c=s[i];
+    if(esc){esc=false;continue} if(c==='\\'){esc=true;continue}
+    if(c==='"'){inStr=!inStr;continue} if(inStr)continue;
+    if(c===open)depth++; else if(c===close){depth--;if(depth===0)return JSON.parse(s.slice(start,i+1))}}
+  throw new Error('incomplete JSON');
+}
+
+/* ============ combobox ============ */
+const COMBO={};
+function makeCombo(elId,ids,selected,onPick){
+  const root=document.getElementById(elId),input=root.querySelector('input'),list=root.querySelector('ul');
+  COMBO[elId]={ids:ids,value:selected&&ids.includes(selected)?selected:(ids[0]||''),hi:0,hits:ids};
+  input.value=COMBO[elId].value;
+  const draw=q=>{const term=String(q||'').toLowerCase().trim();
+    const hits=term?ids.filter(i=>i.toLowerCase().includes(term)):ids;
+    COMBO[elId].hits=hits;if(COMBO[elId].hi>=hits.length)COMBO[elId].hi=0;
+    list.innerHTML=hits.length?hits.slice(0,120).map((i,n)=>{const m=S.meta[i];
+      const price=m&&m.image?('$'+m.image.toFixed(3)+'/img'):(m&&m.prompt?('$'+(m.prompt*1e6).toFixed(2)+'/M'):'');
+      return '<li data-v="'+i+'"'+(n===COMBO[elId].hi?' class="hi"':'')+'><span>'+i+'</span><span class="p">'+price+'</span></li>'}).join('')
+      :'<li class="none">No model matches "'+term+'"</li>'};
+  input.addEventListener('focus',()=>{input.select();draw('');root.classList.add('open')});
+  input.addEventListener('input',()=>{draw(input.value);root.classList.add('open')});
+  input.addEventListener('keydown',e=>{const hits=COMBO[elId].hits||[];
+    if(e.key==='ArrowDown'){e.preventDefault();COMBO[elId].hi=Math.min(COMBO[elId].hi+1,hits.length-1);draw(input.value)}
+    else if(e.key==='ArrowUp'){e.preventDefault();COMBO[elId].hi=Math.max(COMBO[elId].hi-1,0);draw(input.value)}
+    else if(e.key==='Enter'){e.preventDefault();if(hits[COMBO[elId].hi])pick(hits[COMBO[elId].hi])}
+    else if(e.key==='Escape')close()});
+  list.addEventListener('mousedown',e=>{const li=e.target.closest('li[data-v]');if(li){e.preventDefault();pick(li.dataset.v)}});
+  input.addEventListener('blur',()=>setTimeout(close,120));
+  function pick(v){COMBO[elId].value=v;input.value=v;close();if(onPick)onPick(v)}
+  function close(){root.classList.remove('open');input.value=COMBO[elId].value}
+  draw('');
+}
+const comboValue=id=>(COMBO[id]||{}).value||'';
+
+async function loadModels(){
+  const k=document.getElementById('orkey').value.trim();
+  const status=document.getElementById('key-status');
+  if(!k){status.innerHTML='<div class="box warn">Enter your key first.</div>';return}
+  ls('or-key',k);status.innerHTML='<div class="box info">Fetching model list…</div>';
+  try{
+    const r=await fetch(OR+'/models',{headers:{'Authorization':'Bearer '+k}});
+    if(!r.ok){status.innerHTML='<div class="box warn">HTTP '+r.status+'</div>';return}
+    const d=await r.json();
+    const models=(d.data||[]).map(m=>{const a=m.architecture||{};
+      return{id:m.id,inp:a.input_modalities||(a.modality?[a.modality]:[]),out:a.output_modalities||[],
+             prompt:parseFloat((m.pricing||{}).prompt||'0'),image:parseFloat((m.pricing||{}).image||'0')}});
+    S.meta={};models.forEach(m=>S.meta[m.id]=m);
+    const imgs=models.filter(m=>m.out.includes('image')).sort((a,b)=>a.image-b.image||a.id.localeCompare(b.id));
+    const vis=models.filter(m=>m.inp.includes('image')&&!m.out.includes('image')).sort((a,b)=>a.prompt-b.prompt||a.id.localeCompare(b.id));
+    const txt=models.filter(m=>m.out.includes('text')&&!m.out.includes('image')).sort((a,b)=>a.prompt-b.prompt||a.id.localeCompare(b.id));
+    S.imageModels=imgs.map(m=>m.id);
+    makeCombo('combo-vision',vis.map(m=>m.id),visionModel());
+    makeCombo('combo-text',txt.map(m=>m.id),textModel());
+    makeCombo('combo-image',S.imageModels,imageModel(),priceNote);priceNote();
+    document.getElementById('model-count').innerHTML=
+      models.length+' models — '+vis.length+' read photos, '+txt.length+' style from text, '+imgs.length+' render.<br>Cheapest first.';
+    document.getElementById('aspect').value=aspect();
+    document.getElementById('rendersrc').value=renderSrc();
+    document.getElementById('concurrency').value=String(concurrency());
+    go('s-models');
+  }catch(e){status.innerHTML='<div class="box warn">Network error: '+e.message+'</div>'}
+}
+function priceNote(){const m=S.meta[comboValue('combo-image')];
+  document.getElementById('price-note').textContent=!m?'':(m.image?('About $'+m.image.toFixed(4)+' per generated image.'):'Per-image pricing not listed.')}
+function saveModels(){
+  const v=comboValue('combo-vision'),t=comboValue('combo-text');
+  if(!v||!t){alert('Pick an analyst and a stylist.');return}
+  ls('or-vision',v);ls('or-text',t);ls('or-image',comboValue('combo-image'));
+  ls('or-aspect',document.getElementById('aspect').value);
+  ls('or-rendersrc',document.getElementById('rendersrc').value);
+  ls('or-conc',document.getElementById('concurrency').value);
+  go('s-anchor');
+}
+
+function setAnchor(){
+  const f=document.getElementById('anchor-in').files[0];if(!f)return;
+  const note=document.getElementById('anchor-note');
+  note.innerHTML='<div class="box info">Compressing…</div>';
+  shrink(f,MAXEDGE,0.88)
+    .catch(e=>{throw new Error('Could not read that image file: '+e.message)})
+    .then(async url=>{
+      S.anchor=url;S.renders={};
+      document.getElementById('anchor-tile').innerHTML='<img src="'+url+'">';
+      try{
+        await dbPut('meta',{k:'anchor',v:url});
+        note.innerHTML='<div class="box ok">Anchor saved ('+kb(url)+' KB).</div>';
+      }catch(e){
+        note.innerHTML='<div class="box warn"><b>Could not save the anchor.</b><br>'+escapeHtml(e.message||String(e))+
+          '<br>It will work for this session but is not stored. '+
+          '<button class="sm" style="margin-top:.4rem" onclick="location.reload()">Reload</button></div>';
+        dbFail('setAnchor',e);
+      }
+    })
+    .catch(e=>{note.innerHTML='<div class="box warn">'+escapeHtml(e.message||String(e))+'</div>'});
+}
+
+/* ============ catalog ============ */
+async function addPhotos(){
+  const files=[...document.getElementById('file-in').files];
+  document.getElementById('file-in').value='';
+  if(!files.length)return;
+  const prog=document.getElementById('import-progress');
+  let n=0,bytes=0,failed=0;
+  for(const f of files){
+    n++;
+    prog.innerHTML='<div class="box info">Compressing '+n+' of '+files.length+'…</div>';
+    try{
+      const full=await shrink(f,MAXEDGE,JPEGQ);
+      const thumb=await shrink(full,THUMB,0.7);
+      const rec={image:full,thumb:thumb,added:Date.now()};
+      const id=await dbAdd('items',rec);
+      S.items.push(Object.assign({id:id},rec));
+      bytes+=kb(full)+kb(thumb);
+    }catch(e){
+      failed++;
+      console.warn('could not add a file:',e);
+      if(/transaction|database|store|IndexedDB|quota/i.test(e.message||'')){
+        prog.innerHTML='';
+        dbFail('addPhotos',e);
+        renderCatalog();
+        return;
+      }
+    }
+    if(n%5===0)renderCatalog();
+  }
+  prog.innerHTML='<div class="box '+(failed?'warn':'ok')+'">Added '+(n-failed)+' photos, '+
+    Math.round(bytes/1024*10)/10+' MB after compression'+(failed?'. '+failed+' could not be read.':'.')+'</div>';
+  setTimeout(()=>{prog.innerHTML=''},6000);
+  renderCatalog();
+}
+async function removeItem(id){await dbDel('items',id);S.items=S.items.filter(i=>i.id!==id);S.renders={};renderCatalog()}
+async function clearCatalog(){
+  if(!confirm('Delete all '+S.items.length+' garments? Anchor and key are kept.'))return;
+  await dbClear('items');S.items=[];S.renders={};S.outfits=[];renderCatalog();
+}
+const pending=()=>S.items.filter(i=>!i.desc&&!i.failed);
+const failedItems=()=>S.items.filter(i=>i.failed&&!i.desc);
+
+function matches(i,q){
+  if(!q)return true;
+  return [i.type,i.color,i.style,i.fit,i.pattern,i.material,i.detail,i.desc].filter(Boolean).join(' ').toLowerCase().includes(q);
+}
+function renderCatalog(){
+  const g=document.getElementById('gallery');if(!g)return;
+  const q=(document.getElementById('search')||{}).value||'';
+  const types=['all'].concat([...new Set(S.items.map(i=>i.type).filter(Boolean))].sort());
+  document.getElementById('type-chips').innerHTML=types.map(t=>{
+    const n=t==='all'?S.items.length:S.items.filter(i=>i.type===t).length;
+    return '<span class="chip'+(S.filter===t||(t==='all'&&!S.filter)?' on':'')+'" onclick="setFilter(\''+(t==='all'?'':t)+'\')">'+t+' '+n+'</span>'}).join('');
+
+  let list=S.items.filter(i=>(!S.filter||i.type===S.filter)&&matches(i,q.toLowerCase().trim()));
+  const total=list.length;
+  list=list.slice(0,S.show);
+  g.innerHTML=list.map(i=>{
+    const dot=i.desc?'':(i.failed?'<div class="dot err" title="analysis failed"></div>':'<div class="dot new" title="not described"></div>');
+    const badge=i.desc?'<div class="badge">'+[i.color,i.type].filter(Boolean).join(' ')+'</div>':'';
+    return '<div class="tile" onclick="removeItem('+i.id+')" title="tap to remove"><img loading="lazy" src="'+(i.thumb||i.image)+'">'+badge+dot+'</div>'}).join('');
+  document.getElementById('more-wrap').innerHTML=
+    total>S.show?'<button style="width:100%;margin-bottom:.5rem" onclick="S.show+=60;renderCatalog()">Show more ('+(total-S.show)+' hidden)</button>':'';
+
+  const p=pending().length,f=failedItems().length,done=S.items.filter(i=>i.desc).length;
+  document.getElementById('count').innerHTML=
+    '<div class="stat"><span>'+S.items.length+' garments saved</span><span>'+showing(total,list.length)+'</span></div>'+
+    '<div class="stat"><span>'+done+' described · '+p+' pending'+(f?' · '+f+' failed':'')+'</span><span>~'+estMB()+' MB stored</span></div>';
+  const btn=document.getElementById('style-btn');
+  if(btn)btn.textContent=p?('Describe '+p+' pending, then build outfits →'):'Build outfits →';
+  const rb=document.getElementById('retry-btn');
+  if(rb){rb.disabled=!f;rb.textContent=f?('Retry '+f+' failed'):'Retry failed'}
+  const note=document.getElementById('analyze-note');
+  if(note)note.innerHTML=(!p&&!f&&S.items.length)?'<div class="box ok">All described — styling runs on text only.</div>':'';
+  const sub=document.getElementById('catalog-sub');
+  if(sub)sub.textContent=S.items.length+' garments, saved in this browser';
+}
+const showing=(total,shown)=>shown<total?('showing '+shown+' of '+total):(total===S.items.length?'':'showing '+total);
+function estMB(){let b=0;S.items.forEach(i=>{b+=kb(i.image)+kb(i.thumb||'')});return Math.round(b/1024*10)/10}
+function setFilter(t){S.filter=t;S.show=60;renderCatalog()}
+function setMode(m){ls('mode',m);
+  const a=document.getElementById('mode-strict'),b=document.getElementById('mode-suggest');
+  if(a&&b){a.classList.toggle('on',m==='strict');b.classList.toggle('on',m==='suggest')}}
+
+/* ============ describe: concurrent, resumable ============ */
+const ITEM_SCHEMA={type:'object',properties:{
+  type:{type:'string'},color:{type:'string'},style:{type:'string'},fit:{type:'string'},
+  pattern:{type:'string'},material:{type:'string'},detail:{type:'string'},desc:{type:'string'}},
+  required:['type','color','style','fit','pattern','material','detail','desc'],additionalProperties:false};
+const DESCRIBE=
+ 'Describe this single garment for a fashion illustrator who will draw it without seeing the photo. '+
+ 'Be specific: exact colour and shade, material and texture, pattern, cut and silhouette, neckline or waistline, '+
+ 'sleeve or leg length, closures, hem, hardware, stitching, distinguishing marks. Ignore background, hanger and any wearer.\n'+
+ 'Reply with raw JSON only:\n'+
+ '{"type":"top|bottom|shoes|outerwear|accessory","color":"","style":"casual|formal|business|sporty",'+
+ '"fit":"slim|regular|loose","pattern":"","material":"","detail":"under 8 words",'+
+ '"desc":"two to three sentences, rich enough to redraw the garment"}';
+
+async function describeItem(it){
+  const variants=[
+    {response_format:{type:'json_schema',json_schema:{name:'garment',strict:true,schema:ITEM_SCHEMA}}},
+    {response_format:{type:'json_object'}},{}
+  ];
+  let last='';
+  for(const extra of variants){
+    for(let tryN=0;tryN<3;tryN++){
+      try{
+        const d=await or(Object.assign({model:visionModel(),temperature:0.2,max_tokens:700,
+          messages:[{role:'user',content:[{type:'image_url',image_url:{url:it.image}},{type:'text',text:DESCRIBE}]}]},extra));
+        const t=textOf(d);
+        if(!t.trim()){last='empty (finish: '+(finishOf(d)||'none')+')';break}
+        const p=extractJSON(t);
+        if(!p.desc){last='no desc field';break}
+        return p;
+      }catch(e){
+        last=e.message;
+        if(e.retry){await sleep(1500*Math.pow(2,tryN));continue}
+        break;
+      }
+    }
+  }
+  throw new Error(last||'failed');
+}
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+
+async function runQueue(todo){
+  S.cancel=false;
+  const total=todo.length;
+  let done=0,failed=0,idx=0;
+  const bar=document.getElementById('work-bar');
+  const tick=()=>{
+    document.getElementById('work-status').textContent='Described '+done+' of '+total+(failed?' · '+failed+' failed':'');
+    if(bar)bar.style.width=Math.round((done+failed)/total*100)+'%';
+    document.getElementById('work-detail').textContent='Progress is saved as it goes — cancelling keeps what finished.';
+  };
+  tick();
+  const worker=async()=>{
+    while(idx<todo.length&&!S.cancel){
+      const it=todo[idx++];
+      try{
+        const p=await describeItem(it);
+        Object.assign(it,p);delete it.failed;
+        await dbPut('items',it);done++;
+      }catch(e){
+        it.failed=e.message;await dbPut('items',it);failed++;
+        console.warn('item '+it.id+':',e.message);
+      }
+      tick();
+    }
+  };
+  await Promise.all(Array.from({length:Math.min(concurrency(),todo.length)},worker));
+  return {done:done,failed:failed,cancelled:S.cancel};
+}
+function cancelWork(){S.cancel=true;go('s-catalog')}
+
+async function describeMissing(){
+  const todo=pending();
+  if(!todo.length){alert('Nothing pending.');return}
+  if(!visionModel()){alert('Pick an analyst model first.');go('s-models');return}
+  document.getElementById('work-title').textContent='Describing garments';
+  document.getElementById('work-sub').textContent=visionModel()+' · '+concurrency()+' at a time';
+  go('s-working');
+  const r=await runQueue(todo);
+  renderCatalog();
+  if(!r.cancelled)alert('Described '+r.done+(r.failed?', '+r.failed+' failed — use Retry failed':'')+'.');
+  go('s-catalog');
+}
+async function retryFailed(){
+  const todo=failedItems();
+  if(!todo.length)return;
+  todo.forEach(i=>delete i.failed);
+  document.getElementById('work-title').textContent='Retrying';
+  document.getElementById('work-sub').textContent=visionModel();
+  go('s-working');
+  const r=await runQueue(todo);
+  renderCatalog();
+  if(!r.cancelled)alert('Described '+r.done+(r.failed?', '+r.failed+' still failing':'')+'.');
+  go('s-catalog');
+}
+
+/* ---- descriptions screen ---- */
+function escapeHtml(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+function showDetails(){
+  const el=document.getElementById('details-list');if(!el)return;
+  const q=((document.getElementById('dsearch')||{}).value||'').toLowerCase().trim();
+  let list=S.items.filter(i=>matches(i,q));
+  const total=list.length;
+  list=list.slice(0,S.dshow);
+  el.innerHTML=total?list.map(i=>
+    '<div class="itemrow"><img loading="lazy" src="'+(i.thumb||i.image)+'">'+
+    '<div><div class="d">'+(i.desc?escapeHtml(i.desc):'<span class="muted">'+(i.failed?'Failed: '+escapeHtml(i.failed):'Not described yet')+'</span>')+'</div>'+
+    '<div class="t">'+[i.type,i.color,i.material,i.fit,i.pattern].filter(Boolean).join(' · ')+'</div>'+
+    '<button class="sm" style="margin-top:.35rem" onclick="editDesc('+i.id+')">Edit</button></div></div>').join('')
+    :'<p class="muted">Nothing matches.</p>';
+  document.getElementById('dmore').innerHTML=
+    total>S.dshow?'<button style="width:100%;margin-bottom:.5rem" onclick="S.dshow+=25;showDetails()">Show more ('+(total-S.dshow)+')</button>':'';
+}
+async function editDesc(id){
+  const it=S.items.find(x=>x.id===id);if(!it)return;
+  const v=prompt('Edit description:',it.desc||'');
+  if(v===null)return;
+  it.desc=v.trim();delete it.failed;await dbPut('items',it);S.renders={};showDetails();
+}
+
+/* ============ style: compact index, text only ============ */
+const OUTFIT_SCHEMA={type:'object',properties:{outfits:{type:'array',items:{type:'object',properties:{
+  name:{type:'string'},indices:{type:'array',items:{type:'integer'}},
+  additions:{type:'array',items:{type:'string'}},why:{type:'string'},occasion:{type:'string'}},
+  required:['name','indices','additions','why','occasion'],additionalProperties:false}}},
+  required:['outfits'],additionalProperties:false};
+
+/* The stylist gets one compact line per garment, not the full paragraph.
+   100 garments costs ~1,200 tokens this way instead of ~7,000. */
+const compactLine=(i,n)=>n+': ['+(i.type||'item')+'] '+[i.color,i.pattern!=='solid'?i.pattern:'',i.material,i.fit,i.detail].filter(Boolean).join(' ');
+
+function stylePrompt(strict,lines,brief,count){
+  return 'Wardrobe ('+count+' garments):\n'+lines+'\n\n'+
+   (brief?'Occasion: '+brief+'\n\n':'')+
+   (strict
+     ? 'STRICT MODE: build 3 outfits using ONLY the garments listed. Never name an item not listed. Leave "additions" empty.\n'
+     : 'SUGGESTION MODE: build 3 outfits mainly from the garments listed. You may name up to two pieces the person does not own; put those in "additions".\n')+
+   'Each outfit needs a top, a bottom and footwear where the wardrobe has them. Make the three outfits clearly different from each other.\n'+
+   'Reply with raw JSON only:\n'+
+   '{"outfits":[{"name":"","indices":[0,1,2],"additions":[],"why":"one or two sentences","occasion":""}]}';
+}
+
+async function runFlow(){
+  if(S.items.length<2){alert('Add at least 2 garments.');return}
+  if(!S.anchor){alert('Set an anchor photo first.');return}
+  if(!textModel()){alert('Pick your models first.');go('s-models');return}
+
+  if(pending().length){
+    if(!visionModel()){alert('Pick an analyst model first.');go('s-models');return}
+    document.getElementById('work-title').textContent='Describing garments';
+    document.getElementById('work-sub').textContent=visionModel()+' · '+concurrency()+' at a time';
+    go('s-working');
+    const r=await runQueue(pending());
+    renderCatalog();
+    if(r.cancelled)return;
+    if(!r.done&&r.failed){alert('Could not describe any garment. Try a different analyst.');go('s-catalog');return}
+  }
+
+  const described=S.items.filter(i=>i.desc);
+  if(described.length<2){alert('Need at least 2 described garments.');go('s-catalog');return}
+
+  const strict=mode()==='strict';
+  const brief=(document.getElementById('brief')||{}).value||'';
+  document.getElementById('work-title').textContent='Styling';
+  document.getElementById('work-sub').textContent=(strict?'Strict':'Suggestion')+' — '+textModel();
+  document.getElementById('work-status').textContent='Styling '+described.length+' garments…';
+  document.getElementById('work-bar').style.width='60%';
+  document.getElementById('work-detail').textContent='Text only — no photos sent.';
+  go('s-working');
+
+  const order=described.map(i=>i.id);
+  const lines=described.map((i,n)=>compactLine(i,n)).join('\n');
+  const base={model:textModel(),temperature:0.6,max_tokens:2000,
+    messages:[{role:'user',content:stylePrompt(strict,lines,brief,described.length)}]};
+  const attempts=[
+    Object.assign({},base,{response_format:{type:'json_schema',json_schema:{name:'outfits',strict:true,schema:OUTFIT_SCHEMA}}}),
+    Object.assign({},base,{response_format:{type:'json_object'}}),base];
+
+  let lastErr='';
+  for(let a=0;a<attempts.length;a++){
+    document.getElementById('work-detail').textContent=['Structured output…','JSON mode…','Unconstrained…'][a];
+    try{
+      const d=await or(attempts[a]);
+      const t=textOf(d);
+      if(!t.trim()){lastErr='empty (finish: '+(finishOf(d)||'none')+')';continue}
+      const parsed=extractJSON(t);
+      const list=Array.isArray(parsed)?parsed:(parsed.outfits||[]);
+      S.outfits=ensureShoes(list.map(o=>Object.assign({},o,{
+        indices:(o.indices||[]).map(n=>order[n]).filter(v=>v!==undefined),
+        additions:strict?[]:(o.additions||[])})));
+      if(!S.outfits.length){lastErr='no outfits returned';continue}
+      S.renders={};S.i=0;showOutfit();go('s-outfits');return;
+    }catch(e){lastErr=e.message;console.warn('attempt '+(a+1)+':',e.message)}
+  }
+  alert('Styling failed: '+lastErr+'\n\nSee console (F12).');
+  go('s-catalog');
+}
+
+function ensureShoes(outfits){
+  const shoes=S.items.filter(i=>i.type==='shoes'&&i.desc);
+  if(!shoes.length)return outfits;
+  return outfits.map((o,n)=>{const idx=o.indices||[];
+    if(idx.map(itemById).filter(Boolean).some(i=>i.type==='shoes'))return o;
+    return Object.assign({},o,{indices:idx.concat([shoes[n%shoes.length].id])})});
+}
+
+/* ============ render ============ */
+const itemById=id=>S.items.find(i=>i.id===id);
+function substitutions(worn){
+  const has=t=>worn.some(i=>i.type===t);const out=[];
+  if(!has('top'))out.push({text:'No top exists in the wardrobe for this outfit. Dress the person in a plain white ribbed sleeveless vest (tank top), unbranded and undecorated.',label:'white vest (substitute)'});
+  if(!has('bottom'))out.push({text:'No bottom exists in the wardrobe for this outfit. Dress the person in plain mid-thigh shorts in neutral grey, unbranded and undecorated.',label:'plain shorts (substitute)'});
+  if(!has('shoes'))out.push({text:'No footwear exists in the wardrobe for this outfit. The person is BAREFOOT — bare feet clearly visible on the floor, no shoes, no socks, no sandals.',label:'barefoot'});
+  return out;
+}
+function outfitInstruction(o,usePhotos){
+  const worn=(o.indices||[]).map(itemById).filter(Boolean);
+  const strict=mode()==='strict';
+  const lines=worn.map((i,n)=>(usePhotos?'Reference image '+(n+2):'Garment '+(n+1))+': '+(i.desc||i.detail||i.type)).join('\n');
+  const head=(usePhotos?'Reference image 1':'The reference image')+
+    ' is the person. Keep their face, hair, body proportions and skin tone exactly as shown — this must be recognisably the same individual.\n\n';
+  let extra='';
+  if(strict){
+    const subs=substitutions(worn);
+    extra=subs.length?'\n\n'+subs.map(s=>s.text).join('\n'):'';
+    const sh=worn.find(i=>i.type==='shoes');
+    if(sh)extra+='\n\nFootwear is mandatory: the person wears the '+[sh.color,sh.detail].filter(Boolean).join(' ')+' described above. Do not substitute different shoes.';
+    extra+='\n\nUse nothing beyond what is described here. Do not add jackets, belts, bags, jewellery, hats or any garment not listed.';
+  }else{
+    const add=o.additions||[];
+    if(add.length)extra='\n\nAlso add these complementary pieces: '+add.join('; ')+'.';
+    const sh=worn.find(i=>i.type==='shoes');
+    extra+=sh?'\n\nFootwear is mandatory: the person wears the '+[sh.color,sh.detail].filter(Boolean).join(' ')+' described above.'
+             :'\n\nAdd simple neutral shoes suiting the outfit. Do not render the person barefoot.';
+  }
+  return head+lines+'\n\nGenerate one new photograph of the person wearing ALL '+worn.length+
+    ' of these garments at the same time as one complete outfit. Every garment must be visible and worn. Reproduce each garment exactly as described.'+
+    extra+'\n\n'+FRAME;
+}
+async function renderOutfit(o,slotId,force){
+  const usePhotos=renderSrc()==='photos';
+  const cacheKey=mode()+'|'+renderSrc()+'|'+(o.name||'o')+'|'+(o.indices||[]).join(',');
+  const slot=()=>document.getElementById(slotId);
+  if(!force&&S.renders[cacheKey]){if(slot())slot().innerHTML='<img src="'+S.renders[cacheKey]+'">';return}
+  if(!imageModel()){if(slot())slot().innerHTML='<p class="muted" style="padding:1rem">No renderer selected.</p>';return}
+  const content=[{type:'image_url',image_url:{url:S.anchor}}];
+  if(usePhotos)(o.indices||[]).map(itemById).filter(Boolean).forEach(i=>content.push({type:'image_url',image_url:{url:i.image}}));
+  content.push({type:'text',text:outfitInstruction(o,usePhotos)});
+  const meta=S.meta[imageModel()]||{out:[]};
+  const modalities=(meta.out||[]).includes('text')?['image','text']:['image'];
+  try{
+    const d=await or({model:imageModel(),messages:[{role:'user',content:content}],
+      modalities:modalities,image_config:{aspect_ratio:aspect()}});
+    const url=imageOf(d);
+    if(!url){const t=textOf(d);throw new Error(t?('text only: '+String(t).slice(0,140)):'no image in response')}
+    S.renders[cacheKey]=url;
+    if(slot())slot().innerHTML='<img src="'+url+'">';
+  }catch(e){if(slot())slot().innerHTML=renderError(e.message)}
+}
+function renderError(msg){
+  const alts=(S.imageModels||[]).filter(m=>m!==imageModel()).slice(0,1);
+  const alt=alts.length?' <button class="sm" onclick="switchImageModel(\''+alts[0]+'\')">Try '+alts[0]+'</button>':'';
+  if(/credit|insufficient|402|payment/i.test(msg))
+    return '<div style="padding:1rem;text-align:left"><b style="font-size:13px">Out of credit.</b><p class="muted" style="margin:.5rem 0">'+escapeHtml(msg)+'</p></div>';
+  if(/rate limit|quota|429|exhausted/i.test(msg))
+    return '<div style="padding:1rem;text-align:left"><b style="font-size:13px">Rate limited.</b><p class="muted" style="margin:.5rem 0">'+escapeHtml(msg)+'</p><button class="sm" onclick="showOutfit(true)">Retry</button>'+alt+'</div>';
+  return '<div style="padding:1rem;text-align:left"><p class="muted">Render failed: '+escapeHtml(msg)+'</p><button class="sm" style="margin-top:.5rem" onclick="showOutfit(true)">Retry</button>'+alt+'</div>';
+}
+function switchImageModel(m){ls('or-image',m);S.renders={};showOutfit(true)}
+
+function showOutfit(force){
+  const o=S.outfits[S.i];if(!o)return;
+  const strict=mode()==='strict';
+  document.getElementById('outfit-counter').textContent=
+    'Outfit '+(S.i+1)+' of '+S.outfits.length+' — '+(strict?'strict':'suggestion')+' — '+(renderSrc()==='photos'?'photo refs':'text only');
+  const pics=(o.indices||[]).map(itemById).filter(Boolean);
+  const subs=strict?substitutions(pics):[];
+  const adds=strict?[]:(o.additions||[]);
+  document.getElementById('outfit-display').innerHTML=
+    '<div class="card"><b style="font-size:15px">'+escapeHtml(o.name||'Look')+'</b>'+
+    '<div class="render" id="render-slot"><div><div class="spinner"></div><p class="muted">Rendering your anchor…</p></div></div>'+
+    '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin:.75rem 0">'+
+    pics.map(i=>'<div><img src="'+(i.thumb||i.image)+'" style="width:100%;aspect-ratio:1;object-fit:cover;border-radius:6px"><div class="muted">'+escapeHtml([i.color,i.type].filter(Boolean).join(' '))+'</div></div>').join('')+
+    '</div>'+
+    (subs.length?'<div style="margin-bottom:.5rem">'+subs.map(s=>'<span class="tag sub">'+s.label+'</span>').join('')+'</div>':'')+
+    (adds.length?'<div style="margin-bottom:.5rem"><span class="muted">Not in your wardrobe: </span>'+adds.map(a=>'<span class="tag sug">'+escapeHtml(a)+'</span>').join('')+'</div>':'')+
+    '<p style="font-size:13px;line-height:1.5;margin-bottom:.5rem">'+escapeHtml(o.why||'')+'</p>'+
+    '<p class="muted"><b>Best for:</b> '+escapeHtml(o.occasion||'')+'</p></div>';
+  renderOutfit(o,'render-slot',force);
+}
+function shiftOutfit(d){S.i=(S.i+d+S.outfits.length)%S.outfits.length;showOutfit()}
+
+/* ---- backup ---- */
+function exportCatalog(){
+  const blob=new Blob([JSON.stringify({v:3,exported:new Date().toISOString(),anchor:S.anchor,items:S.items})],{type:'application/json'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+  a.download='wardrobe-backup-'+new Date().toISOString().slice(0,10)+'.json';
+  a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+}
+function importCatalog(){
+  const f=document.getElementById('import-in').files[0];if(!f)return;
+  const r=new FileReader();
+  r.onload=async e=>{
+    try{
+      const d=JSON.parse(e.target.result);
+      if(!Array.isArray(d.items))throw new Error('not a wardrobe backup');
+      if(!confirm('Add '+d.items.length+' garments?'+(d.anchor?' Anchor will be replaced.':'')))return;
+      for(const it of d.items){
+        const copy={image:it.image,thumb:it.thumb||it.image,added:it.added||Date.now()};
+        ['type','color','style','fit','pattern','material','detail','desc'].forEach(k=>{if(it[k])copy[k]=it[k]});
+        const id=await dbAdd('items',copy);
+        S.items.push(Object.assign({id:id},copy));
+      }
+      if(d.anchor){S.anchor=d.anchor;await dbPut('meta',{k:'anchor',v:d.anchor});
+        document.getElementById('anchor-tile').innerHTML='<img src="'+d.anchor+'">'}
+      renderCatalog();alert('Imported '+d.items.length+' garments with descriptions.');
+    }catch(err){alert('Import failed: '+err.message)}
+  };
+  r.readAsText(f);document.getElementById('import-in').value='';
+}
+</script>
+</body>
+</html>
