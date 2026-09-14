@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Dynagram — dynamic network diagrams from device configs</title>
+<title>Dynagram 0.9 — dynamic network diagrams from device configs</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -488,6 +488,8 @@ table.fib td:first-child{color:var(--ink)}
   color:var(--ink);white-space:nowrap}
 .qmark-accent{background:linear-gradient(92deg,var(--cyan),var(--green));
   -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:var(--cyan)}
+.qmark-ver{font-family:var(--mono);font-size:9.5px;font-weight:400;color:var(--ink-faint);
+  margin-left:5px;vertical-align:super;letter-spacing:0}
 .qmark-tag{font-family:var(--mono);font-style:italic;font-size:9.5px;letter-spacing:.13em;
   text-transform:uppercase;color:var(--ink-faint);margin-top:3px;white-space:nowrap}
 
@@ -543,7 +545,7 @@ body.zen .sb-show{position:fixed;right:14px;top:10px}
   <div class="top-panel" id="top-panel">
     <div class="qbar">
       <span class="qmark">
-        <span class="qmark-name">Dyna<span class="qmark-accent">gram</span></span>
+        <span class="qmark-name">Dyna<span class="qmark-accent">gram</span><span class="qmark-ver" id="app-ver"></span></span>
         <span class="qmark-tag">Dynamic Diagram</span>
       </span>
       <div class="q" id="qbox">
@@ -2940,6 +2942,9 @@ function applyBends(els){
    arriving at one device meet its edge at separate points instead of stacking
    on the centre. */
 /* A small stable hash, so a link always starts from the same channel. */
+/* Still pre-1.0: the diagram, tracing and reports are solid, but the file
+   format and the routing behaviour are both still moving. */
+const APP_VERSION='0.9';
 function hashStr(t){ let h=0; for(let i=0;i<t.length;i++){ h=(h*31 + t.charCodeAt(i))|0; } return h; }
 function zoneAncestors(node){
   const out=new Set();
@@ -8649,8 +8654,8 @@ function buildChangeReport(){
   const when=new Date().toISOString().slice(0,16).replace('T',' ');
   L.push('# Change report \u2014 '+proj);
   L.push('');
-  L.push('Generated '+when+' by Dynagram from '+STATE.devices.length+' device config'+
-         (STATE.devices.length===1?'':'s')+'.');
+  L.push('Generated '+when+' by Dynagram v'+APP_VERSION+' from '+STATE.devices.length+
+         ' device config'+(STATE.devices.length===1?'':'s')+'.');
   L.push('');
 
   /* Flows first: it is the part a reviewer actually needs to decide. */
@@ -8779,6 +8784,7 @@ function projectObject(){
     positions:STATE.positions,
     name:(document.getElementById('proj-name').value||'').trim(),
     ui:STATE.ui,
+    version: APP_VERSION,
     theme:STATE.theme,
     view: STATE.cy ? {zoom:STATE.cy.zoom(), pan:Object.assign({},STATE.cy.pan())} : (STATE.savedView||null),
     anchors: STATE.anchors||{},
@@ -9254,6 +9260,8 @@ function initTheme(){
 }
 initPanels();
 initTheme();
+const verEl=document.getElementById('app-ver');
+if(verEl) verEl.textContent='v'+APP_VERSION;
 initQueryBar();
 initGrid();
 initFlows();
