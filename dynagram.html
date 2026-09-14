@@ -1989,11 +1989,29 @@ function classfulLen(ip){
   if(b<128) return 8; if(b<192) return 16; if(b<224) return 24; return 32;
 }
 function parseIosRoutes(text){
-  const out=[]; let majorLen=null, last=null;
+  const out=[]; let majorLen=null, last=null, vrf='default';
   for(const raw of text.split(/\r?\n/)){
     const line=raw.trim();
     if(!line) continue;
+
+    /* Which VRF the following routes belong to. NX-OS prints
+         IP Route Table for VRF "management"
+       and IOS prints
+         Routing Table: VRF-NAME
+       Without this every table merges into the global one, which is how a
+       switch ends up looking like it has no VRF routes at all. */
+    let vm0;
+    if((vm0=line.match(/^IP\s+Route\s+Table\s+for\s+(?:VRF|Context)\s+["']?([^"']+?)["']?\s*$/i)) ||
+       (vm0=line.match(/^Routing\s+Table:\s*(\S+)/i)) ||
+       (vm0=line.match(/^VRF:\s*(\S+)/i))){
+      const nm=vm0[1].trim();
+      vrf = /^(default|global)$/i.test(nm) ? 'default' : nm;
+      majorLen=null; last=null;
+      continue;
+    }
     if(/^(Gateway of last resort|Codes:|Routing (Table|entry))/i.test(line)) continue;
+    // the legend lines that follow an NX-OS VRF header
+    if(/denotes (best|VRF)/i.test(line) || /^'\[x\/y\]'/.test(line)) continue;
     if(/^\S{1,4}\s+-\s+\S/.test(line) && !/via|connected/i.test(line)) continue; // legend
     if(/is (?:variably )?subnetted/i.test(line)){
       const mm=line.match(/(\d+\.\d+\.\d+\.\d+)\/(\d{1,2})/);
@@ -2001,7 +2019,7 @@ function parseIosRoutes(text){
       continue;
     }
     let net=null, len=null;
-    const isCont = /^(\[\d+\/\d+\]\s*)?via\s/i.test(line);
+    const isCont = /^\*{0,2}(\[\d+\/\d+\]\s*)?via\s/i.test(line);
     if(isCont && last){ net=last.net; len=last.len; }
     else{
       const pm=line.match(/(\d+\.\d+\.\d+\.\d+)(?:\/(\d{1,2}))?/);
@@ -2018,11 +2036,23 @@ function parseIosRoutes(text){
     let iface = cm ? cm[1] : null;
     if(!iface){
       const im=line.match(/,\s*([A-Za-z][\w./:-]*)\s*$/);
-      if(im) iface=im[1];
+      /* "…, attached" and the route's own source word are not interfaces —
+         reading them as one turned every prefix header into a fake route. */
+      if(im && !/^(attached|direct|local|static|connected|hsrp|vrrp|glbp|ubest|mbest|best|bgp|ospf|eigrp|rip|isis|am|discard|null)$/i.test(im[1])) iface=im[1];
+      /* NX-OS puts the interface in the middle of the line —
+           *via 10.65.140.122, Vlan2265, [0/0], 3y7w, direct
+         so look for something interface-shaped anywhere, not just at the end. */
+      if(!iface){
+        const nm=line.match(/,\s*((?:Vlan|Ethernet|Eth|GigabitEthernet|Gi|TenGig\w*|Te|FastEthernet|Fa|Port-channel|Po|port-channel|mgmt|Management|Lo\w*|Tunnel|Serial|Null|Bundle-Ether|ae)[\w./:-]*)\s*,/i);
+        if(nm) iface=nm[1];
+      }
     }
     if(!vm && !cm && !iface) continue;      // not a route line
-    out.push({net, len, nextHop: vm?ip2int(vm[1]):null, iface,
-              ad: am?parseInt(am[1],10):(cm?0:1), vrf:'default'});
+    /* NX-OS marks a connected route "direct" and its own address "local";
+       treat both as connected rather than as a static with a next hop. */
+    const direct=/\b(direct|local|attached)\b/i.test(line);
+    out.push({net, len, nextHop: (vm && !direct) ? ip2int(vm[1]) : null,
+              iface, ad: am?parseInt(am[1],10):(direct?0:(cm?0:1)), vrf});
   }
   return out;
 }
@@ -8381,6 +8411,35 @@ function initPanels(){
    Save, restore, layout memory
    ============================================================ */
 const LS_KEY='dynagram.session.v1';
+/* The last project file opened or saved, kept separately from the working
+   session. Clicking the example lab replaces the session, but it should not
+   replace the file you were actually working on — that is what comes back on
+   the next start. */
+const LS_FILE='dynagram.lastfile.v1';
+function rememberFile(){
+  try{
+    if(!STATE.fileName) return;
+    localStorage.setItem(LS_FILE, JSON.stringify({
+      name: STATE.fileName, at: Date.now(), project: projectObject()
+    }));
+  }catch(e){}
+}
+function restoreLastFile(){
+  try{
+    const raw=localStorage.getItem(LS_FILE);
+    if(!raw) return false;
+    const rec=JSON.parse(raw);
+    if(!rec || !rec.project) return false;
+    if(!loadProject(rec.project)) return false;
+    STATE.fileName=rec.name || null;
+    STATE.fileHandle=null;          // a handle cannot be kept across a reload
+    updateFileLabel();
+    const note=document.getElementById('autosave-note');
+    if(note) note.textContent='Reopened '+(rec.name||'your last project')+
+      ' \u2014 Save will ask where to put it';
+    return true;
+  }catch(e){ return false; }
+}
 STATE.positions={};
 
 function posKey(kind, label){
@@ -8930,7 +8989,7 @@ function loadProject(obj){
 }
 let saveTimer=null;
 function doAutosave(){
-  try{ localStorage.setItem(LS_KEY, JSON.stringify(projectObject())); }
+  try{ localStorage.setItem(LS_KEY, JSON.stringify(projectObject())); if(STATE.fileName) rememberFile(); }
   catch(e){ document.getElementById('autosave-note').textContent =
     'This browser is not storing your work. Use Save project to keep it.'; }
 }
@@ -8974,6 +9033,7 @@ function legacyDownload(){
   a.click();
   setTimeout(()=>URL.revokeObjectURL(a.href),2000);
   STATE.fileName=nm; STATE.fileHandle=null;
+  setTimeout(rememberFile,0);
   updateFileLabel();
 }
 /* Save writes straight back to the file that was opened or last saved to —
@@ -8997,6 +9057,7 @@ async function doSaveAs(){
       });
       await writeToHandle(handle);
       STATE.fileHandle=handle; STATE.fileName=handle.name;
+      setTimeout(rememberFile,0);
       updateFileLabel();
       return;
     }catch(e){ if(e && e.name==='AbortError') return; }
@@ -9016,6 +9077,7 @@ async function doOpen(){
         return;
       }
       STATE.fileHandle=handle; STATE.fileName=handle.name;
+      setTimeout(rememberFile,0);
       updateFileLabel();
       return;
     }catch(e){ if(e && e.name==='AbortError') return; }
@@ -9035,6 +9097,7 @@ document.getElementById('projfile').onchange=function(){
         document.getElementById('autosave-note').textContent='That file is not a Dynagram project.';
       else{
         STATE.fileName=f.name; STATE.fileHandle=null;   // no handle via this path — Save will prompt
+        setTimeout(rememberFile,0);
         updateFileLabel();
       }
     }catch(e){ document.getElementById('autosave-note').textContent='That file could not be read.'; }
@@ -9075,6 +9138,10 @@ const LAB_DEVICES = [
    device in a redundant pair, and everything crossing the firewall pair. The
    two sites meet over a DCI between their internal cores. */
 document.getElementById('load-sample').onclick=()=>{
+  /* The example is not your file. Detaching the filename stops it being
+     written over the project remembered for the next start. */
+  STATE.fileName=null; STATE.fileHandle=null;
+  if(typeof updateFileLabel==='function') updateFileLabel();
   STATE.devices=[]; STATE.lastTrace=null; STATE.positions={};
   STATE.groups = LAB_ZONES.map(z=>({id:z.id, name:z.name, parent:z.parent, padding:34}));
   for(const d of LAB_DEVICES){
@@ -9266,7 +9333,10 @@ initQueryBar();
 initGrid();
 initFlows();
 setTimeout(()=>{ pushUndo(); updateUndoButtons(); }, 300);   // the starting layout
-if(!restore()) rebuild();
+/* Start on the file you were last working on. Falling back to the session
+   keeps unsaved work; failing that, start empty — the example lab is only ever
+   loaded by pressing its button. */
+if(!restoreLastFile() && !restore()) rebuild();
 </script>
 </body>
 </html>
