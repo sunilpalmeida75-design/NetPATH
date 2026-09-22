@@ -1148,6 +1148,16 @@ function parseCisco(text, fname){
       for(const v of lastVlans) if(dev.vlans[v]) dev.vlans[v].name=m[1];
       return;
     }
+    /* A VLAN can be shut down or suspended in the database. Its SVI then
+       carries no traffic even though the interface itself says nothing. */
+    if(ctx==='vlan' && /^(shutdown|state\s+suspend)\b/i.test(t)){
+      for(const v of lastVlans) if(dev.vlans[v]){ dev.vlans[v].shutdown=true; dev.vlans[v].downLine=lineNo; }
+      return;
+    }
+    if(ctx==='vlan' && /^(no\s+shutdown|state\s+active)\b/i.test(t)){
+      for(const v of lastVlans) if(dev.vlans[v]) dev.vlans[v].shutdown=false;
+      return;
+    }
 
     if((m=t.match(/^router\s+ospf\s*(\d+)?/i))){
       ctx='ospf'; dev.dynamic=true;
@@ -1931,6 +1941,44 @@ function parsePanCurly(text, fname){
   return dev;
 }
 
+/* What is really down.
+
+   An interface is not only down when it says "shutdown". A sub-interface is
+   down if its physical parent is, and an SVI is down if its VLAN is shut or
+   suspended in the database — in both cases the interface's own config says
+   nothing at all, which is why these links were still being drawn as live. */
+function applyEffectiveShutdown(dev){
+  const byName={};
+  for(const i of dev.interfaces||[]) byName[i.name.toLowerCase()]=i;
+
+  for(const i of (dev.interfaces||[])){
+    delete i.downReason;
+    if(i.shutdown){ i.downReason='shut down'; continue; }
+
+    // Gi0/1.100 and ae1.250 follow their parent
+    const dot=i.name.indexOf('.');
+    if(dot>0){
+      const parent=byName[i.name.slice(0,dot).toLowerCase()];
+      if(parent && parent.shutdown){
+        i.shutdown=true;
+        i.downReason='its parent '+parent.name+' is shut down';
+        continue;
+      }
+    }
+    // Vlan100 follows VLAN 100 in the database
+    const vm=i.name.match(/^vlan\s*(\d+)$/i);
+    if(vm){
+      const v=(dev.vlans||{})[String(parseInt(vm[1],10))] || (dev.vlans||{})[vm[1]];
+      if(v && v.shutdown){
+        i.shutdown=true;
+        i.downReason='VLAN '+vm[1]+' is shut down in the VLAN database';
+        continue;
+      }
+    }
+  }
+  return dev;
+}
+
 function isFirewall(d){ return !!d && d.vendor==='palo-alto'; }
 
 /* An access-list entry, reduced to what a trace needs: does this packet match,
@@ -2031,6 +2079,7 @@ function parseConfig(text, fname){
           : v==='pan-curly' ? parsePanCurly(text, fname)
           : v==='pan-set'   ? parsePanSet(text, fname)
           : parseCisco(text, fname);
+  applyEffectiveShutdown(d);
   finish(d);
   d.rawText = text;
   return d;
@@ -2222,8 +2271,9 @@ function buildModel(devices, opts){
     sn.down = sn.downMembers.length>0 && live.length<2;
     if(sn.downMembers.length && live.length>=1){
       for(const m of sn.downMembers)
-        warn(m.dev.name+' '+m.iface.name+' is on '+k+' but administratively shut down, '+
-             'so it is not a working connection.', m.dev.id, m.iface.line);
+        warn(m.dev.name+' '+m.iface.name+' is on '+k+' but '+
+             (m.iface.downReason||'shut down')+
+             ', so it is not a working connection.', m.dev.id, m.iface.line);
     }
   }
 
@@ -2529,7 +2579,9 @@ function buildModel(devices, opts){
 function vipOwner(model, ipInt){
   const mem=(model.vips||{})[ipInt];
   if(!mem || !mem.length) return null;
-  return mem[0];
+  // prefer an active member the scope still shows
+  const live=mem.filter(m=>inScopeForTrace(m.dev, m.iface));
+  return (live.length?live:mem)[0];
 }
 
 /* Carrier names as they actually appear in interface descriptions. Word
@@ -2622,18 +2674,45 @@ function cloudExit(model, cloud, from, dst){
   return best;
 }
 
+/* A device the scope has removed takes no part in a trace, so a next hop is
+   never resolved onto one. */
+function inScopeForTrace(d, i){
+  try{ return deviceInScope(d) && (!i || ifaceInScope(i)); }catch(e){ return true; }
+}
 function ownerOf(model, ipInt){
   for(const d of model.devices)
-    for(const i of d.interfaces)
-      for(const a of i.addrs)
-        if(a.ip===ipInt) return {dev:d, iface:i};
+    for(const i of d.interfaces){
+      if(!inScopeForTrace(d,i)) continue;
+      for(const a of i.addrs) if(a.ip===ipInt) return {dev:d, iface:i};
+    }
   return null;
 }
-function deviceForAddress(model, ipInt){
-  // device with a connected subnet containing this address
+/* Which device this address belongs to.
+
+   A device that has the address configured on an interface owns it; a device
+   merely sharing its subnet only carries it. Owners are checked first, so
+   tracing from a router's own interface address starts at that router rather
+   than at whichever neighbour happens to be listed first.
+
+   Devices and interfaces removed by the VRF/VSYS scope are skipped entirely:
+   a filtered-out device should take no part in a simulation. */
+function deviceForAddress(model, ipInt, opts){
+  const scoped = !(opts && opts.ignoreScope);
+  const usable=(d,i)=>{
+    if(i.shutdown) return false;
+    if(!scoped) return true;
+    try{ return deviceInScope(d) && ifaceInScope(i); }catch(e){ return true; }
+  };
+  // 1. the device that actually has this address
   for(const d of model.devices)
     for(const i of d.interfaces){
-      if(i.shutdown) continue;
+      if(!usable(d,i)) continue;
+      for(const a of i.addrs) if(a.ip===ipInt) return {dev:d, iface:i, owner:true};
+    }
+  // 2. failing that, a device with a connected subnet containing it
+  for(const d of model.devices)
+    for(const i of d.interfaces){
+      if(!usable(d,i)) continue;
       for(const a of i.addrs)
         if(a.len<32 && inNet(ipInt,netOf(a.ip,a.len),a.len)) return {dev:d, iface:i};
     }
@@ -2707,7 +2786,25 @@ function trace(model, srcStr, dstStr, startId, opts){
     const found = deviceForAddress(model, src);
     if(found){ start=found.dev; ingress=found.iface; }
   }
-  if(!start) return {error:'No device has a subnet containing '+srcStr+'. Pick a starting device, or check the source address.'};
+  if(!start){
+    /* It may exist but be hidden. Saying "no device has this subnet" when the
+       device is right there, filtered out, sends you looking for the wrong
+       problem. */
+    const hidden = deviceForAddress(model, src, {ignoreScope:true});
+    if(hidden) return {error:srcStr+' is on '+hidden.dev.name+' '+hidden.iface.name+
+      ', which the current VRF / VSYS filter is hiding. Clear the filter to trace from here.'};
+    return {error:'No device has a subnet containing '+srcStr+'. Pick a starting device, or check the source address.'};
+  }
+  /* The destination must be visible too, or the result is about a network you
+     are not currently looking at. */
+  {
+    const dvis = deviceForAddress(model, dst);
+    if(!dvis){
+      const dh = deviceForAddress(model, dst, {ignoreScope:true});
+      if(dh) return {error:dstStr+' is on '+dh.dev.name+' '+dh.iface.name+
+        ', which the current VRF / VSYS filter is hiding. Clear the filter to trace to it.'};
+    }
+  }
 
   const hops=[]; const seen={};
   let cur=start, inIf=ingress, vrf=(ingress?ingress.vrf:'default');
@@ -2845,10 +2942,21 @@ function trace(model, srcStr, dstStr, startId, opts){
           break;
         }
         if(onLink){
-          exits=true; exitVia=int2ip(route.nextHop);
-          verdict={ok:true, title:'Forwarded off-network',
-            detail:cur.name+' sends it out '+(outIf?outIf.name:'?')+' to '+int2ip(route.nextHop)+
-                   ', which is not one of the loaded configs — an upstream or ISP device.'};
+          /* The next hop may be a device that is loaded but filtered out of the
+             current scope. Saying "off-network" there would be wrong: the path
+             is not unknown, it is hidden. */
+          const hidden = model.devices.find(d=>d.interfaces.some(i=>
+            i.addrs.some(a=>a.ip===route.nextHop)));
+          if(hidden){
+            verdict={ok:false, title:'Next hop is filtered out',
+              detail:cur.name+' sends it to '+int2ip(route.nextHop)+' on '+hidden.name+
+                     ', which the current VRF / VSYS filter is hiding. Clear the filter to follow this path.'};
+          } else {
+            exits=true; exitVia=int2ip(route.nextHop);
+            verdict={ok:true, title:'Forwarded off-network',
+              detail:cur.name+' sends it out '+(outIf?outIf.name:'?')+' to '+int2ip(route.nextHop)+
+                     ', which is not one of the loaded configs — an upstream or ISP device.'};
+          }
         }
         else verdict={ok:false, title:'Unreachable next hop',
           detail:int2ip(route.nextHop)+' is not on any connected subnet of '+cur.name+'. This route black-holes.'};
@@ -7366,7 +7474,8 @@ function ifaceCell(i){
   const v=vlanOfIface(i); if(v) bits.push('vlan '+v);
   if(i.zone) bits.push(i.zone);
   if(i.vrf && i.vrf!=='default') bits.push('vrf '+i.vrf);
-  if(i.shutdown) bits.push('shutdown');
+  if(i.shutdown) bits.push(i.downReason && i.downReason!=='shut down'
+    ? 'down \u2014 '+i.downReason : 'shutdown');
   return esc(i.name)+
     (bits.length?'<br><span style="color:var(--ink-faint)">'+esc(bits.join(' · '))+'</span>':'')+
     (i.desc?'<br><span style="color:var(--ink-faint)">'+esc(i.desc)+'</span>':'');
