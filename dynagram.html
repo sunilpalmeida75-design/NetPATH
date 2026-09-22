@@ -5500,9 +5500,13 @@ function render(){
     }
     const els=[]; const edgeFor={}; let e=0;
     const shared=[];
+    /* Link detail always shows what two devices share, even a firewall and a
+       device in another site. The map leaves that pairing out because drawing
+       it would invent a cross-datacentre cable, but when you have deliberately
+       opened these two, hiding the addressing they have in common helps nobody
+       — that is exactly what you came here to check. */
     for(const k in model.subnets){
       const sn=model.subnets[k];
-      if(crossSiteFw(a,b)) continue;
       const ma=sn.members.filter(x=>x.dev===a && !x.iface.tagOdd && ifaceInScope(x.iface)),
             mb=sn.members.filter(x=>x.dev===b && !x.iface.tagOdd && ifaceInScope(x.iface));
       if(ma.length && mb.length) shared.push({key:k, a:ma, b:mb});
@@ -7394,7 +7398,6 @@ function showLink(a,b){
   const shared=[];
   for(const k in m.subnets){
     const sn=m.subnets[k];
-    if(crossSiteFw(a,b)) continue;
     const ma=sn.members.filter(x=>x.dev===a && !x.iface.tagOdd && ifaceInScope(x.iface)),
           mb=sn.members.filter(x=>x.dev===b && !x.iface.tagOdd && ifaceInScope(x.iface));
     if(ma.length && mb.length) shared.push({key:k, a:ma, b:mb});
@@ -7426,6 +7429,9 @@ function showLink(a,b){
       : '');
 
   if(shared.length){
+    if(crossSiteFw(a,b))
+      html+='<p class="scope-note">These two are in different sites and one is a firewall, '+
+            'so the map does not draw this as a cable. The addressing they share is below.</p>';
     html+='<h2 class="sec">Layer 3 links</h2>';
     for(const s of shared){
       const vrf=s.a[0].iface.vrf;
