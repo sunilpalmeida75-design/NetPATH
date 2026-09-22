@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Dynagram 0.9 — dynamic network diagrams from device configs</title>
+<title>Dynagram 0.10 — dynamic network diagrams from device configs</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -1412,6 +1412,28 @@ function parsePanSet(text, fname){
       }
       continue;
     }
+    /* set vsys vsys2 display-name DR
+       set vsys vsys2 import network interface [ ae1.1094 ae1.1052 ]
+       The leading "vsys <name>" is already parsed out into lineVsys. */
+    if(lineVsys){
+      if(k[0]==='display-name' && k[1]){
+        dev.vsysNames=dev.vsysNames||{};
+        dev.vsysNames[lineVsys]=String(k[1]).replace(/^"|"$/g,'');
+        continue;
+      }
+      if(k[0]==='import' && k[1]==='network'){
+        if(k[2]==='interface'){
+          for(const m of flat(k.slice(3))) if(m) iface(String(m)).vsys=lineVsys;
+          continue;
+        }
+        if(k[2]==='virtual-router' && k[3]){
+          const vrName=String(k[3]).replace(/^"|"$/g,'');
+          dev.vrs.add(vrName);
+          dev.vsysVr=dev.vsysVr||{}; dev.vsysVr[lineVsys]=vrName;
+          continue;
+        }
+      }
+    }
     if(k[0]==='zone' && k[2]==='network'){
       const zname=String(k[1]);
       const members = flat(k[4]!==undefined && Array.isArray(k[4]) ? k[4] : k.slice(4));
@@ -1746,16 +1768,66 @@ function parsePanCurly(text, fname){
         const l3=pKid(z.node,'network','layer3');
         if(!l3) continue;
         dev.zones.add(z.name);
-        const tag=(name)=>{ const ifc=iface(name, z.node.line); ifc.zone=z.name; if(vsysName) ifc.vsys=vsysName; };
+        const tag=(name)=>{
+          const t=String(name);
+          if(t==='[' || t===']' || t===';' || !t) return;   // list punctuation, not an interface
+          const ifc=iface(t, z.node.line); ifc.zone=z.name; if(vsysName) ifc.vsys=vsysName;
+        };
         for(const m of l3.vals) tag(m);
         for(const m of pEntries(l3)) tag(m.name);
       }
     });
   }
-  const vsysContainer = pKid(root,'vsys');
+  /* The vsys block sits deep in a real export —
+        config > devices > localhost.localdomain > vsys
+     so looking only at the root found nothing, every zone was tagged vsys1,
+     and a second vsys never appeared anywhere. Find it at any depth. */
+  let vsysContainer = pKid(root,'vsys');
+  if(!vsysContainer) panWalk(root, (key, node)=>{ if(key==='vsys' && !vsysContainer) vsysContainer=node; });
   if(vsysContainer){
-    // walk each named vsys separately so zones in different vsys don't merge
-    for(const v of pEntries(vsysContainer)) tagZonesIn(v.node, v.name);
+    dev.vsysNames = dev.vsysNames || {};
+    for(const v of pEntries(vsysContainer)){
+      // walk each named vsys separately so zones in different vsys don't merge
+      tagZonesIn(v.node, v.name);
+
+      /* A vsys says which interfaces and virtual router it owns in its import
+         block, and carries a friendly name of its own:
+
+             vsys2 {
+               display-name DR;
+               import { network { interface [ ae1.1094 ae1.1052 ] } }
+             }
+
+         Without reading it, a vsys whose interfaces are not in a named zone
+         never appears anywhere — which is why only vsys1 was showing. */
+      const dn=pVal(v.node,'display-name');
+      if(dn) dev.vsysNames[v.name]=String(dn).replace(/^"|"$/g,'');
+
+      const imp=pKid(v.node,'import','network');
+      if(imp){
+        /* The value list carries the brackets and, on one line, the
+           virtual-router key too, so take only interface-shaped tokens. */
+        const looksLikeIface=(t)=>/^(?:ae|ethernet|eth|vlan|tunnel|loopback|lo)[\d.\/:]+$/i.test(String(t));
+        const ifs=pKid(imp,'interface');
+        if(ifs){
+          for(const m of (ifs.vals||[])) if(looksLikeIface(m)) iface(String(m), v.node.line).vsys=v.name;
+          for(const m of pEntries(ifs))  if(looksLikeIface(m.name)) iface(String(m.name), v.node.line).vsys=v.name;
+        }
+        let vr=pVal(imp,'virtual-router');
+        if(!vr && ifs){
+          // written inline after the interface list
+          const vals=(ifs.vals||[]).map(String);
+          const at=vals.indexOf('virtual-router');
+          if(at>-1 && vals[at+1]) vr=vals[at+1];
+        }
+        if(vr){
+          const vrName=String(vr).replace(/^"|"$/g,'').replace(/;$/,'');
+          dev.vrs.add(vrName);
+          dev.vsysVr = dev.vsysVr || {};
+          dev.vsysVr[v.name]=vrName;
+        }
+      }
+    }
   } else {
     // no vsys concept in this config at all — single implicit vsys1
     tagZonesIn(root, 'vsys1');
@@ -3029,7 +3101,7 @@ function applyBends(els){
 /* A small stable hash, so a link always starts from the same channel. */
 /* Still pre-1.0: the diagram, tracing and reports are solid, but the file
    format and the routing behaviour are both still moving. */
-const APP_VERSION='0.9';
+const APP_VERSION='0.10';
 function hashStr(t){ let h=0; for(let i=0;i<t.length;i++){ h=(h*31 + t.charCodeAt(i))|0; } return h; }
 function zoneAncestors(node){
   const out=new Set();
@@ -3617,6 +3689,14 @@ function allVrfNames(){
   }
   return [...set].sort((a,b)=> a==='default'?-1 : b==='default'?1 : a.localeCompare(b));
 }
+/* "vsys2 (DR)" reads far better than "vsys2" when a box has several. */
+function vsysLabel(name){
+  for(const d of (STATE.devices||[])){
+    const dn=d.vsysNames && d.vsysNames[name];
+    if(dn) return name+' \u2014 '+dn;
+  }
+  return name;
+}
 function allVsysNames(){
   const set=new Set();
   for(const d of STATE.devices) for(const i of d.interfaces) if(i.vsys) set.add(i.vsys);
@@ -3778,9 +3858,10 @@ function renderVrfFilter(){
   const chip=(n,kind)=>{
     const off=(kind==='vrf'?s.vo:s.so).has(n);
     if(off) return '';                       // removed ones live in the right column
+    const label = kind==='vsys' ? vsysLabel(n) : n;
     return '<span class="sc inc" data-'+kind+'="'+esc(n)+'" '+
       'title="Click to remove from the diagram">'+
-      '<span class="sig">\u2713</span><span class="nm">'+esc(n)+'</span></span>';
+      '<span class="sig">\u2713</span><span class="nm">'+esc(label)+'</span></span>';
   };
   const list=(names,kind)=>{
     const on=names.filter(n=>!(kind==='vrf'?s.vo:s.so).has(n));
