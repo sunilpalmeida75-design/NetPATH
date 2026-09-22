@@ -538,6 +538,24 @@ body.zen .sb-show{position:fixed;right:14px;top:10px}
   padding:7px 7px 3px; font-family:var(--mono)}
 .sb-row{display:flex; gap:5px; padding:2px 7px 5px}
 .sb-row .btn{flex:1}
+
+/* refresh-from-folder picker */
+.fr-tbl{width:100%;border-collapse:collapse;font:12.5px var(--mono)}
+.fr-tbl th{position:sticky;top:0;background:var(--panel-2);text-align:left;font:600 11.5px var(--sans);
+  color:var(--ink-faint);padding:6px 8px;border-bottom:1px solid var(--rule);white-space:nowrap}
+.fr-tbl th.c,.fr-tbl td.c{text-align:center;width:74px}
+.fr-tbl td{padding:5px 8px;border-bottom:1px solid var(--rule);color:var(--ink-dim);white-space:nowrap}
+.fr-tbl tr:hover td{background:var(--panel)}
+.fr-tbl td.nm{font-family:var(--sans);color:var(--ink)}
+.fr-tbl td.new{color:var(--green)}
+.fr-tbl input[type=checkbox]{accent-color:var(--cyan);margin:0}
+.fr-tbl .none{color:var(--ink-faint)}
+.fr-sum{font-size:12.5px;color:var(--ink-faint);margin-right:auto}
+
+.fib.pol td{vertical-align:top}
+.fib.pol td.nm{font-family:var(--sans);color:var(--ink)}
+.fib.pol tr.rdeny td{background:rgba(224,98,95,.07)}
+.fib.pol .muted{color:var(--ink-faint);font-size:11.5px}
 </style>
 </head>
 <body>
@@ -581,6 +599,8 @@ body.zen .sb-show{position:fixed;right:14px;top:10px}
       <textarea class="paste" id="paste" placeholder="…or paste one config here and press Add"></textarea>
       <div class="btn-row">
         <button class="btn" id="add-paste">Add config</button>
+        <button class="btn" id="refresh-folder" title="Re-read a folder of collected files, keeping every setting you have made">Refresh from folder</button>
+        <input type="file" id="folder-input" class="hidden" webkitdirectory directory multiple>
         <button class="btn" id="load-sample">Load example lab</button>
       </div>
 
@@ -2835,11 +2855,26 @@ function fittedFont(label, w, h){
   return Math.max(7, Math.min(48, Math.floor(Math.min(byH, byW))));
 }
 /* A stable identity for an edge so a bend the user set survives re-renders. */
+/* A link's identity has to survive a reload, because everything the user sets
+   on a link — its bends, the points they dragged, where its ends sit on the
+   box, its colour — is stored against this key.
+
+   It used to be built from device ids, and those are handed out in load order
+   (d1, d2, ...), so reopening a project renamed every link and quietly threw
+   all of that away. Names are stable, so the key is built from those. The two
+   ends are sorted, so a link keeps its identity whichever way round it is
+   drawn. */
+function devNameOf(id){
+  const d=(STATE.devices||[]).find(x=>x.id===id);
+  return d ? d.name : String(id);
+}
 function edgeKey(d){
-  if(d.net)    return 'net:'+d.net+'|'+d.source+'|'+d.target;
+  const a=devNameOf(d.source), b=devNameOf(d.target);
+  const pair=[a,b].sort().join('|');
+  if(d.net)    return 'net:'+d.net+'|'+pair;
   if(d.l2key)  return 'l2:'+d.l2key;
-  if(d.cloud)  return 'cloud:'+d.cloud+'|'+d.source;
-  return (d.kind||'e')+':'+d.source+'|'+d.target+'|'+(d.label||'');
+  if(d.cloud)  return 'cloud:'+d.cloud+'|'+a;
+  return (d.kind||'e')+':'+pair+'|'+(d.label||'');
 }
 /* Apply saved bends and fan out any remaining overlaps, so parallel links and
    their labels do not sit on top of each other. */
@@ -4185,6 +4220,311 @@ function openLinkMenu(cy, edge, clientX, clientY, at){
 }
 
 
+
+/* ============================================================
+   Refresh from folder
+
+   Point it at the folder a collector writes into and it re-reads the devices
+   that are already in the project, in place. Everything you have set — colours,
+   fonts, box sizes, zones, positions, link bends and the points you dragged —
+   is kept; only the parsed config, routing table and neighbours are replaced.
+   Files for devices that are not in the project yet can be added as new.
+
+   Naming it expects, which is what collect.py writes:
+     NAME.cfg / .conf / .txt      running config
+     NAME.routes.txt              routing table
+     NAME.cdp.txt / .lldp.txt     neighbours
+     NAME.bgp.txt                 BGP table
+   ============================================================ */
+function classifyCapture(fileName){
+  const f=String(fileName||'').replace(/^.*[\\/]/,'');
+  let m;
+  if((m=f.match(/^(.+?)\.(?:routes?|route|rib)\.(?:txt|log|out)$/i)))      return {host:m[1], kind:'routes'};
+  if((m=f.match(/^(.+?)\.(?:cdp|lldp|neighbou?rs?)\.(?:txt|log|out)$/i)))  return {host:m[1], kind:'cdp'};
+  if((m=f.match(/^(.+?)\.bgp\.(?:txt|log|out)$/i)))                        return {host:m[1], kind:'bgp'};
+  if((m=f.match(/^(.+?)\.(?:cfg|conf|config|set|running)$/i)))             return {host:m[1], kind:'config'};
+  // a bare .txt or .log is treated as a config only if nothing else claims it
+  if((m=f.match(/^(.+?)\.(?:txt|log)$/i)))                                 return {host:m[1], kind:'config'};
+  return null;
+}
+
+async function openFolderPicker(){
+  let files=[];
+  try{
+    if(window.showDirectoryPicker){
+      const dir=await window.showDirectoryPicker({mode:'read'});
+      for await (const [name, handle] of dir.entries()){
+        if(handle.kind!=='file') continue;
+        files.push({name, get:()=>handle.getFile().then(f=>f.text())});
+      }
+    } else {
+      // Firefox and Safari: fall back to the folder input
+      const inp=document.getElementById('folder-input');
+      files=await new Promise(res=>{
+        inp.onchange=()=>{
+          const list=[...inp.files].map(f=>({name:f.name, get:()=>f.text()}));
+          inp.value=''; res(list);
+        };
+        inp.click();
+      });
+    }
+  }catch(e){ return null; }          // the user cancelled
+  return files;
+}
+
+async function refreshFromFolder(){
+  const files=await openFolderPicker();
+  if(!files || !files.length) return;
+
+  const hosts={};
+  for(const f of files){
+    const c=classifyCapture(f.name);
+    if(!c) continue;
+    const h=hosts[c.host] = hosts[c.host] || {host:c.host, files:{}};
+    // a real .cfg beats a bare .txt claiming to be one
+    if(c.kind==='config' && h.files.config && /\.(cfg|conf|config|set)$/i.test(h.files.config.name)) continue;
+    h.files[c.kind]=f;
+  }
+  const rows=Object.values(hosts).sort((a,b)=>a.host.localeCompare(b.host));
+  if(!rows.length){ alert('Nothing in that folder looks like a device capture.\n\nExpected names like SW01.cfg, SW01.routes.txt, SW01.cdp.txt'); return; }
+
+  const known=new Set(STATE.devices.map(d=>d.name.toLowerCase()));
+  for(const r of rows) r.known = known.has(r.host.toLowerCase());
+  showFolderPicker(rows);
+}
+
+function showFolderPicker(rows){
+  const back=document.createElement('div'); back.className='pick-back';
+  const box=document.createElement('div'); box.className='pick'; box.style.width='min(860px,94vw)';
+  const cols=[['config','Config'],['routes','Routes'],['cdp','CDP / LLDP'],['bgp','BGP']];
+  const sel={};
+  for(const r of rows){ sel[r.host]={}; for(const [k] of cols) sel[r.host][k]=!!r.files[k]; }
+
+  const paint=()=>{
+    const n=rows.reduce((a,r)=>a+cols.filter(([k])=>sel[r.host][k]).length,0);
+    const newOnes=rows.filter(r=>!r.known && cols.some(([k])=>sel[r.host][k])).length;
+    box.innerHTML=
+      '<header><h2>Refresh from folder</h2><span class="sp"></span>'+
+      '<span style="font-size:12.5px;color:var(--ink-faint)">Devices already here keep their colours, size, zone and links</span></header>'+
+      '<div style="overflow:auto;flex:1;min-height:0"><table class="fr-tbl"><thead><tr>'+
+        '<th>Device</th>'+cols.map(([k,l])=>'<th class="c">'+l+'<br><label style="font-weight:400;color:var(--ink-faint)">'+
+          '<input type="checkbox" data-col="'+k+'"> all</label></th>').join('')+
+        '<th></th></tr></thead><tbody>'+
+      rows.map(r=>'<tr>'+
+        '<td class="nm">'+esc(r.host)+'</td>'+
+        cols.map(([k])=>'<td class="c">'+(r.files[k]
+          ? '<input type="checkbox" data-h="'+esc(r.host)+'" data-k="'+k+'"'+(sel[r.host][k]?' checked':'')+'>'
+          : '<span class="none">\u2014</span>')+'</td>').join('')+
+        '<td class="'+(r.known?'':'new')+'">'+(r.known?'in the project':'new device')+'</td>'+
+      '</tr>').join('')+
+      '</tbody></table></div>'+
+      '<footer><span class="fr-sum">'+n+' file'+(n===1?'':'s')+' selected'+
+        (newOnes?' \u00b7 '+newOnes+' device'+(newOnes===1?'':'s')+' would be added':'')+'</span>'+
+      '<button class="btn" id="fr-none">Select none</button>'+
+      '<button class="btn" id="fr-cancel">Cancel</button>'+
+      '<button class="btn btn-go" id="fr-go">Refresh</button></footer>';
+
+    box.querySelectorAll('[data-h]').forEach(cb=>cb.onchange=()=>{
+      sel[cb.dataset.h][cb.dataset.k]=cb.checked; paint();
+    });
+    box.querySelectorAll('[data-col]').forEach(cb=>cb.onchange=()=>{
+      const k=cb.dataset.col;
+      for(const r of rows) if(r.files[k]) sel[r.host][k]=cb.checked;
+      paint();
+    });
+    document.getElementById('fr-none').onclick=()=>{
+      for(const r of rows) for(const [k] of cols) sel[r.host][k]=false; paint();
+    };
+    document.getElementById('fr-cancel').onclick=close;
+    document.getElementById('fr-go').onclick=()=>{ close(); applyFolderRefresh(rows, sel); };
+  };
+  const close=()=>{ back.remove(); box.remove(); };
+  back.onclick=close;
+  document.body.appendChild(back); document.body.appendChild(box);
+  paint();
+}
+
+async function applyFolderRefresh(rows, sel){
+  if(typeof pushUndo==='function') pushUndo();
+  let updated=0, added=0, tables=0, nbrs=0, bgps=0, failed=[];
+
+  for(const r of rows){
+    const want=sel[r.host]||{};
+    const pick=(k)=>want[k] && r.files[k] ? r.files[k] : null;
+    let dev=STATE.devices.find(d=>d.name.toLowerCase()===r.host.toLowerCase());
+
+    try{
+      const cf=pick('config');
+      if(cf){
+        const text=await cf.get();
+        if(dev){ reparseInto(dev, text); dev.originalText=text; updated++; }   // keeps every setting
+        else{
+          addText(text, cf.name);
+          dev=STATE.devices[STATE.devices.length-1];
+          added++;
+        }
+      }
+      if(!dev) continue;                       // routes or neighbours with no device to attach to
+
+      const rt=pick('routes');
+      if(rt){
+        const got=importRouteTable(await rt.get());
+        if(got.length){ dev.manualRoutes=got; dev.tableAuthoritative=true; tables++; }
+      }
+      const nb=pick('cdp');
+      if(nb){
+        const got=parseNeighbors(await nb.get());
+        if(got.length){ dev.neighbors=got; nbrs++; }
+      }
+      const bg=pick('bgp');
+      if(bg){
+        const got=parseBgpTable(await bg.get());
+        if(got.length){ dev.bgpTable=got; bgps++; }
+      }
+    }catch(e){ failed.push(r.host+': '+e.message); }
+  }
+
+  rebuild(); autosave();
+  const note=document.getElementById('autosave-note');
+  const bits=[];
+  if(updated) bits.push(updated+' refreshed');
+  if(added)   bits.push(added+' added');
+  if(tables)  bits.push(tables+' routing table'+(tables===1?'':'s'));
+  if(nbrs)    bits.push(nbrs+' neighbour set'+(nbrs===1?'':'s'));
+  if(bgps)    bits.push(bgps+' BGP table'+(bgps===1?'':'s'));
+  if(note) note.textContent = bits.length ? bits.join(' \u00b7 ') : 'Nothing was selected';
+  if(failed.length) alert('Some files could not be read:\n\n'+failed.join('\n'));
+}
+
+
+/* ============================================================
+   Policy — the rules that decide whether traffic is allowed
+
+   Two views on the same thing. The whole rule base for a device, so you can
+   read a firewall the way you would read it on the box; and, in link detail,
+   only the rules that could act on traffic across that link, which is the
+   question you actually have when looking at one cable.
+   ============================================================ */
+const actionTag=(a)=>{
+  const bad=/deny|drop|reset/i.test(a||'');
+  return '<span class="tag '+(bad?'deny':'allow')+'">'+esc(a||'allow')+'</span>';
+};
+const listOf=(v)=>{
+  const arr=Array.isArray(v)?v:(v?[v]:[]);
+  return arr.length?arr.map(esc).join(', '):'any';
+};
+
+/* Resolve an address object to what it actually covers, so a rule reads
+   without having to look the object up separately. */
+function addrHint(dev, name){
+  const o=(dev.addrObjects||{})[name];
+  return o ? ' <span class="muted">('+esc(o)+')</span>' : '';
+}
+
+function panRulesHtml(d, opts){
+  const rules=(d.rules||[]).slice().sort((a,b)=>(a.order||0)-(b.order||0));
+  if(!rules.length) return '<p class="note">No security rules were found in this config.</p>';
+  const only=opts && opts.zones;      // limit to rules touching these zones
+  const rows=rules.filter(r=>{
+    if(!only) return true;
+    const hit=(l)=>l.some(z=>z==='any'||only.has(z));
+    return hit(r.from)||hit(r.to);
+  });
+  if(!rows.length) return '<p class="note">No rule mentions the zones on this link.</p>';
+  return '<table class="fib pol"><tr><th>#</th><th>Rule</th><th>From</th><th>To</th>'+
+    '<th>Source</th><th>Destination</th><th>Action</th></tr>'+
+    rows.map(r=>'<tr'+(/deny|drop|reset/i.test(r.action)?' class="rdeny"':'')+'>'+
+      '<td class="muted">'+((r.order!=null?r.order:'')+'')+'</td>'+
+      '<td class="nm">'+esc(r.name)+'</td>'+
+      '<td>'+listOf(r.from)+'</td><td>'+listOf(r.to)+'</td>'+
+      '<td>'+(Array.isArray(r.source)?r.source.map(x=>esc(x)+addrHint(d,x)).join(', '):listOf(r.source))+'</td>'+
+      '<td>'+(Array.isArray(r.destination)?r.destination.map(x=>esc(x)+addrHint(d,x)).join(', '):listOf(r.destination))+'</td>'+
+      '<td>'+actionTag(r.action)+'</td></tr>').join('')+
+    '</table>'+
+    (only?'':'<p class="note">Rules are matched top to bottom; the first match wins. '+
+      'Anything reaching the end is denied by the interzone default.</p>');
+}
+
+function aclHtml(d, opts){
+  const names=Object.keys(d.acls||{});
+  if(!names.length) return '';
+  // which lists guard which interface, so a list is shown with its bindings
+  const bind={};
+  for(const i of d.interfaces||[]){
+    if(!i.acl) continue;
+    for(const dir of ['in','out']){
+      const nm=i.acl[dir];
+      if(!nm) continue;
+      (bind[nm]=bind[nm]||[]).push(i.name+' '+dir);
+    }
+  }
+  const only=opts && opts.ifaces;   // limit to lists bound to these interfaces
+  const show=names.filter(n=>{
+    if(!only) return true;
+    return (bind[n]||[]).some(b=>only.has(b.split(' ')[0]));
+  });
+  if(!show.length) return only ? '<p class="note">No access list is applied to the interfaces on this link.</p>' : '';
+  return show.map(n=>{
+    const l=d.acls[n];
+    return '<h3 class="sub">'+esc(n)+
+      (bind[n]?' <span class="muted">on '+esc(bind[n].join(', '))+'</span>':' <span class="muted">not applied to any interface</span>')+'</h3>'+
+      '<table class="fib pol"><tr><th>#</th><th>Action</th><th>Protocol</th><th>Source</th><th>Destination</th><th>Ports</th></tr>'+
+      l.entries.map((e,i)=>{
+        const spec=(x)=>!x?'any':x.any?'any':(x.len===32?int2ip(x.net):cidr(x.net,x.len));
+        const ports=[e.sPorts?('src '+e.sPorts.op+' '+e.sPorts.vals.join('-')):'',
+                     e.dPorts?('dst '+e.dPorts.op+' '+e.dPorts.vals.join('-')):''].filter(Boolean).join(', ');
+        return '<tr'+(e.action==='deny'?' class="rdeny"':'')+'>'+
+          '<td class="muted">'+(i+1)+'</td><td>'+actionTag(e.action)+'</td>'+
+          '<td>'+esc(e.proto)+'</td><td>'+esc(spec(e.src))+'</td><td>'+esc(spec(e.dst))+'</td>'+
+          '<td>'+esc(ports||'')+'</td></tr>';
+      }).join('')+
+      '<tr class="rdeny"><td class="muted">\u2014</td><td>'+actionTag('deny')+
+      '</td><td colspan="4" class="muted">implicit deny at the end of every list</td></tr>'+
+      '</table>';
+  }).join('');
+}
+
+/* Everything that decides traffic on this device. */
+function policyTabHtml(d){
+  const bits=[];
+  if(isFirewall(d)){
+    bits.push('<h2 class="sec">Security rules</h2>'+panRulesHtml(d));
+    if(d.noPolicy) bits.push('<p class="note">Policy is being ignored for this device in traces.</p>');
+  }
+  const acl=aclHtml(d);
+  if(acl) bits.push('<h2 class="sec">Access lists</h2>'+acl);
+  if((d.nat||[]).length){
+    bits.push('<h2 class="sec">NAT</h2><table class="fib pol">'+
+      '<tr><th>Kind</th><th>Inside</th><th>Outside</th><th>Via</th></tr>'+
+      d.nat.map(n=>'<tr><td>'+esc(n.kind)+'</td>'+
+        '<td>'+(n.inside!=null?int2ip(n.inside):esc(n.list||''))+'</td>'+
+        '<td>'+(n.outside!=null?int2ip(n.outside):'')+'</td>'+
+        '<td>'+esc(n.via||'')+(n.overload?' <span class="muted">overload</span>':'')+'</td></tr>').join('')+
+      '</table>');
+  }
+  if(!bits.length) return '<p class="note">This device has no security rules, access lists or NAT in its config.</p>';
+  return bits.join('');
+}
+
+/* Only what could act on traffic across one link. */
+function linkPolicyHtml(a, b, ifacesByDev){
+  const out=[];
+  for(const d of [a,b]){
+    const mine=ifacesByDev.get(d) || new Set();
+    const zones=new Set();
+    for(const i of d.interfaces||[]) if(mine.has(i.name) && i.zone) zones.add(i.zone);
+    const parts=[];
+    if(isFirewall(d) && (d.rules||[]).length){
+      parts.push('<p class="note">Zones on this link: '+(zones.size?[...zones].map(esc).join(', '):'none')+'</p>'+
+        panRulesHtml(d, {zones}));
+    }
+    const acl=aclHtml(d, {ifaces:mine});
+    if(acl) parts.push(acl);
+    if(parts.length) out.push('<h2 class="sec">'+esc(d.name)+' \u2014 what it enforces here</h2>'+parts.join(''));
+  }
+  return out.join('');
+}
+
 /* ---------- picking several devices at once ---------- */
 STATE.treePick = STATE.treePick || new Set();
 
@@ -4747,9 +5087,6 @@ function graphStyle(){
         'border-width':1.5,'border-color':'#5c7288','border-style':'dashed',
         'label':'data(label)','color':'#9db0c6','font-family':'IBM Plex Mono, monospace','font-size':11,
         'text-valign':'center','text-halign':'center'}},
-      {selector:'node.pkt', style:{
-        'width':11,'height':11,'shape':'ellipse','background-color':'#ffc766',
-        'border-width':3,'border-color':'rgba(232,161,58,.28)','z-index':40,'events':'no','label':''}},
       {selector:'node[kind="group"]', style:{
         'shape':'round-rectangle','background-color':'data(bg)','background-opacity':TH('zoneGrid')?0.55:1,
         'border-width':TH('boxBorderW'),'border-color':'data(bd)','border-style':'solid','padding':'data(pad)',
@@ -5717,27 +6054,6 @@ function buildPath(res){
   return {steps,seq};
 }
 
-function launchPacket(cy, ids){
-  const pts=ids.map(id=>{ const n=cy.getElementById(id); return n.length?{x:n.position().x, y:n.position().y}:null; })
-               .filter(Boolean);
-  if(pts.length<2) return;
-  cy.add({group:'nodes', data:{id:'__pkt'}, position:{x:pts[0].x,y:pts[0].y},
-          classes:'tmp pkt', grabbable:false, selectable:false});
-  let i=0;
-  const step=()=>{
-    const pkt=cy.getElementById('__pkt');
-    if(!pkt.length) return;
-    i++;
-    if(i>=pts.length){
-      i=0; pkt.position({x:pts[0].x,y:pts[0].y}); pkt.style('opacity',0);
-      STATE.timers.push(setTimeout(()=>{ const p=cy.getElementById('__pkt'); if(p.length){ p.style('opacity',1); step(); } }, 550));
-      return;
-    }
-    pkt.animate({position:{x:pts[i].x,y:pts[i].y}}, {duration:480, easing:'ease-in-out-cubic', complete:step});
-  };
-  step();
-}
-
 function paintTrace(res){
   stopFx();
   const cy=STATE.cy; if(!cy || !res || !res.hops) return;
@@ -5797,7 +6113,8 @@ function paintTrace(res){
   };
   STATE.raf=requestAnimationFrame(tick);
 
-  if(seq.length>1) STATE.timers.push(setTimeout(()=>launchPacket(cy, seq), steps.length*150));
+  /* The travelling dot is gone: the flowing dashes above already show both the
+     path and its direction, and a second moving thing competed with them. */
 }
 
 /* ============================================================
@@ -6957,6 +7274,24 @@ function showLink(a,b){
         '<td>'+int2ip(x.nextHop)+'</td><td><span class="tag '+x.type+'">'+x.type+'</span></td></tr>').join('')+
       '</table>';
   }
+  /* What either end would do to traffic crossing here. */
+  try{
+    const byDev=new Map([[a,new Set()],[b,new Set()]]);
+    for(const k in model.subnets){
+      const sn=model.subnets[k];
+      if(!sn.members.some(x=>x.dev===a) || !sn.members.some(x=>x.dev===b)) continue;
+      for(const x of sn.members) if(byDev.has(x.dev)) byDev.get(x.dev).add(x.iface.name);
+    }
+    for(const kk in (model.l2links||{})){
+      const L=model.l2links[kk];
+      if(byDev.has(L.a.dev) && byDev.has(L.b.dev)){
+        byDev.get(L.a.dev).add(L.a.port); byDev.get(L.b.dev).add(L.b.port);
+      }
+    }
+    const pol=linkPolicyHtml(a,b,byDev);
+    if(pol) html+=pol;
+  }catch(e){}
+
   html+='<div id="warnbox"></div>';
   r.innerHTML=html;
   renderWarnings();
@@ -7503,6 +7838,7 @@ function showDevice(d, opts){
       '<button class="btn" id="mr-import">Import table</button>'+
       '<button class="btn" id="mr-file-btn">Import from file</button>'+
       (d.manualRoutes.length?'<button class="btn danger" id="mr-clear">Delete table</button>':'')+
+      (d.manualRoutes.length?'<button class="btn" id="mr-clear-vrf">Delete one VRF\u2026</button>':'')+
     '</div>'+
     '<input type="file" id="mr-file" class="hidden" accept=".txt,.log,.cfg,.out,.csv">'+
     '<label class="auth"><input type="checkbox" id="mr-auth"'+(d.tableAuthoritative?' checked':'')+'>'+
@@ -7510,11 +7846,16 @@ function showDevice(d, opts){
 
   const subTabs=[['interfaces','Interfaces'],['routing','Routing table'],['l2','Layer 2']];
   if(d.bgp) subTabs.push(['bgp','BGP']);
+  // only where there is something to show
+  const hasPolicy = (isFirewall(d) && (d.rules||[]).length) ||
+                    Object.keys(d.acls||{}).length || (d.nat||[]).length;
+  if(hasPolicy) subTabs.push(['policy','Policy']);
   subTabs.push(['wan','WAN']);
   if(!subTabs.some(t=>t[0]===STATE.devSubTab)) STATE.devSubTab='interfaces';
   const subTabHtml = STATE.devSubTab==='routing' ? routingTabHtml
                     : STATE.devSubTab==='l2'      ? l2Html
                     : STATE.devSubTab==='bgp'      ? bgpHtml
+                    : STATE.devSubTab==='policy'   ? policyTabHtml(d)
                     : STATE.devSubTab==='wan'      ? wanHtml
                     :                                ifTabHtml;
 
@@ -7701,7 +8042,9 @@ function showDevice(d, opts){
     rebuild(); showDevice(d,{tab:'config'});
   };
 
-  const refresh=()=>{ rebuild(); showDevice(d); };
+  /* Persist as well as redraw. Without the save, deleting an imported table or
+     its neighbours looked like it worked and then came back on the next start. */
+  const refresh=()=>{ rebuild(); showDevice(d); autosave(); };
   r.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>{
     d.manualRoutes.splice(parseInt(b.dataset.del,10),1); refresh();
   });
@@ -7728,9 +8071,37 @@ function showDevice(d, opts){
     d.tableAuthoritative=true;
     refresh();
   };
+  /* An imported table is often only wrong in one VRF — re-pasting the lot to
+     fix a single table is a poor trade. */
+  const clrV=document.getElementById('mr-clear-vrf');
+  if(clrV) clrV.onclick=()=>{
+    const counts={};
+    for(const r of d.manualRoutes) counts[r.vrf||'default']=(counts[r.vrf||'default']||0)+1;
+    const names=Object.keys(counts).sort();
+    if(!names.length) return;
+    if(names.length===1){
+      if(confirm('The only VRF in this table is '+names[0]+' ('+counts[names[0]]+' routes). Delete the whole table?')){
+        if(typeof pushUndo==='function') pushUndo();
+        d.manualRoutes=[]; d.tableAuthoritative=false; refresh();
+      }
+      return;
+    }
+    const pick=prompt('Which VRF should be removed from '+d.name+'\u2019s imported table?\n\n'+
+      names.map(n=>'  '+n+'  ('+counts[n]+' route'+(counts[n]===1?'':'s')+')').join('\n'));
+    if(pick===null) return;
+    const want=pick.trim();
+    const hit=names.find(n=>n.toLowerCase()===want.toLowerCase());
+    if(!hit){ alert('No VRF called \u201c'+want+'\u201d in this table.'); return; }
+    if(typeof pushUndo==='function') pushUndo();
+    d.manualRoutes=d.manualRoutes.filter(r=>(r.vrf||'default')!==hit);
+    if(!d.manualRoutes.length) d.tableAuthoritative=false;
+    refresh();
+  };
+
   const clr=document.getElementById('mr-clear');
   if(clr) clr.onclick=()=>{
     if(!confirm('Delete the routing table you added for '+d.name+'? Inferred routes will be used again.')) return;
+    if(typeof pushUndo==='function') pushUndo();
     d.manualRoutes=[]; d.tableAuthoritative=false; refresh();
   };
   const mrFileBtn=document.getElementById('mr-file-btn');
@@ -7776,6 +8147,7 @@ function showDevice(d, opts){
   const nbClr=document.getElementById('nb-clear');
   if(nbClr) nbClr.onclick=()=>{
     if(!confirm('Delete the layer 2 neighbors for '+d.name+'? Its L2 links will disappear from the map.')) return;
+    if(typeof pushUndo==='function') pushUndo();
     d.neighbors=[]; refresh();
   };
 
@@ -9137,6 +9509,7 @@ const LAB_DEVICES = [
 /* Two datacentres, each with an Internet-Out, a DMZ and an Internal zone, every
    device in a redundant pair, and everything crossing the firewall pair. The
    two sites meet over a DCI between their internal cores. */
+document.getElementById('refresh-folder').onclick=()=>refreshFromFolder();
 document.getElementById('load-sample').onclick=()=>{
   /* The example is not your file. Detaching the filename stops it being
      written over the project remembered for the next start. */
