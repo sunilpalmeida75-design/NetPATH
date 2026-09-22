@@ -6194,23 +6194,57 @@ function parseNeighborsDetail(lines){
 }
 function parseNeighborsTable(lines){
   const out=[];
+  /* A long Device ID does not fit the column and CDP wraps it onto its own
+     line, leaving the ports on the next one:
+
+       us-axd-D1-SC-9300-D.xxx.net
+                        Gig 2/0/7   152   S I  C9300L-24  Gig 2/0/5
+
+     so a name with no ports is held over and joined to the line that follows. */
+  let pending=null;
+  const isPort=(tk,i)=>/^[A-Za-z]{2,8}\d+(\/[\d.]+)*$/.test(tk[i]) ||
+    (/^[A-Za-z]{2,8}$/.test(tk[i]) && i+1<tk.length && /^\d+(\/[\d.]+)*$/.test(tk[i+1]));
+
   for(const raw of lines){
     const t=raw.trim();
     if(!t) continue;
-    if(/^(Device[- ]ID|Capability codes?|Total (entries|cdp)|Device ID\s+Local|--|\s*$)/i.test(t)) continue;
-    if(/^[A-Z]\s+-\s+/.test(t)) continue;                       // capability legend
+    // collector headers, banners and the echoed command
+    if(/^(Switch|Username|Collected|COMMAND|Host|Device)\s*:/i.test(t)) continue;
+    if(/^[=\-]{3,}$/.test(t)) continue;
+    if(/^show\s+(cdp|lldp)\b/i.test(t)) continue;
+    if(/^(Capability [Cc]odes?|Total (entries|cdp)|Total number)/i.test(t)) continue;
+    if(/^Device[- ]?ID\s+Local/i.test(t) || /^Device ID$/i.test(t)) continue;
+    if(/^[A-Za-z]\s+-\s+\w/.test(t)) continue;                 // capability legend
+    if(/^Local Int[er]*f/i.test(t)) continue;
+
     const tk=t.split(/\s+/);
-    if(tk.length<3) continue;
-    // Collect tokens that look like interface names, joined or split ("Gi 1/0/1")
     const ports=[];
-    for(let i=1;i<tk.length;i++){
-      if(/^[A-Za-z]{2,8}\d+(\/[\d.]+)*$/.test(tk[i])){ ports.push(tk[i]); }
-      else if(/^[A-Za-z]{2,8}$/.test(tk[i]) && i+1<tk.length && /^\d+(\/[\d.]+)*$/.test(tk[i+1])){
-        ports.push(tk[i]+tk[i+1]); i++;
+    for(let i=0;i<tk.length;i++){
+      if(isPort(tk,i)){
+        ports.push(/^[A-Za-z]{2,8}$/.test(tk[i]) ? tk[i]+tk[i+1] : tk[i]);
+        if(/^[A-Za-z]{2,8}$/.test(tk[i])) i++;
       }
     }
-    if(ports.length<2) continue;
-    out.push({localPort:normPort(ports[0]), peerName:baseName(tk[0]), peerPort:normPort(ports[ports.length-1])});
+
+    /* A line that is only a hostname: hold it for the ports that follow. */
+    if(!ports.length){
+      if(tk.length===1 && /[A-Za-z]/.test(tk[0]) && !/^\d/.test(tk[0])) pending=tk[0];
+      continue;
+    }
+
+    let peer, portList;
+    if(pending){
+      peer=pending; portList=ports; pending=null;      // wrapped: all ports are on this line
+    } else {
+      if(tk.length<3) continue;
+      peer=tk[0];
+      // the first token is the name, so drop a port that is actually the name
+      portList=ports.filter(pp=>pp!==tk[0]);
+      if(portList.length<2) continue;
+    }
+    if(portList.length<2) continue;
+    out.push({localPort:normPort(portList[0]), peerName:baseName(peer),
+              peerPort:normPort(portList[portList.length-1])});
   }
   return out;
 }
