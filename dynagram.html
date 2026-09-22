@@ -8420,6 +8420,34 @@ function addText(text, name){
    SW01.cfg, SW01.cdp and SW01.sec into three separate devices, and left the
    real one looking incomplete because its routes and neighbours had gone
    somewhere else. */
+/* Find the device a capture belongs to.
+
+   The filename is the first guess, but a collector often names files by the
+   management address or with the DNS domain attached, and neither matches the
+   hostname in the config. So fall back to the bare name, then to the address
+   in the capture's own header — "Switch: 10.15.125.1" — matched against the
+   devices' interfaces. Without this a perfectly good CDP file is silently
+   dropped and the device looks like it has no neighbours. */
+function deviceForCapture(host, text){
+  const devs=STATE.devices||[];
+  const bare=(n)=>String(n||'').split('.')[0].toLowerCase();
+  let d=devs.find(x=>x.name.toLowerCase()===String(host).toLowerCase());
+  if(d) return d;
+  d=devs.find(x=>bare(x.name)===bare(host));
+  if(d) return d;
+  // the address the collector logged in to
+  const m=String(text||'').match(/^\s*(?:Switch|Host|Device|Hostname)\s*:\s*(\d+\.\d+\.\d+\.\d+)/mi);
+  if(m){
+    const ip=ip2int(m[1]);
+    if(ip!==null) d=devs.find(x=>x.interfaces.some(i=>i.addrs.some(a=>a.ip===ip)));
+    if(d) return d;
+  }
+  // a hostname printed in the capture header
+  const hm=String(text||'').match(/^\s*(?:Switch|Host|Device|Hostname)\s*:\s*([A-Za-z][\w.-]*)/mi);
+  if(hm) d=devs.find(x=>bare(x.name)===bare(hm[1]));
+  return d||null;
+}
+
 async function ingestFiles(list){
   const files=[...list];
   const read=(f)=>new Promise(res=>{ const rd=new FileReader(); rd.onload=()=>res(String(rd.result||'')); rd.readAsText(f); });
@@ -8439,7 +8467,7 @@ async function ingestFiles(list){
     const host=c ? c.host : String(f.name).replace(/\.[^.]+$/,'');
     const kind=c ? c.kind : 'config';
 
-    let dev=STATE.devices.find(d=>d.name.toLowerCase()===host.toLowerCase());
+    let dev=deviceForCapture(host, text);
     if(kind==='config'){
       if(dev){ reparseInto(dev, text); dev.originalText=text; }
       else { addText(text, f.name); made++; }
@@ -8475,7 +8503,14 @@ async function ingestFiles(list){
     if(orphan.length) bits.push(orphan.length+' left over \u2014 no device of that name yet');
     note.textContent=bits.join(' \u00b7 ');
   }
-  if(orphan.length) console.warn('No device for:', orphan.join(', '));
+  if(orphan.length){
+    const names=(STATE.devices||[]).map(d=>d.name).slice(0,12).join('\n  ');
+    alert('These files did not match any device, so nothing was imported from them:\n\n  '+
+      orphan.join('\n  ')+
+      '\n\nA capture is matched to a device by the name before its extension, or by the '+
+      'address in its header. Devices currently loaded:\n\n  '+names+
+      ((STATE.devices||[]).length>12?'\n  \u2026':''));
+  }
 }
 
 const drop=document.getElementById('drop'), fileIn=document.getElementById('file');
