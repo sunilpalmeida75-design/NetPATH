@@ -3689,18 +3689,24 @@ function allVrfNames(){
   }
   return [...set].sort((a,b)=> a==='default'?-1 : b==='default'?1 : a.localeCompare(b));
 }
-/* "vsys2 (DR)" reads far better than "vsys2" when a box has several. */
-function vsysLabel(name){
-  for(const d of (STATE.devices||[])){
-    const dn=d.vsysNames && d.vsysNames[name];
-    if(dn) return name+' \u2014 '+dn;
-  }
-  return name;
-}
+/* A vsys only means something on the firewall it belongs to: vsys2 is "DR" on
+   one box and something else entirely on the next. So the filter works on
+   device-and-vsys pairs, keyed as "device\u0000vsys", and shows the display
+   name from the config where the box has one. */
+const VSEP='\u0000';
+function vsysKey(devName, vsys){ return devName+VSEP+vsys; }
 function allVsysNames(){
   const set=new Set();
-  for(const d of STATE.devices) for(const i of d.interfaces) if(i.vsys) set.add(i.vsys);
+  for(const d of STATE.devices) for(const i of d.interfaces) if(i.vsys) set.add(vsysKey(d.name, i.vsys));
   return [...set].sort();
+}
+/* "FRA-FW-01 · vsys2 — DR" */
+function vsysLabelOf(key){
+  const [devName, vs]=String(key).split(VSEP);
+  if(!vs) return String(key);
+  const d=(STATE.devices||[]).find(x=>x.name===devName);
+  const dn=d && d.vsysNames && d.vsysNames[vs];
+  return devName+' \u00b7 '+vs+(dn?' \u2014 '+dn:'');
 }
 /* Does this device have anything in the selected VRFs/VSYS? Either facet with
    nothing selected imposes no constraint; both together combine with AND. */
@@ -3776,7 +3782,11 @@ function ifaceInScope(i){
       : [effVrf(i)];
     if(mine.length && mine.every(v=>v && s.vo.has(v))) return false;
   }
-  if(s.so.size && vsys && s.so.has(vsys)) return false;
+  if(s.so.size && vsys){
+    // a key names the device too, so removing vsys2 on one firewall leaves
+    // vsys2 on another alone; bare names are honoured for older projects
+    if(s.so.has(vsysKey(i.dev?i.dev.name:'', vsys)) || s.so.has(vsys)) return false;
+  }
   /* VSYS only exists on firewalls, so a VSYS include must not disqualify
      routers and switches that have no vsys at all. */
   return true;
@@ -3858,7 +3868,7 @@ function renderVrfFilter(){
   const chip=(n,kind)=>{
     const off=(kind==='vrf'?s.vo:s.so).has(n);
     if(off) return '';                       // removed ones live in the right column
-    const label = kind==='vsys' ? vsysLabel(n) : n;
+    const label = kind==='vsys' ? vsysLabelOf(n) : n;
     return '<span class="sc inc" data-'+kind+'="'+esc(n)+'" '+
       'title="Click to remove from the diagram">'+
       '<span class="sig">\u2713</span><span class="nm">'+esc(label)+'</span></span>';
@@ -3907,7 +3917,7 @@ function renderVrfFilter(){
             '<div class="scope-list">'+applied.map(x=>
               '<span class="sc exc" data-clear="'+esc(x.kind+'|'+x.n)+'" title="Click to put it back">'+
               '<span class="sig">\u2212</span>'+
-              '<span class="nm">'+esc(x.n)+'</span>\u21a9</span>').join('')+'</div>'
+              '<span class="nm">'+esc(x.kind==='vsys'?vsysLabelOf(x.n):x.n)+'</span>\u21a9</span>').join('')+'</div>'
           : '<div class="scope-empty">Nothing removed \u2014 the whole project is shown.</div>')+
         '<div class="scope-wild">'+
           '<button class="btn btn-go" id="vrf-view" style="flex:1">View filtered</button>'+
@@ -4016,7 +4026,23 @@ function recomputeScope(){
     }
   };
   doOne(allVrfNames(),  q.vrfIn,  q.vrfEx,  STATE.vrfOff);
-  doOne(allVsysNames(), q.vsysIn, q.vsysEx, STATE.vsysOff);
+  /* A vsys pattern may name the device, the vsys or its display name, so a
+     key is matched on any of those. */
+  const vsysMatch=(pats,key)=>{
+    const [dn,vs]=String(key).split(VSEP);
+    const d=STATE.devices.find(x=>x.name===dn);
+    const dispName=(d && d.vsysNames && d.vsysNames[vs])||'';
+    return pats.some(p=>globMatch(p,key)||globMatch(p,vs)||globMatch(p,dn)||
+                        (dispName&&globMatch(p,dispName))||globMatch(p,vsysLabelOf(key)));
+  };
+  (function(){
+    const off=STATE.vsysOff; off.clear();
+    for(const key of allVsysNames()){
+      const included = !q.vsysIn.length || vsysMatch(q.vsysIn, key);
+      const excluded = q.vsysEx.length && vsysMatch(q.vsysEx, key);
+      if(!included || excluded) off.add(key);
+    }
+  })();
 }
 
 /* Tokens: key:value or -key:value. vrf/vsys drive the existing scope sets;
@@ -4179,12 +4205,21 @@ function openPicker(){
   // work on a copy so Cancel really cancels
   let onVrf=new Set(vrfs.filter(n=>!STATE.vrfOff.has(n)));
   let onVsys=new Set(vsyses.filter(n=>!STATE.vsysOff.has(n)));
-  const usage=(kind,n)=>STATE.devices.filter(d=>d.interfaces.some(i=>
-    kind==='vrf' ? effVrf(i)===n : i.vsys===n)).length;
+  const usage=(kind,n)=>{
+    if(kind==='vrf') return STATE.devices.filter(d=>d.interfaces.some(i=>effVrf(i)===n)).length;
+    const [dn,vs]=String(n).split(VSEP);
+    const d=STATE.devices.find(x=>x.name===dn);
+    return d ? d.interfaces.filter(i=>i.vsys===vs).length : 0;
+  };
+  const showName=(kind,n)=>kind==='vsys' ? vsysLabelOf(n) : n;
 
   const col=(kind,names,onSet)=>{
     const q=(document.getElementById('pk-f-'+kind)||{}).value||'';
-    const vis=names.filter(n=>!q.trim() || (q.indexOf('*')>=0 ? globMatch(q,n) : n.toLowerCase().indexOf(q.toLowerCase())>=0));
+    const vis=names.filter(n=>{
+      const hay=(kind==='vsys'? vsysLabelOf(n) : n);
+      return !q.trim() || (q.indexOf('*')>=0 ? (globMatch(q,n)||globMatch(q,hay))
+                                             : hay.toLowerCase().indexOf(q.toLowerCase())>=0);
+    });
     return '<h3>'+(kind==='vrf'?'VRF':'VSYS')+' <span>'+onSet.size+' of '+names.length+' shown</span></h3>'+
       '<div class="tools">'+
         '<input id="pk-f-'+kind+'" placeholder="filter or pattern, e.g. *_DR_INT" value="'+esc(q)+'">'+
@@ -4196,7 +4231,8 @@ function openPicker(){
       '</div>'+
       '<div class="list">'+(vis.length?vis.map(n=>
         '<div class="row'+(onSet.has(n)?' on':'')+'" data-pkn="'+esc(kind+'|'+n)+'">'+
-        '<span class="box">\u2713</span><span>'+esc(n)+'</span><span class="n">'+usage(kind,n)+' dev</span></div>').join('')
+        '<span class="box">\u2713</span><span>'+esc(showName(kind,n))+'</span>'+
+        '<span class="n">'+usage(kind,n)+(kind==='vsys'?' if':' dev')+'</span></div>').join('')
         : '<div class="row" style="opacity:.6">nothing matches</div>')+'</div>';
   };
   const paint=()=>{
