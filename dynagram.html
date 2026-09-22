@@ -3693,7 +3693,10 @@ function allVrfNames(){
    one box and something else entirely on the next. So the filter works on
    device-and-vsys pairs, keyed as "device\u0000vsys", and shows the display
    name from the config where the box has one. */
-const VSEP='\u0000';
+/* Printable on purpose: this key is written into a data- attribute, and a NUL
+   or other control character does not survive that round trip — which is why
+   clicking a single vsys did nothing while the column buttons still worked. */
+const VSEP='\u2502';
 function vsysKey(devName, vsys){ return devName+VSEP+vsys; }
 function allVsysNames(){
   const set=new Set();
@@ -3915,7 +3918,7 @@ function renderVrfFilter(){
         (applied.length
           ? '<div class="scope-sum"><b>'+inScope+'</b> of '+STATE.devices.length+' devices still shown</div>'+
             '<div class="scope-list">'+applied.map(x=>
-              '<span class="sc exc" data-clear="'+esc(x.kind+'|'+x.n)+'" title="Click to put it back">'+
+              '<span class="sc exc" data-ck="'+esc(x.kind)+'" data-cn="'+esc(x.n)+'" title="Click to put it back">'+
               '<span class="sig">\u2212</span>'+
               '<span class="nm">'+esc(x.kind==='vsys'?vsysLabelOf(x.n):x.n)+'</span>\u21a9</span>').join('')+'</div>'
           : '<div class="scope-empty">Nothing removed \u2014 the whole project is shown.</div>')+
@@ -3939,9 +3942,8 @@ function renderVrfFilter(){
   const toggle=(n,set)=>{ set.has(n) ? set.delete(n) : set.add(n); };
   box.querySelectorAll('[data-vrf]').forEach(el=>el.onclick=()=>{ s.vo.add(el.dataset.vrf); refresh(); });
   box.querySelectorAll('[data-vsys]').forEach(el=>el.onclick=()=>{ s.so.add(el.dataset.vsys); refresh(); });
-  box.querySelectorAll('[data-clear]').forEach(el=>el.onclick=()=>{
-    const [kind,name]=el.dataset.clear.split('|');
-    (kind==='vrf'?s.vo:s.so).delete(name); refresh();
+  box.querySelectorAll('[data-cn]').forEach(el=>el.onclick=()=>{
+    (el.dataset.ck==='vrf'?s.vo:s.so).delete(el.dataset.cn); refresh();
   });
   /* Narrow the visible chips as you type. Plain text matches anywhere in the
      name; a * makes it a wildcard. Purely visual — it changes nothing about
@@ -4230,7 +4232,7 @@ function openPicker(){
         '<button class="btn tiny danger" data-pk="del|'+kind+'">Untick matching</button>'+
       '</div>'+
       '<div class="list">'+(vis.length?vis.map(n=>
-        '<div class="row'+(onSet.has(n)?' on':'')+'" data-pkn="'+esc(kind+'|'+n)+'">'+
+        '<div class="row'+(onSet.has(n)?' on':'')+'" data-pk-kind="'+esc(kind)+'" data-pk-name="'+esc(n)+'">'+
         '<span class="box">\u2713</span><span>'+esc(showName(kind,n))+'</span>'+
         '<span class="n">'+usage(kind,n)+(kind==='vsys'?' if':' dev')+'</span></div>').join('')
         : '<div class="row" style="opacity:.6">nothing matches</div>')+'</div>';
@@ -4244,8 +4246,8 @@ function openPicker(){
       '<footer><span class="sum">'+onVrf.size+' VRF and '+onVsys.size+' VSYS ticked</span>'+
       '<button class="btn" id="pk-cancel">Cancel</button>'+
       '<button class="btn btn-go" id="pk-apply">Apply</button></footer>';
-    box.querySelectorAll('[data-pkn]').forEach(el=>el.onclick=()=>{
-      const [kind,n]=el.dataset.pkn.split('|');
+    box.querySelectorAll('[data-pk-name]').forEach(el=>el.onclick=()=>{
+      const kind=el.dataset.pkKind, n=el.dataset.pkName;
       const set = kind==='vrf'?onVrf:onVsys;
       set.has(n)?set.delete(n):set.add(n);
       paint();
