@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Dynagram 0.19 — dynamic network diagrams from device configs</title>
+<title>Dynagram 0.20 — dynamic network diagrams from device configs</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -3369,7 +3369,7 @@ function applyBends(els){
 /* A small stable hash, so a link always starts from the same channel. */
 /* Still pre-1.0: the diagram, tracing and reports are solid, but the file
    format and the routing behaviour are both still moving. */
-const APP_VERSION='0.19';
+const APP_VERSION='0.20';
 function hashStr(t){ let h=0; for(let i=0;i<t.length;i++){ h=(h*31 + t.charCodeAt(i))|0; } return h; }
 function zoneAncestors(node){
   const out=new Set();
@@ -6826,9 +6826,36 @@ function buildPath(res){
   seq.push(res.hops[0].dev.id);
   let lastEid=null;
 
+  /* Light only the link to the device the packet actually goes to next.
+
+     On a shared segment the map has a link from this interface to every
+     device on it — to the active HSRP router and to the standby. Falling back
+     to "any link out of this interface" could pick the one to the standby, and
+     the trace then painted a second, backup-looking path on the main view.
+     The path view never showed it because only path devices are drawn there. */
   const add=(devId, ifName, incoming, peerId)=>{
     const pairs=STATE.edgePair||{};
-    const eid = (peerId && pairs[devId+'::'+ifName+'::'+peerId]) || STATE.edgeFor[devId+'::'+ifName];
+    let eid = peerId && pairs[devId+'::'+ifName+'::'+peerId];
+    if(!eid && peerId){
+      // a direct link between the two hops, whatever it was keyed as
+      const a=cy.getElementById(devId), b=cy.getElementById(peerId);
+      if(a.length && b.length){ const between=a.edgesWith(b); if(between.length) eid=between[0].id(); }
+    }
+    if(!eid){
+      /* Only now fall back to the interface's link, and only if it does not
+         lead to some other device — a segment or cloud node is fine, a
+         different device is exactly the wrong turn this is here to prevent. */
+      const cand=STATE.edgeFor[devId+'::'+ifName];
+      if(cand){
+        const ce=cy.getElementById(cand);
+        if(ce.length){
+          const o = ce.data('source')===devId ? ce.data('target') : ce.data('source');
+          const on = cy.getElementById(o);
+          const isOtherDevice = on.length && on.data('kind')==='device';
+          if(!(isOtherDevice && peerId && o!==peerId) && !(isOtherDevice && !peerId)) eid=cand;
+        }
+      }
+    }
     if(!eid || eid===lastEid) return;
     const e=cy.getElementById(eid); if(!e.length) return;
     const s=e.data('source'), t=e.data('target');
@@ -6875,9 +6902,13 @@ function paintTrace(res){
     const n=cy.getElementById(h.dev.id);
     if(n.length && n.data('kind')!=='group') n.addClass('hot');
   }
+  const onPath=new Set(res.hops.map(h=>h.dev.id));
   for(const id of seq){
     const n=cy.getElementById(id);
-    if(n.length && n.data('kind')!=='group') n.addClass('hot');
+    if(!n.length || n.data('kind')==='group') continue;
+    // a device that is not a hop is never lit, however the links led to it
+    if(n.data('kind')==='device' && !onPath.has(id)) continue;
+    n.addClass('hot');
   }
 
   // light each link in the order the packet crosses it
