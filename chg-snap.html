@@ -44,7 +44,7 @@
           <li><b>Agent link</b>: open your CHG Reviewer agent in Copilot and paste its address-bar URL (…/chat/agent/…).</li>
         </ul>
       </li>
-      <li>Put your compliance checklist in the save folder. A name containing "checklist", "compliance" or "control" is picked first (e.g. <i>CHG Compliance Checklist.docx</i>). Word, Excel (first sheet), .txt, .md and .csv work. By default the checklist is <b>not</b> pasted into the prompt: Edge Copilot gets it as an extra tab (needs the OneDrive link), the agent gets its file link. Use <b>Switch</b> in the panel if you prefer the text pasted in.</li>
+      <li>Put your compliance checklist in the save folder. A name containing "checklist", "compliance" or "control" is picked first (e.g. <i>CHG Compliance Checklist.docx</i>). CHG Snap only uses its file name: the checklist is never pasted into the prompt or opened. The prompt tells Copilot to use that file from your OneDrive (with a direct link when the OneDrive link setting is filled in).</li>
     </ol>
   </section>
 
@@ -72,8 +72,7 @@
 async function chgSnap() {
   const O = location.origin;
   const opt = { credentials: 'same-origin' };
-  const K_AGENT = 'chgpdf_agent_url', K_OD = 'chgsnap_onedrive_base', K_TPL = 'chgsnap_prompt_template', K_CKMODE = 'chgsnap_checklist_mode';
-  const ckMode = () => localStorage.getItem(K_CKMODE) || 'file';
+  const K_AGENT = 'chgpdf_agent_url', K_OD = 'chgsnap_onedrive_base', K_TPL = 'chgsnap_prompt_template';
   const DEFAULT_TPL =
 `Check {SOURCE} ({CHG}) against the compliance checklist.
 
@@ -120,48 +119,6 @@ Judge only from the PDF. If the PDF doesn't cover an item, mark it "Not stated".
 
   /* ---------- checklist ---------- */
   let ckHandle = await idb('readonly', s => s.get('checklist')).catch(() => null);
-  const unzipEntry = async (blob, wanted) => {
-    const buf = new Uint8Array(await blob.arrayBuffer());
-    const dv = new DataView(buf.buffer);
-    let e = buf.length - 22;
-    while (e >= 0 && dv.getUint32(e, true) !== 0x06054b50) e--;
-    if (e < 0) return null;
-    let p = dv.getUint32(e + 16, true);
-    const n = dv.getUint16(e + 10, true);
-    for (let i = 0; i < n; i++) {
-      const method = dv.getUint16(p + 10, true), csize = dv.getUint32(p + 20, true);
-      const nlen = dv.getUint16(p + 28, true), xlen = dv.getUint16(p + 30, true), clen = dv.getUint16(p + 32, true);
-      const off = dv.getUint32(p + 42, true);
-      const name = new TextDecoder().decode(buf.subarray(p + 46, p + 46 + nlen));
-      if (name === wanted) {
-        const start = off + 30 + dv.getUint16(off + 26, true) + dv.getUint16(off + 28, true);
-        const data = buf.subarray(start, start + csize);
-        if (method === 0) return new TextDecoder().decode(data);
-        const ds = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
-        return await new Response(ds).text();
-      }
-      p += 46 + nlen + xlen + clen;
-    }
-    return null;
-  };
-  const unent = t => t.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
-  const docxText = xml => xml ? unent(xml
-      .replace(/<w:tab\/>/g, '\t').replace(/<w:br[^>]*\/>/g, '\n')
-      .replace(/<\/w:p>\s*<\/w:tc>/g, ' | ').replace(/<\/w:tc>/g, ' | ').replace(/<\/w:tr>/g, '\n').replace(/<\/w:p>/g, '\n').replace(/<[^>]+>/g, ''))
-      .replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n') : '';
-  const xlsxText = async file => {
-    const ss = await unzipEntry(file, 'xl/sharedStrings.xml');
-    const strs = ss ? [...new DOMParser().parseFromString(ss, 'application/xml').getElementsByTagName('si')].map(x => x.textContent) : [];
-    const sh = await unzipEntry(file, 'xl/worksheets/sheet1.xml');
-    if (!sh) return '';
-    const doc = new DOMParser().parseFromString(sh, 'application/xml');
-    return [...doc.getElementsByTagName('row')].map(r => [...r.getElementsByTagName('c')].map(c => {
-      const t = c.getAttribute('t');
-      if (t === 'inlineStr') return c.textContent.trim();
-      const v = (c.getElementsByTagName('v')[0] || {}).textContent || '';
-      return t === 's' ? (strs[+v] || '') : v;
-    }).join(' | ')).filter(l => l.replace(/[\s|]/g, '')).join('\n');
-  };
   const CK_EXT = ['.md', '.txt', '.docx', '.xlsx', '.csv', '.json'];
   const OLD_EXT = ['.doc', '.xls', '.pdf'];
   const extOf = n => ((n.match(/\.[^.]+$/) || [''])[0]).toLowerCase();
@@ -191,21 +148,6 @@ Judge only from the PDF. If the PDF doesn't cover an item, mark it "Not stated".
     if (good.length > 1) return { none: 'several files in the folder; click Choose to pick the checklist' };
     if (old.length) return { none: `"${old[0].name}" can't be read. Save it as .docx, .xlsx, .txt or .md` };
     return { none: `no checklist file in "${dir.name}"` };
-  };
-  const readChecklist = async () => {
-    const f = await findChecklist();
-    if (f.none) return { name: '', text: '', err: 'not used: ' + f.none + '.' };
-    const file = await f.h.getFile();
-    const ext = extOf(file.name);
-    if (ext === '.pdf') return { name: file.name, text: '', err: 'PDF checklists can\'t be read here. Save it as .docx, .xlsx, .txt or .md.' };
-    let text = '';
-    try {
-      if (ext === '.docx') text = docxText(await unzipEntry(file, 'word/document.xml'));
-      else if (ext === '.xlsx') text = await xlsxText(file);
-      else text = await file.text();
-    } catch (e) { return { name: file.name, text: '', err: 'Couldn\'t read the checklist: ' + e.message }; }
-    text = text.trim();
-    return text ? { name: file.name, text, auto: f.auto } : { name: file.name, text: '', err: 'The checklist file looks empty.' };
   };
 
   /* ---------- ServiceNow lookups ---------- */
@@ -316,7 +258,6 @@ Judge only from the PDF. If the PDF doesn't cover an item, mark it "Not stated".
 <div class="set">
   <div class="s"><span>Save folder: <span class="v" data-f="dir"></span></span><button class="lk" data-a="dir">Change</button></div>
   <div class="s"><span>Checklist: <span class="v" data-f="ck"></span></span><button class="lk" data-a="ck">Choose</button></div>
-  <div class="s"><span>Checklist sent as: <span class="v" data-f="cm"></span></span><button class="lk" data-a="cm">Switch</button></div>
   <div class="s"><span>Prompt: <span class="v" data-f="tp"></span></span><button class="lk" data-a="tpl">Edit</button></div>
   <div class="s"><span>OneDrive link: <span class="v" data-f="od"></span></span><button class="lk" data-a="od">Set</button></div>
   <div class="s"><span>Agent link: <span class="v" data-f="ag"></span></span><button class="lk" data-a="ag">Set</button></div>
@@ -352,7 +293,6 @@ Judge only from the PDF. If the PDF doesn't cover an item, mark it "Not stated".
     else if (!dir) fd.innerHTML = '<span class="warn">not set, using Downloads</span>';
     else fd.innerHTML = esc(dir.name) + (dirOk ? '' : ' <span class="warn">(access not allowed)</span>');
     $('[data-a="dir"]').textContent = dir && !dirOk ? 'Allow' : 'Change';
-    $('[data-f="cm"]').textContent = ckMode() === 'file' ? 'file (opened in a tab, not pasted)' : 'text pasted into the prompt';
     $('[data-f="tp"]').innerHTML = localStorage.getItem(K_TPL) ? 'custom' : 'default';
     const ckEl = $('[data-f="ck"]');
     findChecklist().then(f => {
@@ -413,13 +353,11 @@ Judge only from the PDF. If the PDF doesn't cover an item, mark it "Not stated".
       '{SOURCE}': where === 'tab' ? 'the change request PDF open in this tab'
                 : where === 'tabs' ? 'the change request PDFs open in my browser tabs'
                                    : `the attached change request PDF${many ? 's' : ''}`,
-      '{CHECKLIST}': !(ck && ck.text)
-          ? '(No checklist provided: review risk, implementation, rollback, testing and approvals instead.)'
-        : ckMode() === 'text'
-          ? `=== COMPLIANCE CHECKLIST (${ck.name}) ===\n${ck.text}\n=== END OF CHECKLIST ===`
-        : where === 'agent'
-          ? `Use the compliance checklist file "${ck.name}"${ckLink() ? ' (' + ckLink() + ')' : ''}. Do not use any other checklist.`
-          : `Use the compliance checklist "${ck.name}", which is open in another browser tab. Do not use any other checklist.`,
+      '{CHECKLIST}': ck && ck.name
+          ? `Use the compliance checklist "${ck.name}" in my OneDrive${ckLink() ? ' (' + ckLink() + ')' : ''}. Do not use any other checklist.`
+        : od
+          ? `Use the compliance checklist in my OneDrive folder "${decodeURIComponent(od.split('/').pop())}" (${od}). Do not use any other checklist.`
+          : 'Use my compliance checklist from OneDrive. Do not use any other checklist.',
       '{CHECKLIST_NAME}': ck && ck.name ? ck.name : 'none',
       '{FILES}': files
     };
@@ -457,13 +395,12 @@ Judge only from the PDF. If the PDF doesn't cover an item, mark it "Not stated".
     if (saved.length) {
       const od = localStorage.getItem(K_OD) || '';
       const many = saved.length > 1;
-      const ck = await readChecklist();
+      const f = await findChecklist();
+      const ck = f.h ? { name: f.h.name } : { err: f.none };
       lastSaved = saved; lastCk = ck;
       promptText = buildPrompt('agent', saved);
-      if (ck && ck.text) {
-        lines.push(ckMode() === 'text' ? `Checklist: ${ck.name} pasted into prompt` : `Checklist: ${ck.name} (referenced, not pasted)`);
-        if (ckMode() === 'file' && !ckLink()) lines.push('Set the OneDrive link so the checklist can open in a tab for Copilot.');
-        if (ckMode() === 'text' && promptText.length > 12000) lines.push('Note: long prompt. If Copilot cuts it off, shorten the checklist.');
+      if (ck.name) {
+        lines.push(`Checklist: "${ck.name}" referenced by name (not pasted, not opened)`);
       } else {
         lines.push(`Checklist ${ck.err}`);
         if (dir && !dirOk) lines.push('Tip: click Allow next to Save folder, then Snap PDF again.');
@@ -520,11 +457,6 @@ Judge only from the PDF. If the PDF doesn't cover an item, mark it "Not stated".
       const u = prompt('Open your CHG Reviewer agent in Copilot and paste the address-bar URL:', localStorage.getItem(K_AGENT) || '');
       if (u !== null) { localStorage.setItem(K_AGENT, u.trim()); renderSettings(); }
     }
-    if (act === 'cm') {
-      localStorage.setItem(K_CKMODE, ckMode() === 'file' ? 'text' : 'file');
-      if (lastSaved.length) promptText = buildPrompt('agent', lastSaved);
-      renderSettings();
-    }
     if (act === 'tpl') {
       const ed = $('[data-f="editor"]');
       const open = ed.style.display === 'flex';
@@ -546,7 +478,6 @@ Judge only from the PDF. If the PDF doesn't cover an item, mark it "Not stated".
       const n = lastSaved.length;
       if (!n) return;
       const queue = lastSaved.map(x => ({ label: x.num, blob: x.blob }));
-      if (ckMode() === 'file' && lastCk && lastCk.text && ckLink()) queue.push({ label: 'checklist', url: ckLink() + '?web=1' });
       const text = buildPrompt(n > 1 ? 'tabs' : 'tab', lastSaved);
       const cp = navigator.clipboard.writeText(text).then(() => true, () => false);  // start while this page has focus
       let opened = 0;
