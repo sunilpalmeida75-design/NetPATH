@@ -52,7 +52,7 @@
     <h2>Use it</h2>
     <ol>
       <li><b>On an open change:</b> click CHG Snap. It saves the PDF straight away.</li>
-      <li><b>Other changes:</b> type or edit numbers in the box and press Enter. Highlighting CHG numbers on the page before clicking also works.</li>
+      <li><b>Several changes:</b> type or paste them into the box (commas, spaces or one per line, e.g. a column copied from Excel) and press Enter. Numbers without "CHG" get it added. Highlighting CHG numbers on a ServiceNow list before clicking also works.</li>
       <li><b>Edge Copilot (quickest):</b> click <b>Ask Edge Copilot</b>. The PDF opens in a new tab and the prompt, including the full checklist, is copied. Press Ctrl+Shift+. (or the Copilot button in the toolbar), paste and send. Copilot reads the open PDF.</li>
       <li><b>Change the prompt:</b> click <b>Edit</b> next to Prompt in the panel, change the text, and click Save. It's remembered for next time; Reset to default brings back the original.</li>
       <li><b>Or your CHG Reviewer agent:</b> click <b>Open in CHG Reviewer</b>, paste, attach the PDF with <b>+</b>, send.</li>
@@ -61,7 +61,7 @@
   </section>
 
   <section>
-    <h2>Bookmarklets blocked? Use the console</h2>
+    <h2>Button not working? Use the console</h2>
     <p>On a ServiceNow tab press F12, open Console, paste this and press Enter.</p>
     <textarea id="console" readonly></textarea>
     <button id="copy" type="button">Copy code</button>
@@ -288,7 +288,7 @@ Judge only from the PDF. If the PDF doesn't cover an item, mark it "Not stated".
 #chgsnap-panel .st{margin-top:8px;max-height:110px;overflow:auto}
 #chgsnap-panel .st:empty{display:none}
 #chgsnap-panel .ho{margin-top:8px;display:none;flex-direction:column;gap:6px}
-#chgsnap-panel .eg{display:flex;flex-direction:column;gap:6px}
+#chgsnap-panel .eg{display:flex;flex-direction:column;gap:6px;max-height:190px;overflow:auto}
 #chgsnap-panel .r2{display:flex;gap:6px}
 #chgsnap-panel .r2 .btn{flex:1}
 #chgsnap-panel .hint{font-size:12px;color:#5a6878}
@@ -299,7 +299,7 @@ Judge only from the PDF. If the PDF doesn't cover an item, mark it "Not stated".
 </style>
 <div class="hd"><b>CHG Snap</b><button class="x" data-a="close" aria-label="Close">×</button></div>
 <div class="row">
-  <input data-f="chg" placeholder="CHG0012345, CHG0012346" aria-label="Change numbers">
+  <input data-f="chg" placeholder="One or more: CHG0012345, CHG0012346 …" aria-label="Change numbers">
   <button class="btn pri" data-a="snap">Snap PDF</button>
 </div>
 <div class="set">
@@ -407,12 +407,13 @@ Judge only from the PDF. If the PDF doesn't cover an item, mark it "Not stated".
   let busy = false;
   const snap = async () => {
     if (busy) return;
-    const list = [...new Set(input.value.toUpperCase().match(/CHG\d+/g) || [])];
+    const list = [...new Set((input.value.toUpperCase().match(/CHG\d+|\b\d{5,}\b/g) || []).map(n => n.startsWith('CHG') ? n : 'CHG' + n))];
+    input.value = list.join(', ');
     if (!list.length) { status('Enter a change number, e.g. CHG0012345.'); input.focus(); return; }
     busy = true; promptText = ''; lastSaved = []; lastCk = null; renderHandoff();
     const lines = [], saved = [];
-    for (const num of list) {
-      status(esc([...lines, `${num}: saving…`].join('<br>')).replace(/&lt;br&gt;/g, '<br>'));
+    for (const [k, num] of list.entries()) {
+      status([...lines, `${num}: saving… (${k + 1} of ${list.length})`].map(esc).join('<br>'));
       try {
         const t = known[num] ? { sid: known[num], num } : await byNumber(num);
         if (!t) { lines.push(`${num}: not found, or no access`); continue; }
@@ -518,6 +519,10 @@ Judge only from the PDF. If the PDF doesn't cover an item, mark it "Not stated".
       try { await navigator.clipboard.writeText(promptText); if (act === 'copy') { a.textContent = 'Copied'; setTimeout(() => a.textContent = 'Copy prompt', 1500); } }
       catch (err) { if (act === 'copy') prompt('Copy this prompt:', promptText); }
     }
+  });
+  input.addEventListener('paste', e => {
+    const t = (e.clipboardData || window.clipboardData).getData('text');
+    if (/\n/.test(t)) { e.preventDefault(); input.value = (input.value ? input.value + ', ' : '') + t.split(/\s*[\r\n]+\s*/).filter(Boolean).join(', '); }
   });
   input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); snap(); } });
   P.addEventListener('keydown', e => {
