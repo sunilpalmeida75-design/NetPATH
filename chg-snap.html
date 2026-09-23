@@ -44,7 +44,7 @@
           <li><b>Agent link</b>: open your CHG Reviewer agent in Copilot and paste its address-bar URL (…/chat/agent/…).</li>
         </ul>
       </li>
-      <li>Put your compliance checklist in the save folder with "checklist" in its file name (e.g. <i>CHG Compliance Checklist.docx</i>). Word, Excel (first sheet), .txt, .md and .csv work. PDF checklists don't: save them as Word first.</li>
+      <li>Put your compliance checklist in the save folder. A name containing "checklist", "compliance" or "control" is picked first (e.g. <i>CHG Compliance Checklist.docx</i>). Word, Excel (first sheet), .txt, .md and .csv work. PDF checklists don't: save them as Word first.</li>
     </ol>
   </section>
 
@@ -53,7 +53,7 @@
     <ol>
       <li><b>On an open change:</b> click CHG Snap. It saves the PDF straight away.</li>
       <li><b>Several changes:</b> type or paste them into the box (commas, spaces or one per line, e.g. a column copied from Excel) and press Enter. Numbers without "CHG" get it added. Highlighting CHG numbers on a ServiceNow list before clicking also works.</li>
-      <li><b>Edge Copilot (quickest):</b> click <b>Ask Edge Copilot</b>. The PDF opens in a new tab and the prompt, including the full checklist, is copied. Press Ctrl+Shift+. (or the Copilot button in the toolbar), paste and send. Copilot reads the open PDF.</li>
+      <li><b>Edge Copilot (quickest):</b> click <b>Ask Edge Copilot</b>. The PDF(s) open in new tabs and one prompt, including the full checklist, is copied. Press Ctrl+Shift+. (or the Copilot button in the toolbar), paste and send. Copilot reads the open PDF.</li>
       <li><b>Change the prompt:</b> click <b>Edit</b> next to Prompt in the panel, change the text, and click Save. It's remembered for next time; Reset to default brings back the original.</li>
       <li><b>Or your CHG Reviewer agent:</b> click <b>Open in CHG Reviewer</b>, paste, attach the PDF with <b>+</b>, send.</li>
     </ol>
@@ -161,7 +161,8 @@ Judge only from the PDF. If the PDF doesn't cover an item, mark it "Not stated".
       return t === 's' ? (strs[+v] || '') : v;
     }).join(' | ')).filter(l => l.replace(/[\s|]/g, '')).join('\n');
   };
-  const CK_EXT = ['.md', '.txt', '.docx', '.xlsx', '.csv', '.json', '.pdf'];
+  const CK_EXT = ['.md', '.txt', '.docx', '.xlsx', '.csv', '.json'];
+  const OLD_EXT = ['.doc', '.xls', '.pdf'];
   const extOf = n => ((n.match(/\.[^.]+$/) || [''])[0]).toLowerCase();
   const findChecklist = async () => {
     if (ckHandle) {
@@ -171,19 +172,25 @@ Judge only from the PDF. If the PDF doesn't cover an item, mark it "Not stated".
         if (p === 'granted') return { h: ckHandle, auto: false };
       } catch (e) {}
     }
-    if (!dir || !dirOk) return null;
-    const found = [];
+    if (!dir) return { none: 'no save folder set' };
+    if (!dirOk) return { none: 'folder access not allowed yet (click Allow next to Save folder)' };
+    const good = [], old = [];
     try {
       for await (const [name, h] of dir.entries()) {
-        if (h.kind === 'file' && /checklist/i.test(name) && !name.startsWith('~$') && CK_EXT.includes(extOf(name))) found.push(h);
+        if (h.kind !== 'file' || name.startsWith('~$') || /^CHG\d/i.test(name)) continue;
+        const ext = extOf(name);
+        if (CK_EXT.includes(ext)) good.push(h); else if (OLD_EXT.includes(ext)) old.push(h);
       }
-    } catch (e) { return null; }
-    found.sort((a, b) => CK_EXT.indexOf(extOf(a.name)) - CK_EXT.indexOf(extOf(b.name)));
-    return found[0] ? { h: found[0], auto: true } : null;
+    } catch (e) { return { none: 'couldn\'t list the folder' }; }
+    const score = h => (/check\s*-?\s*list|compliance|control/i.test(h.name) ? 0 : 10) + CK_EXT.indexOf(extOf(h.name));
+    good.sort((a, b) => score(a) - score(b));
+    if (good.length) return { h: good[0], auto: true };
+    if (old.length) return { none: `"${old[0].name}" can't be read. Save it as .docx, .xlsx, .txt or .md` };
+    return { none: `no checklist file in "${dir.name}"` };
   };
   const readChecklist = async () => {
     const f = await findChecklist();
-    if (!f) return null;
+    if (f.none) return { name: '', text: '', err: 'not used: ' + f.none + '.' };
     const file = await f.h.getFile();
     const ext = extOf(file.name);
     if (ext === '.pdf') return { name: file.name, text: '', err: 'PDF checklists can\'t be read here. Save it as .docx, .xlsx, .txt or .md.' };
@@ -321,7 +328,7 @@ Judge only from the PDF. If the PDF doesn't cover an item, mark it "Not stated".
 <div class="st" data-f="status"></div>
 <div class="ho" data-f="handoff">
   <div class="eg" data-f="edge"></div>
-  <div class="hint">Opens the PDF in a new tab and copies the prompt. Then press Ctrl+Shift+. (or the Copilot button), paste, send.</div>
+  <div class="hint">Opens the PDF(s) in new tabs and copies one prompt for all of them. Then press Ctrl+Shift+. (or the Copilot button), paste, send.</div>
   <div class="r2">
     <a class="btn" data-a="open" target="_blank" rel="noopener">Open in CHG Reviewer</a>
     <button class="btn" data-a="copy">Copy agent prompt</button>
@@ -332,18 +339,19 @@ Judge only from the PDF. If the PDF doesn't cover an item, mark it "Not stated".
   const input = $('[data-f="chg"]');
   input.value = prefill.join(', ');
 
-  let promptText = '', lastSaved = [], lastCk = null;
+  let promptText = '', lastSaved = [], lastCk = null, edgeNext = 0;
   const agentUrl = () => { const a = localStorage.getItem(K_AGENT) || ''; return /^https:\/\//i.test(a) ? a : ''; };
   const renderSettings = () => {
     const fd = $('[data-f="dir"]');
     if (!window.showDirectoryPicker) { fd.innerHTML = '<span class="warn">Downloads (browser can\'t pick folders)</span>'; $('[data-a="dir"]').style.display = 'none'; }
     else if (!dir) fd.innerHTML = '<span class="warn">not set, using Downloads</span>';
-    else fd.innerHTML = esc(dir.name) + (dirOk ? '' : ' <span class="warn">(needs permission)</span>');
+    else fd.innerHTML = esc(dir.name) + (dirOk ? '' : ' <span class="warn">(access not allowed)</span>');
+    $('[data-a="dir"]').textContent = dir && !dirOk ? 'Allow' : 'Change';
     $('[data-f="tp"]').innerHTML = localStorage.getItem(K_TPL) ? 'custom' : 'default';
     const ckEl = $('[data-f="ck"]');
     findChecklist().then(f => {
-      ckEl.innerHTML = f ? esc(f.h.name) + (f.auto ? ' <span style="color:#5a6878">(auto)</span>' : '')
-        : '<span class="warn">none found in folder</span>';
+      ckEl.innerHTML = f.h ? esc(f.h.name) + (f.auto ? ' <span style="color:#5a6878">(auto)</span>' : '')
+        : '<span class="warn">' + esc(f.none) + '</span>';
     });
     const od = localStorage.getItem(K_OD) || '';
     $('[data-f="od"]').innerHTML = od ? esc(decodeURIComponent(od.split('/').pop())) : '<span class="warn">not set</span>';
@@ -356,8 +364,9 @@ Judge only from the PDF. If the PDF doesn't cover an item, mark it "Not stated".
   const renderHandoff = () => {
     const ho = $('[data-f="handoff"]'), open = $('[data-a="open"]'), ag = agentUrl();
     ho.style.display = promptText ? 'flex' : 'none';
-    $('[data-f="edge"]').innerHTML = lastSaved.map((x, i) =>
-      `<button class="btn pri" data-a="edge" data-i="${i}">Ask Edge Copilot: ${esc(x.num)}</button>`).join('');
+    const n = lastSaved.length;
+    $('[data-f="edge"]').innerHTML = !n ? '' :
+      `<button class="btn pri" data-a="edge">Ask Edge Copilot: ${n > 1 ? 'all ' + n + ' changes' : esc(lastSaved[0].num)}</button>`;
     if (ag && promptText) {
       open.style.display = '';
       open.href = promptText.length < 1800 ? ag + (ag.includes('?') ? '&' : '?') + 'q=' + encodeURIComponent(promptText) : ag;
@@ -392,6 +401,7 @@ Judge only from the PDF. If the PDF doesn't cover an item, mark it "Not stated".
     const map = {
       '{CHG}': items.map(x => x.num).join(', '),
       '{SOURCE}': where === 'tab' ? 'the change request PDF open in this tab'
+                : where === 'tabs' ? 'the change request PDFs open in my browser tabs'
                                    : `the attached change request PDF${many ? 's' : ''}`,
       '{CHECKLIST}': ck && ck.text ? `=== COMPLIANCE CHECKLIST (${ck.name}) ===\n${ck.text}\n=== END OF CHECKLIST ===`
                                    : '(No checklist provided: review risk, implementation, rollback, testing and approvals instead.)',
@@ -400,7 +410,8 @@ Judge only from the PDF. If the PDF doesn't cover an item, mark it "Not stated".
     };
     let out = tpl;
     for (const k in map) out = out.split(k).join(map[k]);
-    if (where !== 'tab' && !tpl.includes('{FILES}')) out += `\n\nFile${many ? 's' : ''}: ${files}`;
+    if (many && !/separately/i.test(out)) out += '\n\nDo this separately for each change, then finish with a one-line summary per change.';
+    if (where === 'agent' && !tpl.includes('{FILES}')) out += `\n\nFile${many ? 's' : ''}: ${files}`;
     return out.trim();
   };
 
@@ -410,7 +421,7 @@ Judge only from the PDF. If the PDF doesn't cover an item, mark it "Not stated".
     const list = [...new Set((input.value.toUpperCase().match(/CHG\d+|\b\d{5,}\b/g) || []).map(n => n.startsWith('CHG') ? n : 'CHG' + n))];
     input.value = list.join(', ');
     if (!list.length) { status('Enter a change number, e.g. CHG0012345.'); input.focus(); return; }
-    busy = true; promptText = ''; lastSaved = []; lastCk = null; renderHandoff();
+    busy = true; promptText = ''; lastSaved = []; lastCk = null; edgeNext = 0; renderHandoff();
     const lines = [], saved = [];
     for (const [k, num] of list.entries()) {
       status([...lines, `${num}: saving… (${k + 1} of ${list.length})`].map(esc).join('<br>'));
@@ -438,8 +449,8 @@ Judge only from the PDF. If the PDF doesn't cover an item, mark it "Not stated".
         lines.push(`Checklist: ${ck.name} added to prompt`);
         if (promptText.length > 12000) lines.push('Note: long prompt. If Copilot cuts it off, shorten the checklist.');
       } else {
-        lines.push(ck && ck.err ? `Checklist: ${ck.err}` :
-          (dir ? 'No checklist found: put a file with "checklist" in its name in the save folder.' : 'No checklist: set a save folder first.'));
+        lines.push(`Checklist ${ck.err}`);
+        if (dir && !dirOk) lines.push('Tip: click Allow next to Save folder, then Snap PDF again.');
       }
       status(lines.map(esc).join('<br>'));
     }
@@ -463,7 +474,13 @@ Judge only from the PDF. If the PDF doesn't cover an item, mark it "Not stated".
     const act = a.dataset.a;
     if (act === 'close') P.remove();
     if (act === 'snap') snap();
-    if (act === 'dir') chooseDir();
+    if (act === 'dir') {
+      if (dir && !dirOk) {
+        dirOk = await dirPerm(true);
+        if (dirOk) { status(esc('Folder access allowed. Click Snap PDF again to save there with the checklist.')); renderSettings(); }
+        else chooseDir();
+      } else chooseDir();
+    }
     if (act === 'ck') {
       if (!window.showOpenFilePicker) { alert('Choosing a file needs Edge or Chrome.'); return; }
       try {
@@ -505,15 +522,26 @@ Judge only from the PDF. If the PDF doesn't cover an item, mark it "Not stated".
       renderSettings();
     }
     if (act === 'edge') {
-      const x = lastSaved[+a.dataset.i];
-      if (!x) return;
-      const text = buildPrompt('tab', [x]);
+      const n = lastSaved.length;
+      if (!n) return;
+      const text = buildPrompt(n > 1 ? 'tabs' : 'tab', lastSaved);
       const cp = navigator.clipboard.writeText(text).then(() => true, () => false);  // start while this page has focus
-      const url = URL.createObjectURL(new Blob([x.blob], { type: 'application/pdf' }));
-      window.open(url, '_blank');
-      setTimeout(() => URL.revokeObjectURL(url), 30 * 60 * 1000);
+      let opened = 0;
+      for (const x of lastSaved.slice(edgeNext)) {
+        const url = URL.createObjectURL(new Blob([x.blob], { type: 'application/pdf' }));
+        const w = window.open(url, '_blank');
+        setTimeout(() => URL.revokeObjectURL(url), 30 * 60 * 1000);
+        if (!w) break;
+        opened++;
+      }
+      edgeNext += opened;
       if (!(await cp)) prompt('Copy this prompt, then paste it into Edge Copilot:', text);
-      a.textContent = `Opened ${x.num}: now Ctrl+Shift+. and paste`;
+      if (edgeNext < n) {
+        a.textContent = `Open next PDF (${edgeNext + 1} of ${n})`;
+        status(esc('The browser blocked the other tabs. Allow pop-ups for this site (icon at the right of the address bar) to open them all at once, or keep clicking to open one at a time.'));
+      } else {
+        a.textContent = n > 1 ? `All ${n} PDFs open: now Ctrl+Shift+. and paste` : `Opened ${lastSaved[0].num}: now Ctrl+Shift+. and paste`;
+      }
     }
     if (act === 'open' || act === 'copy') {
       try { await navigator.clipboard.writeText(promptText); if (act === 'copy') { a.textContent = 'Copied'; setTimeout(() => a.textContent = 'Copy prompt', 1500); } }
