@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Dynagram 0.10 — dynamic network diagrams from device configs</title>
+<title>Dynagram 0.15 — dynamic network diagrams from device configs</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -556,6 +556,12 @@ body.zen .sb-show{position:fixed;right:14px;top:10px}
 .fib.pol td.nm{font-family:var(--sans);color:var(--ink)}
 .fib.pol tr.rdeny td{background:rgba(224,98,95,.07)}
 .fib.pol .muted{color:var(--ink-faint);font-size:11.5px}
+
+.settings-body .sec{margin-top:18px}
+.settings-body .sec:first-child{margin-top:6px}
+.pick.hidden,.pick-back.hidden{display:none}
+
+#opt-view option.hidden{display:none}
 </style>
 </head>
 <body>
@@ -641,89 +647,12 @@ body.zen .sb-show{position:fixed;right:14px;top:10px}
         <div class="wide"><button class="btn" id="grp-add" style="width:100%">Add site or zone</button></div>
       </div>
 
-      <h2 class="sec">Appearance</h2>
-      <div class="appear-grid">
-        <label>Canvas <input type="color" id="th-canvasBg"></label>
-        <label>Diagram text <input type="color" id="th-linkText"></label>
-        <label>Device box <input type="color" id="th-devBg"></label>
-        <label>Device text <input type="color" id="th-devText"></label>
-        <label>Zone box <input type="color" id="th-zoneBg"></label>
-        <label>Zone text <input type="color" id="th-zoneText"></label>
-        <label>Zone border <input type="color" id="th-zoneBorder"></label>
-        <label>Link in zone <input type="color" id="th-linkIntra"></label>
-        <label>Link between <input type="color" id="th-linkInter"></label>
-        <label>Shutdown link <input type="color" id="th-linkDown"></label>
-        <label>Router <input type="color" id="th-roleRouter"></label>
-        <label>Switch <input type="color" id="th-roleSwitch"></label>
-        <label>Firewall <input type="color" id="th-roleFirewall"></label>
+      <div class="btn-row" style="margin-top:14px">
+        <button class="btn" id="open-settings" style="width:100%">Settings — appearance, carriers, WAN clouds</button>
       </div>
-      <label class="auth" style="margin-top:6px">Border thickness
-        <input type="range" id="th-borderW" min="1" max="6" step="1" style="flex:1;accent-color:var(--cyan)"></label>
-      <label class="auth">Link thickness
-        <input type="range" id="th-linkWidth" min="0.5" max="6" step="0.5" style="flex:1;accent-color:var(--cyan)"></label>
-      <label class="auth">Text fills the box
-        <input type="range" id="th-textFill" min="0.4" max="0.95" step="0.05" style="flex:1;accent-color:var(--cyan)">
-        <span id="th-textFill-v" style="font-family:var(--mono);font-size:11.5px;color:var(--ink-faint);min-width:32px;text-align:right"></span></label>
-      <h3 class="sub">Size of every device box</h3>
-      <div class="rt-form" style="margin-top:2px">
-        <input type="number" id="th-boxW" placeholder="width (auto)" min="70" max="500">
-        <input type="number" id="th-boxH" placeholder="height (auto)" min="36" max="300">
-        <button class="btn tiny" id="th-box-reset" title="Back to sizing each box around its own name">Auto</button>
-      </div>
-      <p class="cfg-note" style="margin:2px 0 8px">Applies to every device at once; the text is scaled to fit. Leave blank to size each box around its own name. A device given its own size still wins.</p>
-      <div class="rt-form">
-        <input type="number" id="th-devFontSize" placeholder="device text size" min="9" max="24">
-        <input type="number" id="th-zoneFontSize" placeholder="zone text size" min="9" max="24">
-      </div>
-      <div class="rt-form">
-        <select id="th-devFont" title="Device typeface"></select>
-        <select id="th-zoneFont" title="Zone typeface"></select>
-      </div>
-      <label class="auth" style="margin-top:6px"><input type="checkbox" id="th-devBold"><span>Bold device text</span></label>
-      <label class="auth"><input type="checkbox" id="th-zoneBold"><span>Bold zone text</span></label>
-      <div class="btn-row" style="margin-top:0;margin-bottom:8px">
-        <button class="btn tiny" id="th-dark">Dark</button>
-        <button class="btn tiny" id="th-visio">Visio white</button>
-      </div>
-      <label class="auth" style="margin-top:8px"><input type="checkbox" id="th-canvasGrid">
-        <span>Grid on the canvas</span></label>
-      <label class="auth" style="margin-left:22px"><span style="flex:1">Grid style</span>
-        <select id="th-gridStyle" style="background:var(--bg);color:var(--ink);border:1px solid var(--rule);
-          border-radius:4px;padding:2px 6px;font-size:12px">
-          <option value="dots">Dots</option>
-          <option value="lines">Lines (Visio)</option>
-        </select></label>
-      <label class="auth"><input type="checkbox" id="th-zoneGrid">
-        <span>Dotted grid inside zone and site boxes</span></label>
-      <div class="rt-form" style="margin-top:8px">
-        <button class="btn tiny" id="th-boxes-global">Use global size for every box</button>
-        <button class="btn tiny" id="th-reset">Reset everything</button>
-      </div>
-      <p class="cfg-note" style="margin:2px 0 0">The first clears box sizes set on individual devices. The second also clears their colours and fonts, and returns the theme to its defaults.</p>
-
-      <h2 class="sec">Providers</h2>
-      <label class="auth" style="margin-top:0"><input type="checkbox" id="opt-autowan" checked>
-        <span>Detect carriers from interface descriptions. Unmatched default-route uplinks become Internet.</span></label>
-      <ul class="devs" id="provlist"></ul>
-      <div class="rt-form">
-        <input id="prov-name" placeholder="add a carrier, e.g. Orange" spellcheck="false">
-        <button class="btn" id="prov-add">Add</button>
-      </div>
-
-      <h2 class="sec">WAN clouds</h2>
-      <div id="cloudlist"></div>
-
-      <h2 class="sec">What it reads</h2>
-      <p class="note">
-        Cisco IOS / IOS-XE / NX-OS / ASA: hostname, interfaces and addresses, VRFs,
-        static routes, OSPF network statements, BGP neighbors.<br><br>
-        Palo Alto: set-format or XML export — interfaces and sub-interfaces, zones,
-        virtual routers, static routes, address objects, security rules.<br><br>
-        On PAN-OS run <code style="font-family:var(--mono);color:var(--ink-dim)">set cli config-output-format set</code>
-        then <code style="font-family:var(--mono);color:var(--ink-dim)">show config running</code>.
-      </p>
     </div>
   </aside>
+
 
   <div class="gutter" id="gut-l"><button class="pan-toggle" id="tog-l" title="Hide the left panel">‹</button></div>
 
@@ -733,15 +662,15 @@ body.zen .sb-show{position:fixed;right:14px;top:10px}
       <button class="btn sb-collapse" id="sb-toggle" title="Hide the controls">×</button>
       <label class="toggle">View
         <select id="opt-view">
-          <option value="simple" selected>Topology only — one link per pair</option>
-          <option value="devices">Devices only</option>
-          <option value="transit">Devices + shared segments</option>
-          <option value="all">Everything</option>
-          <option value="path">Traced path only</option>
-          <option value="link">Link detail</option>
-          <option value="sel">Selected devices</option>
-          <option value="find">Search results</option>
-          <option value="vrf">VRF / VSYS filter</option>
+          <option value="simple" selected>Topology</option>
+          <option value="transit">Topology + segments</option>
+          <!-- the rest are reached by an action (trace, open a link, select,
+               search) and only shown while you are in them -->
+          <option value="path" class="ctx hidden">Traced path</option>
+          <option value="link" class="ctx hidden">Link detail</option>
+          <option value="sel" class="ctx hidden">Selected devices</option>
+          <option value="find" class="ctx hidden">Search results</option>
+          <option value="vrf" class="ctx hidden">VRF / VSYS filter</option>
         </select>
       </label>
       <label class="toggle">Layer
@@ -852,6 +781,7 @@ body.zen .sb-show{position:fixed;right:14px;top:10px}
       <button class="gtab" data-gtab="routes">Routes<i id="gn-routes"></i></button>
       <button class="gtab" data-gtab="links">Links<i id="gn-links"></i></button>
       <button class="gtab" data-gtab="flows">Flows<i id="gn-flows"></i></button>
+      <button class="gtab" data-gtab="resilience">Resilience<i id="gn-resilience"></i></button>
       <button class="gtab" data-gtab="warnings">Warnings<i id="gn-warnings"></i></button>
       <button class="gtab" data-gtab="readiness">Readiness<i id="gn-readiness"></i></button>
       <div class="gright">
@@ -864,6 +794,7 @@ body.zen .sb-show{position:fixed;right:14px;top:10px}
       <textarea id="flow-list" spellcheck="false" placeholder="One flow per line:&#10;10.65.19.26 -> 10.64.140.3&#10;10.1.1.5, 8.8.8.8, DNS from the server VLAN&#10;10.9.0.5 10.8.0.9  # comment after a hash"></textarea>
       <div class="flowbtns">
         <button class="btn btn-go" id="flow-run">Run all</button>
+        <button class="btn" id="flow-resilience" title="Remove each device in turn and re-run the flows; trace every flow both ways">Check resilience</button>
         <label class="toggle"><input type="checkbox" id="flow-compare" checked> Compare before and after</label>
         <button class="btn tiny" id="flow-file-btn">Load from file</button>
         <input type="file" id="flow-file" class="hidden" accept=".txt,.csv,.log">
@@ -875,6 +806,97 @@ body.zen .sb-show{position:fixed;right:14px;top:10px}
     <div id="health-body" style="display:none"></div><span id="health-count" style="display:none"></span>
   </div>
 </div>
+
+  <!-- Settings: everything you set once and rarely touch again -->
+  <div class="pick-back hidden" id="settings-back"></div>
+  <div class="pick hidden" id="settings" style="width:min(720px,94vw);max-height:88vh">
+    <header><h2>Settings</h2><span class="sp"></span>
+      <button class="btn" id="settings-close">Done</button></header>
+    <div class="settings-body" style="overflow:auto;flex:1;min-height:0;padding:0 14px 14px">
+      <h2 class="sec">Appearance</h2>
+      <div class="appear-grid">
+        <label>Canvas <input type="color" id="th-canvasBg"></label>
+        <label>Diagram text <input type="color" id="th-linkText"></label>
+        <label>Device box <input type="color" id="th-devBg"></label>
+        <label>Device text <input type="color" id="th-devText"></label>
+        <label>Zone box <input type="color" id="th-zoneBg"></label>
+        <label>Zone text <input type="color" id="th-zoneText"></label>
+        <label>Zone border <input type="color" id="th-zoneBorder"></label>
+        <label>Link in zone <input type="color" id="th-linkIntra"></label>
+        <label>Link between <input type="color" id="th-linkInter"></label>
+        <label>Shutdown link <input type="color" id="th-linkDown"></label>
+        <label>Router <input type="color" id="th-roleRouter"></label>
+        <label>Switch <input type="color" id="th-roleSwitch"></label>
+        <label>Firewall <input type="color" id="th-roleFirewall"></label>
+      </div>
+      <label class="auth" style="margin-top:6px">Border thickness
+        <input type="range" id="th-borderW" min="1" max="6" step="1" style="flex:1;accent-color:var(--cyan)"></label>
+      <label class="auth">Link thickness
+        <input type="range" id="th-linkWidth" min="0.5" max="6" step="0.5" style="flex:1;accent-color:var(--cyan)"></label>
+      <label class="auth">Text fills the box
+        <input type="range" id="th-textFill" min="0.4" max="0.95" step="0.05" style="flex:1;accent-color:var(--cyan)">
+        <span id="th-textFill-v" style="font-family:var(--mono);font-size:11.5px;color:var(--ink-faint);min-width:32px;text-align:right"></span></label>
+      <h3 class="sub">Size of every device box</h3>
+      <div class="rt-form" style="margin-top:2px">
+        <input type="number" id="th-boxW" placeholder="width (auto)" min="70" max="500">
+        <input type="number" id="th-boxH" placeholder="height (auto)" min="36" max="300">
+        <button class="btn tiny" id="th-box-reset" title="Back to sizing each box around its own name">Auto</button>
+      </div>
+      <p class="cfg-note" style="margin:2px 0 8px">Applies to every device at once; the text is scaled to fit. Leave blank to size each box around its own name. A device given its own size still wins.</p>
+      <div class="rt-form">
+        <input type="number" id="th-devFontSize" placeholder="device text size" min="9" max="24">
+        <input type="number" id="th-zoneFontSize" placeholder="zone text size" min="9" max="24">
+      </div>
+      <div class="rt-form">
+        <select id="th-devFont" title="Device typeface"></select>
+        <select id="th-zoneFont" title="Zone typeface"></select>
+      </div>
+      <label class="auth" style="margin-top:6px"><input type="checkbox" id="th-devBold"><span>Bold device text</span></label>
+      <label class="auth"><input type="checkbox" id="th-zoneBold"><span>Bold zone text</span></label>
+      <div class="btn-row" style="margin-top:0;margin-bottom:8px">
+        <button class="btn tiny" id="th-dark">Dark</button>
+        <button class="btn tiny" id="th-visio">Visio white</button>
+      </div>
+      <label class="auth" style="margin-top:8px"><input type="checkbox" id="th-canvasGrid">
+        <span>Grid on the canvas</span></label>
+      <label class="auth" style="margin-left:22px"><span style="flex:1">Grid style</span>
+        <select id="th-gridStyle" style="background:var(--bg);color:var(--ink);border:1px solid var(--rule);
+          border-radius:4px;padding:2px 6px;font-size:12px">
+          <option value="dots">Dots</option>
+          <option value="lines">Lines (Visio)</option>
+        </select></label>
+      <label class="auth"><input type="checkbox" id="th-zoneGrid">
+        <span>Dotted grid inside zone and site boxes</span></label>
+      <div class="rt-form" style="margin-top:8px">
+        <button class="btn tiny" id="th-boxes-global">Use global size for every box</button>
+        <button class="btn tiny" id="th-reset">Reset everything</button>
+      </div>
+      <p class="cfg-note" style="margin:2px 0 0">The first clears box sizes set on individual devices. The second also clears their colours and fonts, and returns the theme to its defaults.</p>
+
+      <h2 class="sec">Providers</h2>
+      <label class="auth" style="margin-top:0"><input type="checkbox" id="opt-autowan" checked>
+        <span>Detect carriers from interface descriptions. Unmatched default-route uplinks become Internet.</span></label>
+      <ul class="devs" id="provlist"></ul>
+      <div class="rt-form">
+        <input id="prov-name" placeholder="add a carrier, e.g. Orange" spellcheck="false">
+        <button class="btn" id="prov-add">Add</button>
+      </div>
+
+      <h2 class="sec">WAN clouds</h2>
+      <div id="cloudlist"></div>
+
+      <h2 class="sec">What it reads</h2>
+      <p class="note">
+        Cisco IOS / IOS-XE / NX-OS / ASA: hostname, interfaces and addresses, VRFs,
+        static routes, OSPF network statements, BGP neighbors.<br><br>
+        Palo Alto: set-format or XML export — interfaces and sub-interfaces, zones,
+        virtual routers, static routes, address objects, security rules.<br><br>
+        On PAN-OS run <code style="font-family:var(--mono);color:var(--ink-dim)">set cli config-output-format set</code>
+        then <code style="font-family:var(--mono);color:var(--ink-dim)">show config running</code>.
+      </p>
+    </div>
+  </div>
+
 
 <script>
 /* ============================================================
@@ -2080,6 +2102,18 @@ function parseConfig(text, fname){
           : v==='pan-set'   ? parsePanSet(text, fname)
           : parseCisco(text, fname);
   applyEffectiveShutdown(d);
+  /* A name should never carry the capture's extension. However a name was
+     arrived at — config hostname, file fallback, a collector header — strip a
+     trailing .cfg / .config / .txt / .conf / .set / .log, dotted or not. */
+  if(d.name){
+    let n=String(d.name);
+    // a dotted file extension of any kind we read
+    n=n.replace(/\.(cfg|config|conf|txt|set|log|running|policy|route|routes|cdp)$/i,'');
+    // "cfg" glued on without a dot is never part of a real hostname; words like
+    // "set" or "log" can be, so only cfg is stripped undotted
+    n=n.replace(/[_-]?cfg$/i,'');
+    if(n) d.name=n;
+  }
   finish(d);
   d.rawText = text;
   return d;
@@ -2709,14 +2743,33 @@ function deviceForAddress(model, ipInt, opts){
       if(!usable(d,i)) continue;
       for(const a of i.addrs) if(a.ip===ipInt) return {dev:d, iface:i, owner:true};
     }
-  // 2. failing that, a device with a connected subnet containing it
+  /* 2. failing that, the device that fronts the host on that subnet. Several
+     devices can share a segment — a switch SVI, both firewalls, a router — and
+     the first in the list is not the host's gateway. Rank them: a device
+     holding the HSRP/VRRP virtual address first, then any switch or router,
+     and a firewall last, because a firewall interface is almost never what a
+     host points its default route at. */
+  const cands=[];
   for(const d of model.devices)
     for(const i of d.interfaces){
       if(!usable(d,i)) continue;
-      for(const a of i.addrs)
-        if(a.len<32 && inNet(ipInt,netOf(a.ip,a.len),a.len)) return {dev:d, iface:i};
+      for(const a of i.addrs){
+        if(!(a.len<32 && inNet(ipInt,netOf(a.ip,a.len),a.len))) continue;
+        // the active member of a virtual address (first in the group) beats a
+        // standby, which beats any other switch or router, which beats a firewall
+        let rank = isFirewall(d) ? 3 : 2;
+        for(const v in (model.vips||{})){
+          const mem=model.vips[v]||[];
+          const at=mem.findIndex(m=>m.iface===i);
+          if(at===0){ rank=0; break; }
+          if(at>0) rank=Math.min(rank,1);
+        }
+        cands.push({rank, dev:d, iface:i});
+      }
     }
-  return null;
+  if(!cands.length) return null;
+  cands.sort((x,y)=>x.rank-y.rank);
+  return {dev:cands[0].dev, iface:cands[0].iface};
 }
 function lookup(dev, dstInt, vrf){
   let best=null;
@@ -3209,7 +3262,7 @@ function applyBends(els){
 /* A small stable hash, so a link always starts from the same channel. */
 /* Still pre-1.0: the diagram, tracing and reports are solid, but the file
    format and the routing behaviour are both still moving. */
-const APP_VERSION='0.10';
+const APP_VERSION='0.15';
 function hashStr(t){ let h=0; for(let i=0;i<t.length;i++){ h=(h*31 + t.charCodeAt(i))|0; } return h; }
 function zoneAncestors(node){
   const out=new Set();
@@ -3683,15 +3736,30 @@ function sizeNodes(els){
 /* View history, so every screen has a way back to where you came from. */
 function setView(v){
   const sel=document.getElementById('opt-view');
+  syncViewMenu(v);
   if(sel.value===v){ render(); return; }
   sel.value=v;
   render();
+}
+/* Contextual views appear in the menu only while they mean something. Traced
+   path is offered whenever a trace exists, so you can always get back to it —
+   hiding it until you were already in it made it unreachable. */
+function syncViewMenu(active){
+  const sel=document.getElementById('opt-view'); if(!sel) return;
+  const cur=active||sel.value;
+  const hasTrace=!!(STATE.lastTrace && STATE.lastTrace.hops && STATE.lastTrace.hops.length);
+  sel.querySelectorAll('option.ctx').forEach(o=>{
+    const show = o.value===cur || (o.value==='path' && hasTrace);
+    o.classList.toggle('hidden', !show);
+  });
 }
 function goBack(){
   const v=(STATE.viewHist||[]).pop();
   if(v==null) return;
   STATE.navBack=true;
-  document.getElementById('opt-view').value=v;
+  const sel=document.getElementById('opt-view');
+  sel.querySelectorAll('option.ctx').forEach(o=>o.classList.toggle('hidden', o.value!==v));
+  sel.value=v;
   render();
   STATE.navBack=false;
 }
@@ -4545,8 +4613,7 @@ async function refreshFromFolder(){
   const rows=Object.values(hosts).sort((a,b)=>a.host.localeCompare(b.host));
   if(!rows.length){ alert('Nothing in that folder looks like a device capture.\n\nExpected names like SW01.cfg, SW01.routes.txt, SW01.cdp.txt'); return; }
 
-  const known=new Set(STATE.devices.map(d=>d.name.toLowerCase()));
-  for(const r of rows) r.known = known.has(r.host.toLowerCase());
+  for(const r of rows) r.known = !!deviceForCapture(r.host, '');
   showFolderPicker(rows);
 }
 
@@ -4608,18 +4675,23 @@ async function applyFolderRefresh(rows, sel){
   for(const r of rows){
     const want=sel[r.host]||{};
     const pick=(k)=>want[k] && r.files[k] ? r.files[k] : null;
-    let dev=STATE.devices.find(d=>d.name.toLowerCase()===r.host.toLowerCase());
+    let dev=deviceForCapture(r.host, '');
 
     try{
       const cf=pick('config');
       if(cf){
         const text=await cf.get();
+        if(!dev){
+          const probe=parseConfig(text, cf.name);
+          dev=STATE.devices.find(d=>d.name.toLowerCase()===String(probe.name).toLowerCase()) || null;
+        }
         if(dev){ reparseInto(dev, text); dev.originalText=text; updated++; }   // keeps every setting
         else{
           addText(text, cf.name);
           dev=STATE.devices[STATE.devices.length-1];
           added++;
         }
+        if(dev) dev.sourceStem=r.host;
       }
       if(!dev) continue;                       // routes or neighbours with no device to attach to
 
@@ -4795,6 +4867,115 @@ function linkPolicyHtml(a, b, ifacesByDev){
   return out.join('');
 }
 
+
+/* ============================================================
+   Resilience checks
+
+   Two questions a config review by hand almost never answers, and a migration
+   most needs answered:
+
+   1. Single points of failure. Every device is removed in turn and the flow
+      list is re-run against what is left. A device whose loss breaks flows is
+      one you have no working redundancy for — whatever the HSRP and vPC
+      config says.
+
+   2. Asymmetric paths. Each flow is traced forward and back. Where the return
+      crosses a different stateful firewall from the outbound, the firewall
+      will not have the session and will drop the reply, even though each
+      direction looks fine on its own.
+
+   Both reuse the ordinary trace engine, so they only ever say what a trace
+   would say — no separate model to trust.
+   ============================================================ */
+function flowsForChecks(){
+  const list=parseFlowList(STATE.flowText||'').filter(f=>!f.bad);
+  return list;
+}
+/* For these checks a flow only counts as working if it was actually delivered
+   inside the modelled network. "Forwarded off-network" is a success for an
+   internet-bound flow, but when a device has just been removed it usually
+   means the packet fell off the edge of what is left — which is a break. */
+function delivered(t){
+  return !!(t && t.verdict && t.verdict.ok && !t.exitsNetwork);
+}
+
+/* Which devices, if lost, would break which flows. */
+function redundancyAudit(flows, opts){
+  const out=[];
+  const noPolicy=!!(opts&&opts.noPolicy);
+  // the baseline: which flows work with everything present
+  const base=new Map();
+  for(const f of flows){
+    const t=trace(STATE.model, f.src, f.dst, '', {noPolicy});
+    base.set(f.src+'>'+f.dst, delivered(t));
+  }
+  const working=flows.filter(f=>base.get(f.src+'>'+f.dst));
+  for(const d of STATE.devices){
+    if(!deviceInScope(d)) continue;                     // filtered assets take no part
+    const rest=STATE.devices.filter(x=>x!==d);
+    const m=buildModel(rest, modelOpts());
+    const broken=[];
+    for(const f of working){
+      const t=trace(m, f.src, f.dst, '', {noPolicy});
+      if(!delivered(t)) broken.push({src:f.src, dst:f.dst, note:f.note||'', why:(t.verdict&&t.verdict.title)||(t.error||'')});
+    }
+    out.push({dev:d, broken, total:working.length});
+  }
+  out.sort((a,b)=>b.broken.length-a.broken.length || a.dev.name.localeCompare(b.dev.name));
+  return {rows:out, working:working.length, total:flows.length};
+}
+
+/* Which flows return through a different firewall than they went out. */
+function returnPathAudit(flows, opts){
+  const noPolicy=!!(opts&&opts.noPolicy);
+  const out=[];
+  const fwHops=(t)=>(t.hops||[]).filter(h=>isFirewall(h.dev)).map(h=>h.dev.name);
+  for(const f of flows){
+    const fwd=trace(STATE.model, f.src, f.dst, '', {noPolicy});
+    /* The reply leaves the destination host towards ITS gateway — the switch
+       or HSRP address it points its default route at — not back to whichever
+       device happened to deliver the request. deviceForAddress ranks gateway
+       candidates that way, so the plain lookup is the right starting point. */
+    const rev=trace(STATE.model, f.dst, f.src, '', {noPolicy});
+    const fOk=!!(fwd.verdict&&fwd.verdict.ok), rOk=!!(rev.verdict&&rev.verdict.ok);   // off-network is fine here
+    const fFw=fwHops(fwd), rFw=fwHops(rev).slice().reverse();
+    let status, detail;
+    if(!fOk && !rOk){ status='both-fail'; detail='Neither direction works: '+((fwd.verdict&&fwd.verdict.title)||fwd.error||''); }
+    else if(!rOk){ status='no-return'; detail='Forward works but the reply does not: '+((rev.verdict&&rev.verdict.title)||rev.error||''); }
+    else if(!fOk){ status='no-forward'; detail='Only the reverse direction works: '+((fwd.verdict&&fwd.verdict.title)||fwd.error||''); }
+    else if(fFw.join('|')!==rFw.join('|')){
+      status='asymmetric';
+      detail='Out via '+(fFw.join(' \u2192 ')||'no firewall')+', back via '+(rFw.slice().reverse().join(' \u2192 ')||'no firewall')+
+             '. A stateful firewall that only sees one direction drops the reply.';
+    } else { status='ok'; detail=fFw.length?'Both directions cross '+fFw.join(' \u2192 '):'No firewall in either direction'; }
+    out.push({src:f.src, dst:f.dst, note:f.note||'', status, detail,
+              fwdPath:(fwd.hops||[]).map(h=>h.dev.name).join(' \u2192 '),
+              revPath:(rev.hops||[]).map(h=>h.dev.name).join(' \u2192 ')});
+  }
+  const order={asymmetric:0,'no-return':1,'no-forward':2,'both-fail':3,ok:4};
+  out.sort((a,b)=>order[a.status]-order[b.status]);
+  return out;
+}
+
+function runResilienceChecks(){
+  const flows=flowsForChecks();
+  const note=document.getElementById('autosave-note');
+  if(!flows.length){
+    if(note) note.textContent='Add flows on the Flows tab first \u2014 the checks re-run your list with each device removed.';
+    STATE.gtab='flows'; renderGrid(); return;
+  }
+  const noPolicy=(document.getElementById('opt-nopolicy')||{}).checked;
+  STATE.redundancy=redundancyAudit(flows,{noPolicy});
+  STATE.returnPaths=returnPathAudit(flows,{noPolicy});
+  STATE.gtab='resilience';
+  renderGrid(); autosave();
+  const spof=STATE.redundancy.rows.filter(r=>r.broken.length).length;
+  const asym=STATE.returnPaths.filter(r=>r.status==='asymmetric').length;
+  const noret=STATE.returnPaths.filter(r=>r.status==='no-return').length;
+  if(note) note.textContent=spof+' single point'+(spof===1?'':'s')+' of failure \u00b7 '+
+    asym+' asymmetric \u00b7 '+noret+' with no return path';
+}
+
 /* ---------- picking several devices at once ---------- */
 STATE.treePick = STATE.treePick || new Set();
 
@@ -4913,7 +5094,7 @@ function renderDevTree(){
 }
 
 /* ---------- the grid: one table across every device ---------- */
-STATE.gtab = STATE.gtab || 'ifaces';
+STATE.gtab = STATE.gtab || 'flows';   // the migration question comes first
 STATE.gsort = STATE.gsort || {};
 function gridRows(tab){
   const m=STATE.model; if(!m) return {cols:[],rows:[]};
@@ -4995,6 +5176,38 @@ function gridRows(tab){
       ]};
     });
     return {cols:['Result','Source','Destination','Path','Note'], rows};
+  }
+  if(tab==='resilience'){
+    const rows=[];
+    const R=STATE.redundancy, P=STATE.returnPaths||[];
+    if(!R && !P.length) return {cols:['Result','Detail'], rows:[{cells:[
+      {html:'<span class="tg">not run</span>',sort:0},
+      {html:'Press <b>Check resilience</b> on the Flows tab. It needs a flow list to work from.',sort:''}]}]};
+    for(const r of (R?R.rows:[])){
+      const n=r.broken.length;
+      if(!n) continue;
+      rows.push({dev:r.dev.id, cells:[
+        {html:'<span class="tg w">single point of failure</span>', sort:0},
+        {html:'<span class="dv">'+esc(r.dev.name)+'</span>', sort:r.dev.name},
+        {html:'losing it breaks <b>'+n+'</b> of '+r.total+' working flow'+(r.total===1?'':'s'), sort:-n},
+        {html:esc(r.broken.slice(0,4).map(b=>b.src+' \u2192 '+b.dst).join(', ')+(n>4?' \u2026':'')), sort:''}
+      ]});
+    }
+    for(const x of P){
+      if(x.status==='ok') continue;
+      const lab={asymmetric:'asymmetric path','no-return':'no return path','no-forward':'no forward path','both-fail':'fails both ways'}[x.status];
+      rows.push({cells:[
+        {html:'<span class="tg w">'+esc(lab)+'</span>', sort:1},
+        {html:esc(x.src+' \u2194 '+x.dst), sort:x.src},
+        {html:esc(x.detail), sort:''},
+        {html:'<span class="muted">out: '+esc(x.fwdPath||'\u2014')+'<br>back: '+esc(x.revPath||'\u2014')+'</span>', sort:''}
+      ]});
+    }
+    if(!rows.length) rows.push({cells:[
+      {html:'<span class="tg ok">all clear</span>',sort:0},
+      {html:'No single device breaks a working flow, and every flow returns the way it went.',sort:''},
+      {html:'',sort:''},{html:'',sort:''}]});
+    return {cols:['Finding','Where','What','Flows / paths'], rows};
   }
   if(tab==='warnings'){
     const rows=[];
@@ -5084,6 +5297,8 @@ function updateFlowSummary(){
 function initFlows(){
   const run=document.getElementById('flow-run');
   if(run) run.onclick=runFlowsFromBox;
+  const rz=document.getElementById('flow-resilience');
+  if(rz) rz.onclick=runResilienceChecks;
   const clr=document.getElementById('flow-clear');
   if(clr) clr.onclick=()=>{
     const b=document.getElementById('flow-list'); if(b) b.value='';
@@ -5403,7 +5618,11 @@ function render(){
   if(!model || !model.devices.length){ el.style.display='flex'; if(STATE.cy){STATE.cy.destroy(); STATE.cy=null;} return; }
   el.style.display='none';
 
-  const view = (document.getElementById('opt-view')||{}).value || 'simple';
+  let view = (document.getElementById('opt-view')||{}).value || 'simple';
+  /* "Devices only" and "Everything" were near-duplicates of the two that
+     remain; a saved project asking for them gets the nearest. */
+  if(view==='devices') view='simple';
+  if(view==='all')     view='transit';
   const layer = (document.getElementById('opt-layer')||{}).value || 'both';
   // remember where we came from, unless this render is itself a Back
   STATE.viewHist = STATE.viewHist || [];
@@ -7197,14 +7416,19 @@ function divergence(b,a,cmp){
 /* ============================================================
    UI
    ============================================================ */
-function rebuild(){
-  STATE.model = buildModel(STATE.devices, {
+/* The options every model is built with, so a what-if model is built the
+   same way as the live one. */
+function modelOpts(){
+  return {
     igp: document.getElementById('opt-igp').checked,
     clouds: STATE.clouds||[],
     providers: STATE.providers||DEFAULT_PROVIDERS,
     autoDetect: document.getElementById('opt-autowan').checked,
     cloudOpts: STATE.cloudOpts||{}
-  });
+  };
+}
+function rebuild(){
+  STATE.model = buildModel(STATE.devices, modelOpts());
   renderDevList();
   renderGroups();
   renderProviders();
@@ -8627,6 +8851,9 @@ function showTrace(res, opts){
   let html='<div class="verdict '+(v.ok?'ok':'bad')+'"><b>'+esc(v.title)+
     (opts.label?' <span style="font-weight:400;color:var(--ink-faint)">— '+esc(opts.label)+'</span>':'')+
     '</b><p>'+esc(v.detail)+'</p></div>';
+  if(res.hops && res.hops.length && (document.getElementById('opt-view')||{}).value!=='path')
+    html+='<div class="btn-row" style="margin:10px 0 2px"><button class="btn" id="path-only">'+
+          'Show only these '+res.hops.length+' device'+(res.hops.length===1?'':'s')+'</button></div>';
   html+=pinHtml(res.pin,'pin-open');
   html+=hopsHtml(res);
   html+=traceNotes([res]);
@@ -8637,6 +8864,8 @@ function showTrace(res, opts){
   renderWarnings();
   const pinBtn=document.getElementById('pin-open');
   if(pinBtn) pinBtn.onclick=()=>openDeviceAt(res.pin.deviceId, res.pin.line);
+  const po=document.getElementById('path-only');
+  if(po) po.onclick=()=>setView('path');
 }
 
 /* ---- events ---- */
@@ -8665,7 +8894,14 @@ function addText(text, name){
 function deviceForCapture(host, text){
   const devs=STATE.devices||[];
   const bare=(n)=>String(n||'').split('.')[0].toLowerCase();
-  let d=devs.find(x=>x.name.toLowerCase()===String(host).toLowerCase());
+  /* The file stem this device was first loaded from. A firewall's hostname
+     rarely matches the name you gave its files — ABUDHABI_EXTERNAL.cfg holds a
+     box that calls itself something else — so the stem is the one reliable
+     link between SW.cfg, SW.route and SW.policy. */
+  const h=String(host).toLowerCase();
+  let d=devs.find(x=>(x.sourceStem||'').toLowerCase()===h);
+  if(d) return d;
+  d=devs.find(x=>x.name.toLowerCase()===h);
   if(d) return d;
   d=devs.find(x=>bare(x.name)===bare(host));
   if(d) return d;
@@ -8703,8 +8939,14 @@ async function ingestFiles(list){
 
     let dev=deviceForCapture(host, text);
     if(kind==='config'){
+      // the hostname inside the config identifies it better than the filename
+      if(!dev){
+        const probe=parseConfig(text, f.name);
+        dev=STATE.devices.find(d=>d.name.toLowerCase()===String(probe.name).toLowerCase()) || null;
+      }
       if(dev){ reparseInto(dev, text); dev.originalText=text; }
-      else { addText(text, f.name); made++; }
+      else { addText(text, f.name); dev=STATE.devices[STATE.devices.length-1]; made++; }
+      if(dev) dev.sourceStem=host;
       continue;
     }
     if(!dev){ orphan.push(f.name); continue; }   // nothing to attach it to
@@ -8926,6 +9168,7 @@ function runTrace(){
   const focus = document.getElementById('opt-focus').checked;
   const finish = (res)=>{
     STATE.lastTrace=res;
+    syncViewMenu();
     if(focus && !res.error && res.hops && res.hops.length){
       setView('path');     // render paints the trace itself
     } else {
@@ -9537,6 +9780,26 @@ function buildChangeReport(){
     L.push('');
   }
 
+  // resilience findings, when the checks have been run
+  if(STATE.redundancy || (STATE.returnPaths||[]).length){
+    L.push('## Resilience');
+    L.push('');
+    const spof=(STATE.redundancy?STATE.redundancy.rows:[]).filter(r=>r.broken.length);
+    if(spof.length){
+      L.push('**Single points of failure**');
+      L.push('');
+      for(const r of spof) L.push('- **'+r.dev.name+'** \u2014 losing it breaks '+r.broken.length+' of '+r.total+' working flows');
+      L.push('');
+    } else L.push('- No single device breaks a working flow.');
+    const bad=(STATE.returnPaths||[]).filter(x=>x.status!=='ok');
+    if(bad.length){
+      L.push('**Return-path problems**');
+      L.push('');
+      for(const x of bad) L.push('- `'+x.src+' \u2194 '+x.dst+'` \u2014 '+x.detail);
+    } else L.push('- Every flow returns the way it went out.');
+    L.push('');
+  }
+
   // config differences
   const diffs=STATE.devices.map(diffDevice).filter(x=>x&&x.changed);
   L.push('## Configuration changes');
@@ -9664,6 +9927,7 @@ function serializeDevice(d){
       bg: d.bg||null, fg: d.fg||null, nopol: !!d.noPolicy,
       boxW: d.boxW||null, boxH: d.boxH||null,
       fontSize: d.fontSize||null, bold: d.bold!=null?d.bold:null, font: d.font||null,
+      stem: d.sourceStem||null,
       nbrs: d.neighbors||[],
       bgp: d.bgpTable||[],
       auth:d.tableAuthoritative,
@@ -9681,6 +9945,7 @@ function deviceFromRecord(pd){
   d.groupId = pd.group||null;
   d.noPolicy = !!pd.nopol;
   if(pd.boxW) d.boxW=pd.boxW;
+  if(pd.stem) d.sourceStem=pd.stem;
   if(pd.boxH) d.boxH=pd.boxH;
   if(pd.fontSize) d.fontSize=pd.fontSize;
   if(pd.font) d.font=pd.font;
@@ -9915,6 +10180,15 @@ const LAB_DEVICES = [
    device in a redundant pair, and everything crossing the firewall pair. The
    two sites meet over a DCI between their internal cores. */
 document.getElementById('refresh-folder').onclick=()=>refreshFromFolder();
+(function(){
+  const dlg=document.getElementById('settings'), back=document.getElementById('settings-back');
+  const open=()=>{ dlg.classList.remove('hidden'); back.classList.remove('hidden'); };
+  const close=()=>{ dlg.classList.add('hidden'); back.classList.add('hidden'); };
+  document.getElementById('open-settings').onclick=open;
+  document.getElementById('settings-close').onclick=close;
+  back.onclick=close;
+  document.addEventListener('keydown',e=>{ if(e.key==='Escape' && !dlg.classList.contains('hidden')) close(); });
+})();
 document.getElementById('load-sample').onclick=()=>{
   /* The example is not your file. Detaching the filename stops it being
      written over the project remembered for the next start. */
