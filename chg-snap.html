@@ -31,27 +31,31 @@
 <body>
 <main>
   <h1>CHG Snap</h1>
-  <p class="lead">One click on a ServiceNow change saves it as a PDF and hands it to your CHG Reviewer agent.</p>
+  <p class="lead">One click on a ServiceNow change saves it as a PDF and opens your CHG Reviewer agent with the prompt and a link to the PDF.</p>
 
   <section>
     <h2>Set it up once</h2>
     <ol>
-      <li>Delete the old "Get CHG PDFs" bookmark.</li>
-      <li>Drag this button onto your bookmarks bar: <a class="drag" id="bm" href="#">CHG Snap</a></li>
-      <li>First click: pick a save folder inside your OneDrive. If the browser offers "Allow on every visit", choose it.</li>
-      <li>In the panel that appears, click <b>Set agent link</b> and paste your agent's Share / Copy link.</li>
+      <li>Replace your old CHG Snap bookmark: drag this onto the bookmarks bar: <a class="drag" id="bm" href="#">CHG Snap</a></li>
+      <li>Click it on a ServiceNow tab. The panel's settings rows sit under the change number box:
+        <ul>
+          <li><b>Save folder</b>: pick a folder inside your OneDrive (e.g. "CHG Reviews"). Choose "Allow on every visit" if offered.</li>
+          <li><b>OneDrive link</b>: open that same folder in OneDrive on the web and paste the address-bar URL. This lets the prompt link straight to each PDF.</li>
+          <li><b>Agent link</b>: open your CHG Reviewer agent in Copilot and paste its address-bar URL (…/chat/agent/…).</li>
+        </ul>
+      </li>
+      <li>Recommended: in the agent's Knowledge, add that OneDrive folder as a backup source.</li>
     </ol>
   </section>
 
   <section>
     <h2>Use it</h2>
     <ol>
-      <li><b>On an open change:</b> click CHG Snap. That's it, no questions.</li>
-      <li><b>Several changes:</b> highlight the CHG numbers on any page (a list works), then click.</li>
-      <li><b>Anywhere else:</b> click, and type the change number(s).</li>
-      <li>Click <b>Open CHG Reviewer agent</b> in the panel, paste (Ctrl+V), attach the PDF, send.</li>
+      <li><b>On an open change:</b> click CHG Snap. It saves the PDF straight away.</li>
+      <li><b>Other changes:</b> type or edit numbers in the box and press Enter. Highlighting CHG numbers on the page before clicking also works.</li>
+      <li>Click <b>Open in CHG Reviewer</b>. The prompt is also copied, so if it isn't prefilled, just paste.</li>
     </ol>
-    <p><small>Files are saved as CHG0012345.pdf. Folder saving needs Edge or Chrome; otherwise files go to Downloads.</small></p>
+    <p><small>Give OneDrive a few seconds to sync before sending, or Copilot may not find the file yet.</small></p>
   </section>
 
   <section>
@@ -66,9 +70,11 @@
 async function chgSnap() {
   const O = location.origin;
   const opt = { credentials: 'same-origin' };
-  const KEY_AGENT = 'chgpdf_agent_url';
+  const K_AGENT = 'chgpdf_agent_url', K_OD = 'chgsnap_onedrive_base';
   const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
+  /* ---------- storage ---------- */
   const idb = (mode, fn) => new Promise((res, rej) => {
     const r = indexedDB.open('chgpdf', 1);
     r.onupgradeneeded = () => r.result.createObjectStore('kv');
@@ -79,27 +85,29 @@ async function chgSnap() {
       q.onerror = () => rej(q.error);
     };
   });
-
-  const pickDir = async force => {
-    if (!window.showDirectoryPicker) return null;
+  let dir = await idb('readonly', s => s.get('dir')).catch(() => null);
+  const dirPerm = async ask => {
+    if (!dir) return false;
     try {
-      if (!force) {
-        const saved = await idb('readonly', s => s.get('dir')).catch(() => null);
-        if (saved) {
-          let p = await saved.queryPermission({ mode: 'readwrite' });
-          if (p !== 'granted') p = await saved.requestPermission({ mode: 'readwrite' });
-          if (p === 'granted') return saved;
-        }
-      }
-      const h = await window.showDirectoryPicker({ id: 'chgpdf', mode: 'readwrite' });
-      await idb('readwrite', s => s.put(h, 'dir'));
-      return h;
-    } catch (e) {
-      console.warn('CHG Snap: folder not available, using Downloads:', e);
-      return null;
-    }
+      let p = await dir.queryPermission({ mode: 'readwrite' });
+      if (p !== 'granted' && ask) p = await dir.requestPermission({ mode: 'readwrite' });
+      return p === 'granted';
+    } catch (e) { return false; }
+  };
+  let dirOk = await dirPerm(true);   // bookmark click counts as user action
+
+  const normOD = u => {
+    u = (u || '').trim();
+    if (!u) return '';
+    try {
+      const x = new URL(u);
+      const id = x.searchParams.get('id');
+      if (id && id.startsWith('/')) return x.origin + id.split('/').map(encodeURIComponent).join('/');
+      return (x.origin + x.pathname.replace(/^\/:[a-z]:\/[rs]/i, '')).replace(/\/+$/, '');
+    } catch (e) { return ''; }
   };
 
+  /* ---------- ServiceNow lookups ---------- */
   const getJSON = async url => {
     try {
       const r = await fetch(url, opt);
@@ -110,7 +118,6 @@ async function chgSnap() {
   const attr = (html, id) =>
     (html.match(new RegExp('id="' + id + '"[^>]*value="([^"]*)"')) ||
      html.match(new RegExp('value="([^"]*)"[^>]*id="' + id + '"')) || [])[1];
-
   const byNumber = async num => {
     const q = encodeURIComponent('number=' + num);
     const j = await getJSON(`${O}/change_request.do?JSONv2&sysparm_action=getRecords&sysparm_query=${q}`);
@@ -130,8 +137,6 @@ async function chgSnap() {
     } catch (e) {}
     return 'CHG_' + sid.slice(0, 8);
   };
-
-  // Work out which change(s) the user means, without asking if possible
   const detect = () => {
     const sel = String(window.getSelection ? window.getSelection() : '').toUpperCase().match(/CHG\d+/g);
     if (sel) return { list: [...new Set(sel)] };
@@ -158,33 +163,96 @@ async function chgSnap() {
     return null;
   };
 
-  let dir = await pickDir(false);
-
-  const report = [], saved = [], targets = [];
   const d = detect();
-  if (d && d.sid) {
-    targets.push({ sid: d.sid, num: d.num || await numberFor(d.sid) });
-  } else {
-    let list = d && d.list;
-    if (!list) {
-      const raw = prompt('CHG Snap: change number(s), e.g. CHG0012345:');
-      if (!raw) return;
-      list = [...new Set(raw.toUpperCase().match(/CHG\d+/g) || [])];
-      if (!list.length) { alert('No CHG numbers found in what you entered.'); return; }
-    }
-    for (const num of list) {
-      const t = await byNumber(num);
-      if (t) targets.push(t); else report.push(`${num}: not found, or no access`);
-    }
-  }
+  if (d && d.sid && !d.num) d.num = await numberFor(d.sid);
+  const known = {};
+  if (d && d.sid) known[d.num] = d.sid;
+  const prefill = d ? (d.sid ? [d.num] : d.list) : [];
 
+  /* ---------- panel ---------- */
+  document.getElementById('chgsnap-panel')?.remove();
+  const P = document.createElement('div');
+  P.id = 'chgsnap-panel';
+  P.innerHTML = `
+<style>
+#chgsnap-panel{position:fixed;right:16px;bottom:16px;z-index:2147483647;width:350px;max-width:calc(100vw - 32px);
+  background:#fff;color:#1d2733;border:1px solid #c9d1da;border-radius:8px;box-shadow:0 6px 24px rgba(0,0,0,.22);
+  font:14px/1.45 "Segoe UI",system-ui,sans-serif;padding:14px 16px;text-align:left}
+#chgsnap-panel *{box-sizing:border-box;font:inherit;color:inherit;letter-spacing:normal}
+#chgsnap-panel .hd{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+#chgsnap-panel .hd b{font-weight:600;font-size:15px}
+#chgsnap-panel .x{border:0;background:none;cursor:pointer;font-size:18px;line-height:1;color:#5a6878;padding:2px 6px}
+#chgsnap-panel .row{display:flex;gap:6px}
+#chgsnap-panel input{flex:1;min-width:0;padding:7px 9px;border:1px solid #c9d1da;border-radius:6px;background:#fff}
+#chgsnap-panel input:focus{outline:2px solid #1f5f8b;outline-offset:0}
+#chgsnap-panel .btn{padding:7px 12px;border:1px solid #1f5f8b;border-radius:6px;background:#fff;color:#1f5f8b;cursor:pointer;
+  text-decoration:none;text-align:center;white-space:nowrap}
+#chgsnap-panel .pri{background:#1f5f8b;color:#fff}
+#chgsnap-panel .btn:focus-visible,#chgsnap-panel .x:focus-visible{outline:2px solid #1d2733;outline-offset:2px}
+#chgsnap-panel .set{margin-top:8px;border-top:1px solid #e3e8ee;padding-top:6px}
+#chgsnap-panel .s{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:3px 0;color:#5a6878;font-size:13px}
+#chgsnap-panel .s span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#chgsnap-panel .s .v{color:#1d2733}
+#chgsnap-panel .s .warn{color:#8a4b00}
+#chgsnap-panel .lk{border:0;background:none;color:#1f5f8b;cursor:pointer;padding:0;text-decoration:underline;flex:none}
+#chgsnap-panel .st{margin-top:8px;max-height:110px;overflow:auto}
+#chgsnap-panel .st:empty{display:none}
+#chgsnap-panel .ho{margin-top:8px;display:none;gap:6px}
+#chgsnap-panel .ho .btn{flex:1}
+</style>
+<div class="hd"><b>CHG Snap</b><button class="x" data-a="close" aria-label="Close">×</button></div>
+<div class="row">
+  <input data-f="chg" placeholder="CHG0012345, CHG0012346" aria-label="Change numbers">
+  <button class="btn pri" data-a="snap">Snap PDF</button>
+</div>
+<div class="set">
+  <div class="s"><span>Save folder: <span class="v" data-f="dir"></span></span><button class="lk" data-a="dir">Change</button></div>
+  <div class="s"><span>OneDrive link: <span class="v" data-f="od"></span></span><button class="lk" data-a="od">Set</button></div>
+  <div class="s"><span>Agent link: <span class="v" data-f="ag"></span></span><button class="lk" data-a="ag">Set</button></div>
+</div>
+<div class="st" data-f="status"></div>
+<div class="ho" data-f="handoff">
+  <a class="btn pri" data-a="open" target="_blank" rel="noopener">Open in CHG Reviewer</a>
+  <button class="btn" data-a="copy">Copy prompt</button>
+</div>`;
+  document.body.appendChild(P);
+  const $ = s => P.querySelector(s);
+  const input = $('[data-f="chg"]');
+  input.value = prefill.join(', ');
+
+  let promptText = '';
+  const agentUrl = () => { const a = localStorage.getItem(K_AGENT) || ''; return /^https:\/\//i.test(a) ? a : ''; };
+  const renderSettings = () => {
+    const fd = $('[data-f="dir"]');
+    if (!window.showDirectoryPicker) { fd.innerHTML = '<span class="warn">Downloads (browser can\'t pick folders)</span>'; $('[data-a="dir"]').style.display = 'none'; }
+    else if (!dir) fd.innerHTML = '<span class="warn">not set, using Downloads</span>';
+    else fd.innerHTML = esc(dir.name) + (dirOk ? '' : ' <span class="warn">(needs permission)</span>');
+    const od = localStorage.getItem(K_OD) || '';
+    $('[data-f="od"]').innerHTML = od ? esc(decodeURIComponent(od.split('/').pop())) : '<span class="warn">not set</span>';
+    $('[data-a="od"]').textContent = od ? 'Change' : 'Set';
+    const ag = agentUrl();
+    $('[data-f="ag"]').innerHTML = ag ? 'set' : '<span class="warn">not set</span>';
+    $('[data-a="ag"]').textContent = ag ? 'Change' : 'Set';
+    renderHandoff();
+  };
+  const renderHandoff = () => {
+    const ho = $('[data-f="handoff"]'), open = $('[data-a="open"]'), ag = agentUrl();
+    ho.style.display = promptText ? 'flex' : 'none';
+    if (ag && promptText) {
+      open.style.display = '';
+      open.href = ag + (ag.includes('?') ? '&' : '?') + 'q=' + encodeURIComponent(promptText);
+    } else open.style.display = 'none';
+  };
+  const status = html => { $('[data-f="status"]').innerHTML = html; };
+
+  /* ---------- actions ---------- */
   const save = async (blob, name) => {
-    if (dir) {
+    if (dir && (dirOk || (dirOk = await dirPerm(true)))) {
       try {
         const fh = await dir.getFileHandle(name, { create: true });
         const w = await fh.createWritable();
         await w.write(blob); await w.close();
-        return;
+        return 'folder';
       } catch (e) { console.warn('CHG Snap: folder write failed, using Downloads:', e); }
     }
     const a = document.createElement('a');
@@ -192,65 +260,84 @@ async function chgSnap() {
     document.body.appendChild(a); a.click();
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 10000);
     await sleep(600);
+    return 'downloads';
   };
 
-  for (const t of targets) {
+  let busy = false;
+  const snap = async () => {
+    if (busy) return;
+    const list = [...new Set(input.value.toUpperCase().match(/CHG\d+/g) || [])];
+    if (!list.length) { status('Enter a change number, e.g. CHG0012345.'); input.focus(); return; }
+    busy = true; promptText = ''; renderHandoff();
+    const lines = [], saved = [];
+    for (const num of list) {
+      status(esc([...lines, `${num}: saving…`].join('<br>')).replace(/&lt;br&gt;/g, '<br>'));
+      try {
+        const t = known[num] ? { sid: known[num], num } : await byNumber(num);
+        if (!t) { lines.push(`${num}: not found, or no access`); continue; }
+        const r = await fetch(`${O}/change_request.do?PDF&sys_id=${t.sid}`, opt);
+        const b = await r.blob();
+        const head = String.fromCharCode(...new Uint8Array(await b.slice(0, 4).arrayBuffer()));
+        if (!(r.ok && head === '%PDF')) { lines.push(`${num}: PDF export failed (HTTP ${r.status})`); continue; }
+        const name = `${num}.pdf`;
+        const where = await save(b, name);
+        saved.push({ num, name });
+        lines.push(`${num}: saved to ${where === 'folder' ? dir.name : 'Downloads'}`);
+      } catch (e) { lines.push(`${num}: error, ${e.message}`); }
+    }
+    status(lines.map(esc).join('<br>'));
+    if (saved.length) {
+      const od = localStorage.getItem(K_OD) || '';
+      const many = saved.length > 1;
+      promptText =
+        `Review ${many ? 'these change requests' : 'this change request'} using the attached PDF${many ? 's' : ''} as the source document${many ? 's' : ''}:\n` +
+        saved.map(s => `- ${s.num}: ${od ? od + '/' + encodeURIComponent(s.name) : s.name}`).join('\n');
+    }
+    renderHandoff();
+    busy = false;
+  };
+
+  const chooseDir = async () => {
     try {
-      const r = await fetch(`${O}/change_request.do?PDF&sys_id=${t.sid}`, opt);
-      const b = await r.blob();
-      const head = String.fromCharCode(...new Uint8Array(await b.slice(0, 4).arrayBuffer()));
-      if (r.ok && head === '%PDF') {
-        const name = `${t.num}.pdf`.replace(/[\\/:*?"<>|]+/g, '_');
-        await save(b, name); saved.push(name); report.push(`${t.num}: saved`);
-      } else report.push(`${t.num}: PDF export failed (HTTP ${r.status})`);
-    } catch (e) { report.push(`${t.num}: error, ${e.message}`); }
-  }
-
-  const nums = targets.map(t => t.num);
-  const promptText = `Review ${nums.length > 1 ? 'these change requests' : 'this change request'}: ${nums.join(', ')}.` +
-    (saved.length ? ` File${saved.length > 1 ? 's' : ''}: ${saved.join(', ')}.` : '');
-
-  const showPanel = () => {
-    document.getElementById('chgsnap-panel')?.remove();
-    const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-    const agent = localStorage.getItem(KEY_AGENT) || '';
-    const agentOk = /^https:\/\//i.test(agent);
-    const btn = 'display:block;width:100%;margin-top:6px;padding:7px 10px;border:1px solid #1f5f8b;border-radius:6px;background:#fff;color:#1f5f8b;font:inherit;cursor:pointer;text-align:center;text-decoration:none;box-sizing:border-box';
-    const p = document.createElement('div');
-    p.id = 'chgsnap-panel';
-    p.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483647;width:320px;max-width:calc(100vw - 32px);background:#fff;color:#1d2733;border:1px solid #c9d1da;border-radius:8px;box-shadow:0 6px 24px rgba(0,0,0,.2);font:14px/1.45 "Segoe UI",system-ui,sans-serif;padding:14px 16px';
-    p.innerHTML =
-      `<div style="font-weight:600;margin-bottom:6px">CHG Snap</div>` +
-      `<div style="max-height:120px;overflow:auto;margin-bottom:6px">${(report.length ? report : ['Nothing to save']).map(esc).join('<br>')}</div>` +
-      `<div style="color:#5a6878;margin-bottom:4px">Saved to: ${esc(dir ? 'folder "' + dir.name + '"' : 'Downloads')}</div>` +
-      (agentOk
-        ? `<a data-a="open" href="${esc(agent)}" target="_blank" rel="noopener" style="${btn};background:#1f5f8b;color:#fff">Open CHG Reviewer agent</a>`
-        : `<div style="color:#8a4b00;margin:6px 0">Set your agent link to open Copilot from here.</div>`) +
-      `<button data-a="copy" style="${btn}">Copy review prompt</button>` +
-      `<button data-a="agent" style="${btn}">${agentOk ? 'Change' : 'Set'} agent link</button>` +
-      `<button data-a="folder" style="${btn}">Choose save folder (next run)</button>` +
-      `<button data-a="close" style="${btn};border-color:#c9d1da;color:#5a6878">Close</button>`;
-    p.addEventListener('click', async e => {
-      const a = e.target.closest('[data-a]');
-      if (!a) return;
-      const act = a.dataset.a;
-      if (act === 'open' || act === 'copy') {
-        try { await navigator.clipboard.writeText(promptText); if (act === 'copy') a.textContent = 'Copied'; }
-        catch (err) { if (act === 'copy') prompt('Copy this prompt:', promptText); }
-      }
-      if (act === 'agent') {
-        const u = prompt('Paste your CHG Reviewer agent link (Copilot: agent menu → Share / Copy link):', agent);
-        if (u !== null) { localStorage.setItem(KEY_AGENT, u.trim()); showPanel(); }
-      }
-      if (act === 'folder') {
-        const nd = await pickDir(true);
-        if (nd) { dir = nd; showPanel(); }
-      }
-      if (act === 'close') p.remove();
-    });
-    document.body.appendChild(p);
+      const h = await window.showDirectoryPicker({ id: 'chgpdf', mode: 'readwrite' });
+      await idb('readwrite', s => s.put(h, 'dir'));
+      dir = h; dirOk = true;
+    } catch (e) { /* cancelled */ }
+    renderSettings();
   };
-  showPanel();
+
+  P.addEventListener('click', async e => {
+    const a = e.target.closest('[data-a]');
+    if (!a) return;
+    const act = a.dataset.a;
+    if (act === 'close') P.remove();
+    if (act === 'snap') snap();
+    if (act === 'dir') chooseDir();
+    if (act === 'od') {
+      const cur = localStorage.getItem(K_OD) || '';
+      const u = prompt('Open your save folder in OneDrive on the web and paste the address-bar URL:', cur);
+      if (u !== null) {
+        const n = normOD(u);
+        if (u.trim() && !n) alert('That doesn\'t look like a OneDrive URL.');
+        else localStorage.setItem(K_OD, n);
+        renderSettings();
+      }
+    }
+    if (act === 'ag') {
+      const u = prompt('Open your CHG Reviewer agent in Copilot and paste the address-bar URL:', localStorage.getItem(K_AGENT) || '');
+      if (u !== null) { localStorage.setItem(K_AGENT, u.trim()); renderSettings(); }
+    }
+    if (act === 'open' || act === 'copy') {
+      try { await navigator.clipboard.writeText(promptText); if (act === 'copy') { a.textContent = 'Copied'; setTimeout(() => a.textContent = 'Copy prompt', 1500); } }
+      catch (err) { if (act === 'copy') prompt('Copy this prompt:', promptText); }
+    }
+  });
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); snap(); } });
+  P.addEventListener('keydown', e => { if (e.key === 'Escape') P.remove(); });
+
+  renderSettings();
+  if (!dir && window.showDirectoryPicker) status('Tip: set a save folder in OneDrive so Copilot can read the PDFs.');
+  if (d && d.sid) snap(); else input.focus();
 }
 
 const code = '(' + chgSnap.toString() + ')();';
