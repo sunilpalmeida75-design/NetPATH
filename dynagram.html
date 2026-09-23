@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Dynagram 0.15 — dynamic network diagrams from device configs</title>
+<title>Dynagram 0.19 — dynamic network diagrams from device configs</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -562,6 +562,17 @@ body.zen .sb-show{position:fixed;right:14px;top:10px}
 .pick.hidden,.pick-back.hidden{display:none}
 
 #opt-view option.hidden{display:none}
+
+.secrules{display:flex;align-items:center;gap:8px;margin-top:8px}
+.secrules .toggle{flex:1;font-size:12.5px}
+.secrules .btn{padding:4px 9px;font-size:12px}
+.sec-status{font-size:11.5px;color:var(--amber,#e0a53a);margin-top:4px;min-height:0}
+.sec-status:empty{display:none}
+.secpick-row{display:grid;grid-template-columns:22px 1fr auto;gap:8px;align-items:center;
+  padding:6px 14px;border-bottom:1px solid var(--rule);cursor:pointer}
+.secpick-row:hover{background:var(--panel)}
+.secpick-row .meta{font-size:11.5px;color:var(--ink-faint);white-space:nowrap}
+.secpick-row input{accent-color:var(--amber,#e0a53a)}
 </style>
 </head>
 <body>
@@ -764,6 +775,12 @@ body.zen .sb-show{position:fixed;right:14px;top:10px}
         </div>
       </div>
       <button class="btn btn-go" id="run" style="width:100%">Trace the path</button>
+      <div class="secrules">
+        <label class="toggle" title="Trace routing only: no firewall rule or access list is evaluated anywhere">
+          <input type="checkbox" id="sec-all"> Ignore all security rules and ACLs</label>
+        <button class="btn" id="sec-pick" title="Choose which devices' rules to ignore">Per device…</button>
+      </div>
+      <div id="sec-status" class="sec-status"></div>
     </div>
     <div class="rail-body" id="result">
       <p class="note">Enter two addresses and trace. Each hop shows the route that matched,
@@ -845,7 +862,11 @@ body.zen .sb-show{position:fixed;right:14px;top:10px}
       <p class="cfg-note" style="margin:2px 0 8px">Applies to every device at once; the text is scaled to fit. Leave blank to size each box around its own name. A device given its own size still wins.</p>
       <div class="rt-form">
         <input type="number" id="th-devFontSize" placeholder="device text size" min="9" max="24">
-        <input type="number" id="th-zoneFontSize" placeholder="zone text size" min="9" max="24">
+        <input type="number" id="th-zoneFontSize" placeholder="zone text size" min="9" max="36">
+      </div>
+      <div class="rt-form" style="align-items:center">
+        <label style="font-size:12px;color:var(--ink-dim)">Zone name-tab text</label>
+        <input type="color" id="th-zoneTabColor" title="Name-tab text colour for every zone">
       </div>
       <div class="rt-form">
         <select id="th-devFont" title="Device typeface"></select>
@@ -1044,7 +1065,9 @@ function parseCisco(text, fname){
     if(!indented){
       let am;
       /* ip access-list extended NAME  — entries follow, indented */
-      if((am=t.match(/^ip\s+access-list\s+(?:extended|standard)\s+(\S+)/i))){
+      /* IOS:   ip access-list extended NAME
+         NX-OS: ip access-list NAME            (no extended/standard keyword) */
+      if((am=t.match(/^ip\s+access-list\s+(?:(?:extended|standard)\s+)?(?!extended\b|standard\b|resequence\b|logging\b)(\S+)\s*$/i))){
         curAcl=dev.acls[am[1]]=dev.acls[am[1]]||{name:am[1], entries:[], line:lineNo};
         cur=null; ctx='acl'; return;
       }
@@ -2007,6 +2030,11 @@ function isFirewall(d){ return !!d && d.vendor==='palo-alto'; }
    and if so is it permitted. Ports and protocols are kept so a rule that only
    covers tcp/443 does not silently block everything. */
 function parseAceLine(t, lineNo){
+  /* "10 permit ip any any" and "20 deny udp any any eq snmp": IOS-XE and NX-OS
+     number their entries. The number is the order, which is already the order
+     the lines appear in; it is not part of the match. Missing this was why a
+     numbered list parsed to nothing and everything hit the implicit deny. */
+  t=String(t).replace(/^\s*\d+\s+(?=(permit|deny|remark)\b)/i,'');
   let m=t.match(/^(?:permit|deny)\b/i) ? t : null;
   if(!m) return null;
   const act = /^permit/i.test(t) ? 'permit' : 'deny';
@@ -2055,21 +2083,53 @@ function aceMatches(ace, sIp, dIp){
 }
 /* Walk an access list in order and return the first entry that matches.
    Nothing matched means the implicit deny at the end. */
-function evalAcl(dev, name, sIp, dIp){
+/* Well-known port names as they appear in access lists. */
+const PORT_NAMES={ftp:21,'ftp-data':20,ssh:22,telnet:23,smtp:25,domain:53,dns:53,bootps:67,bootpc:68,
+  tftp:69,www:80,http:80,pop3:110,ntp:123,netbios:137,'netbios-ns':137,'netbios-dgm':138,'netbios-ss':139,
+  snmp:161,snmptrap:162,bgp:179,ldap:389,https:443,syslog:514,ldaps:636,rdp:3389,mysql:3306};
+function portNum(v){ const n=parseInt(v,10); return isNaN(n) ? (PORT_NAMES[String(v).toLowerCase()]??null) : n; }
+function portOk(spec, port){
+  if(!spec) return true;
+  if(port==null) return null;                     // cannot tell
+  const vals=(spec.vals||[]).map(portNum);
+  switch(spec.op){
+    case 'eq': return vals.includes(port);
+    case 'neq': return !vals.includes(port);
+    case 'lt': return port<vals[0];
+    case 'gt': return port>vals[0];
+    case 'range': return port>=vals[0] && port<=vals[1];
+    default: return null;
+  }
+}
+
+/* Walk an access list the way the router does: top to bottom, first match
+   wins, implicit deny at the end.
+
+   A line limited to a protocol or a port only applies to that traffic. When
+   the trace says what the traffic is (protocol and port), such a line is
+   matched properly. When it does not — a plain address-to-address trace —
+   the line is skipped rather than guessed at, and remembered: taking
+   "deny udp any any eq snmp" as the answer for all traffic is what blocked a
+   ping behind a list that ends in "permit ip any any". */
+function evalAcl(dev, name, sIp, dIp, flow){
   const acl = dev.acls && dev.acls[name];
   if(!acl) return null;                       // list not in the config we were given
+  const proto = flow && flow.proto ? String(flow.proto).toLowerCase() : null;
+  const dport = flow && flow.dport!=null ? +flow.dport : null;
+  const sport = flow && flow.sport!=null ? +flow.sport : null;
+  const skipped=[];
   for(const ace of acl.entries){
-    if(ace.proto!=='ip' && ace.proto!=='tcp' && ace.proto!=='udp' && ace.proto!=='icmp'){
-      // protocol-specific rule we cannot judge from addresses alone
-      if(!aceMatches(ace,sIp,dIp)) continue;
-      return {action:ace.action, ace, uncertain:true, name};
-    }
-    if(aceMatches(ace, sIp, dIp)){
-      const portScoped = !!(ace.sPorts || ace.dPorts);
-      return {action:ace.action, ace, uncertain:portScoped, name};
-    }
+    if(!aceMatches(ace, sIp, dIp)) continue;
+    const scoped = ace.proto!=='ip' || ace.sPorts || ace.dPorts;
+    if(!scoped) return {action:ace.action, ace, name, skipped};
+    if(!proto){ skipped.push(ace); continue; }                 // unknown traffic: not ours to judge
+    if(ace.proto!=='ip' && ace.proto!==proto) continue;        // a different protocol
+    const d=portOk(ace.dPorts, dport), sp=portOk(ace.sPorts, sport);
+    if(d===false || sp===false) continue;                      // a different port
+    if(d===null || sp===null){ skipped.push(ace); continue; }  // port unknown
+    return {action:ace.action, ace, name, skipped};
   }
-  return {action:'deny', ace:null, implicit:true, name};
+  return {action:'deny', ace:null, implicit:true, name, skipped};
 }
 
 function newDevice(vendor, fname){
@@ -2277,6 +2337,12 @@ function buildModel(devices, opts){
   const subnets={};   // "net/len" -> {net,len,members:[{dev,iface,addr}]}
   const byName={};
 
+  /* Clear last build's peer-induced shutdowns first: if the far end has since
+     been brought up, this end must come back with it. */
+  for(const d of devices) for(const i of d.interfaces||[]){
+    if(i._peerShut){ i.shutdown=false; delete i._peerShut; delete i.downReason; }
+  }
+
   for(const d of devices){
     d._vlans=null;
     if(byName[d.name])
@@ -2292,6 +2358,27 @@ function buildModel(devices, opts){
         (subnets[key] = subnets[key] || {net:netOf(a.ip,a.len), len:a.len, key, members:[]})
           .members.push({dev:d, iface:i, addr:a});
       }
+    }
+  }
+
+  /* A link with only two devices on it is down end to end if either end is
+     shut. The live end's own config says nothing, but it has no one to talk
+     to: without this it kept its connected route and a trace would happily
+     send traffic out of it. Shared segments with three or more devices are
+     left alone — one member going away does not take the others' VLAN down. */
+  for(const k in subnets){
+    const sn=subnets[k];
+    const devs=new Set(sn.members.map(m=>m.dev));
+    if(devs.size!==2) continue;
+    const shut=sn.members.filter(m=>m.iface.shutdown && !m.iface._peerShut);
+    if(!shut.length) continue;
+    const cause=shut[0];
+    for(const m of sn.members){
+      if(m.iface.shutdown) continue;
+      m.iface.shutdown=true;
+      m.iface._peerShut=true;
+      m.iface.downReason='the other end, '+cause.dev.name+' '+cause.iface.name+', is '+
+        (cause.iface.downReason && cause.iface.downReason!=='shut down' ? 'down ('+cause.iface.downReason+')' : 'shut down');
     }
   }
 
@@ -2902,11 +2989,11 @@ function trace(model, srcStr, dstStr, startId, opts){
     let acl=null;
     if(cur.vendor!=='palo-alto' && !bypass){
       if(inIf && inIf.acl && inIf.acl.in){
-        const r=evalAcl(cur, inIf.acl.in, src, dst);
+        const r=evalAcl(cur, inIf.acl.in, src, dst, opts);
         if(r) acl={dir:'in', iface:inIf.name, ...r};
       }
       if((!acl || acl.action==='permit') && outIf && outIf.acl && outIf.acl.out){
-        const r=evalAcl(cur, outIf.acl.out, src, dst);
+        const r=evalAcl(cur, outIf.acl.out, src, dst, opts);
         if(r && (r.action==='deny' || !acl)) acl={dir:'out', iface:outIf.name, ...r};
       }
     }
@@ -2924,6 +3011,10 @@ function trace(model, srcStr, dstStr, startId, opts){
     }
 
     const hop={dev:cur, inIf, outIf, route, pol, acl, nat, nextHop:route.nextHop};
+    if(acl && acl.skipped && acl.skipped.length)
+      hop.aclNote=acl.name+' also has '+acl.skipped.length+' line'+(acl.skipped.length===1?'':'s')+
+        ' for specific protocols or ports that this trace did not test: '+
+        acl.skipped.slice(0,3).map(a=>a.text).join('; ')+(acl.skipped.length>3?' \u2026':'');
     if(bypass && cur.vendor==='palo-alto') hop.policyBypassed=true;
     hops.push(hop);
 
@@ -2967,6 +3058,22 @@ function trace(model, srcStr, dstStr, startId, opts){
     // resolve the next device
     let nextDev=null;
     if(route.nextHop!=null){
+      /* A next hop on a link that is down goes nowhere. The static route is
+         still in the config, but no packet can reach that address: either this
+         end or the far end is shut. Stop here and say which. */
+      {
+        const tgt=model.devices.find(d=>d.interfaces.some(i=>i.addrs.some(a=>a.ip===route.nextHop)));
+        const tIf=tgt && tgt.interfaces.find(i=>i.addrs.some(a=>a.ip===route.nextHop));
+        const myIf=cur.interfaces.find(i=>i.addrs.some(a=>a.len<32 && inNet(route.nextHop,netOf(a.ip,a.len),a.len)));
+        const deadIf = (tIf && tIf.shutdown) ? {d:tgt,i:tIf} : (myIf && myIf.shutdown ? {d:cur,i:myIf} : null);
+        if(deadIf){
+          verdict={ok:false, title:'Next hop is down',
+            detail:cur.name+' routes '+cidr(route.net,route.len)+' via '+int2ip(route.nextHop)+
+                   ', but '+deadIf.d.name+' '+deadIf.i.name+' is down \u2014 '+(deadIf.i.downReason||'shut down')+
+                   '. The link carries no traffic.'};
+          break;
+        }
+      }
       let own = ownerOf(model, route.nextHop);
       if(!own){
         const v=vipOwner(model, route.nextHop);
@@ -3262,7 +3369,7 @@ function applyBends(els){
 /* A small stable hash, so a link always starts from the same channel. */
 /* Still pre-1.0: the diagram, tracing and reports are solid, but the file
    format and the routing behaviour are both still moving. */
-const APP_VERSION='0.15';
+const APP_VERSION='0.19';
 function hashStr(t){ let h=0; for(let i=0;i<t.length;i++){ h=(h*31 + t.charCodeAt(i))|0; } return h; }
 function zoneAncestors(node){
   const out=new Set();
@@ -3703,12 +3810,18 @@ function autoRouteEdges(cy, mode){
 }
 
 
+/* A WAN cloud's size, if you have dragged it to one. */
+function cloudSize(name){ return (STATE.cloudSizes||{})[name]||null; }
 function sizeNodes(els){
   for(const el of els){
     if(el.data.source) continue;                 // edges
     if(el.data.w!=null) continue;
     const k=el.data.kind;
     if(k==='group') continue;
+    if(k==='wan'){
+      const cs=cloudSize(el.data.label);
+      if(cs){ el.data.w=cs.w; el.data.h=cs.h; continue; }
+    }
     if(el.data.overrideW){
       el.data.w=el.data.overrideW; el.data.h=el.data.overrideH;
       if(k==='device') el.data.fs=fittedFont(el.data.label, el.data.w, el.data.h);
@@ -4712,10 +4825,11 @@ async function applyFolderRefresh(rows, sel){
       }
       const pf=pick('policy');
       if(pf){
-        const frag=parseConfig(await pf.get(), pf.name);
-        if((frag.rules||[]).length){ dev.rules=frag.rules; }
-        if(frag.addrObjects) dev.addrObjects=Object.assign(dev.addrObjects||{}, frag.addrObjects);
-        if(Object.keys(frag.acls||{}).length) dev.acls=Object.assign(dev.acls||{}, frag.acls);
+        const frag=rulesFromPolicyFile(await pf.get(), pf.name);
+        if(frag.rules.length) dev.rules=frag.rules;
+        else failed.push(r.host+': no rules could be read from '+pf.name);
+        if(Object.keys(frag.addrObjects).length) dev.addrObjects=Object.assign(dev.addrObjects||{}, frag.addrObjects);
+        if(Object.keys(frag.acls).length) dev.acls=Object.assign(dev.acls||{}, frag.acls);
       }
     }catch(e){ failed.push(r.host+': '+e.message); }
   }
@@ -4974,6 +5088,171 @@ function runResilienceChecks(){
   const noret=STATE.returnPaths.filter(r=>r.status==='no-return').length;
   if(note) note.textContent=spof+' single point'+(spof===1?'':'s')+' of failure \u00b7 '+
     asym+' asymmetric \u00b7 '+noret+' with no return path';
+}
+
+
+/* The runtime rule dump from "show running security-policy":
+
+     "Allow-Web; index: 1" {
+             from TRUST;
+             source [ 10.1.1.0/24 10.2.2.0/24 ];
+             to UNTRUST;
+             destination any;
+             application/service any/any/any/any;
+             action allow;
+     }
+
+   It is not config syntax, so the config parsers cannot read it — which is why
+   a .policy file exported this way attached nothing. Rules come out in index
+   order, and a "vsys: vsysN" line, if present, sets the vsys for those after it. */
+function parseRunningPolicy(text){
+  const rules=[];
+  let vsys='vsys1', cur=null, order=0;
+  const list=(v)=>{
+    v=String(v||'').trim().replace(/;$/,'').trim();
+    if(!v) return ['any'];
+    const m=v.match(/^\[\s*(.*?)\s*\]$/);
+    const parts=(m?m[1]:v).split(/\s+/).filter(Boolean).map(x=>x.replace(/^"|"$/g,''));
+    return parts.length?parts:['any'];
+  };
+  const lines=String(text).split(/\r?\n/);
+  for(let n=0;n<lines.length;n++){
+    const t=lines[n].trim();
+    if(!t) continue;
+    let m;
+    if((m=t.match(/^vsys\S*\s*:?\s*(vsys\d+)\b/i))){ vsys=m[1]; continue; }
+    if((m=t.match(/^"?([^";{]+?)(?:;\s*index:\s*(\d+))?"?\s*\{\s*$/))){
+      cur={name:m[1].trim(), vsys, tier:1, stage:'rulebase',
+           from:['any'], to:['any'], source:['any'], destination:['any'],
+           action:'allow', disabled:false, order:(m[2]!=null?+m[2]:order++), firstLine:n+1};
+      continue;
+    }
+    if(t==='}'){ if(cur){ rules.push(cur); cur=null; } continue; }
+    if(!cur) continue;
+    if((m=t.match(/^(from|to|source|destination)\s+(.+?);?\s*$/i))){
+      cur[m[1].toLowerCase()]=list(m[2]); continue;
+    }
+    if((m=t.match(/^action\s+(\S+?);?\s*$/i))){ cur.action=m[1].toLowerCase(); cur.actionLine=n+1; continue; }
+    if(/^disabled\s+yes/i.test(t)) cur.disabled=true;
+  }
+  rules.sort((a,b)=>a.order-b.order);
+  return rules;
+}
+
+/* A .policy file: whatever format it is in, get the rules out of it. */
+function rulesFromPolicyFile(text, fname){
+  const frag=parseConfig(text, fname);
+  if((frag.rules||[]).length) return {rules:frag.rules, addrObjects:frag.addrObjects||{}, acls:frag.acls||{}};
+  const run=parseRunningPolicy(text);
+  return {rules:run, addrObjects:frag.addrObjects||{}, acls:frag.acls||{}};
+}
+
+
+/* ============================================================
+   Ignoring security rules
+
+   Two levels. Globally, every firewall rule and access list is skipped and a
+   trace is routing only. Per device, a chosen box's rules are skipped while
+   everyone else's still apply — for a firewall whose policy you have not
+   collected yet, or one you are deliberately setting aside.
+
+   Both are honoured by single traces, the flow list and the resilience checks,
+   and both are saved with the project. Whenever either is in force the trace
+   panel says so, so a "Delivered" result is never mistaken for one that was
+   checked against policy.
+   ============================================================ */
+function hasSecurity(d){
+  return (isFirewall(d) && (d.rules||[]).length>0) ||
+         Object.keys(d.acls||{}).length>0 ||
+         (d.interfaces||[]).some(i=>i.acl && (i.acl.in||i.acl.out));
+}
+function securityIgnoredNote(){
+  const all=(document.getElementById('opt-nopolicy')||{}).checked;
+  if(all) return 'All security rules and ACLs are being ignored \u2014 traces are routing only.';
+  const some=(STATE.devices||[]).filter(d=>d.noPolicy);
+  if(some.length) return 'Security rules ignored on '+some.length+' device'+(some.length===1?'':'s')+': '+
+    some.slice(0,4).map(d=>d.name).join(', ')+(some.length>4?' \u2026':'');
+  return '';
+}
+function syncSecurityUI(){
+  const g=document.getElementById('opt-nopolicy'), a=document.getElementById('sec-all');
+  if(g && a) a.checked=g.checked;
+  const st=document.getElementById('sec-status');
+  if(st) st.textContent=securityIgnoredNote();
+  const pk=document.getElementById('sec-pick');
+  if(pk){
+    const n=(STATE.devices||[]).filter(d=>d.noPolicy).length;
+    pk.textContent = n ? 'Per device ('+n+')\u2026' : 'Per device\u2026';
+  }
+}
+function setIgnoreAll(on){
+  const g=document.getElementById('opt-nopolicy'); if(g) g.checked=!!on;
+  STATE.noPolicyAll=!!on;
+  syncSecurityUI();
+  if(STATE.lastTrace && document.getElementById('src').value) runTrace(); /* re-run directly: the Trace button toggles */
+  autosave();
+}
+function showSecurityPicker(){
+  const devs=(STATE.devices||[]).filter(hasSecurity).sort((a,b)=>
+    (isFirewall(b)-isFirewall(a)) || a.name.localeCompare(b.name));
+  const back=document.createElement('div'); back.className='pick-back'; back.style.background='rgba(0,0,0,.12)';
+  const box=document.createElement('div'); box.className='pick'; box.style.width='min(620px,94vw)';
+  let q='';
+  const paint=()=>{
+    const vis=devs.filter(d=>!q || d.name.toLowerCase().includes(q.toLowerCase()));
+    const n=devs.filter(d=>d.noPolicy).length;
+    const allOn=(document.getElementById('opt-nopolicy')||{}).checked;
+    box.innerHTML=
+      '<header style="cursor:move" title="Drag to move"><h2>Ignore security rules</h2><span class="sp"></span>'+
+      '<button class="btn" id="sp-done">Done</button></header>'+
+      '<div style="padding:10px 14px;border-bottom:1px solid var(--rule)">'+
+        '<label class="toggle" style="font-weight:600"><input type="checkbox" id="sp-all"'+(allOn?' checked':'')+'> '+
+        'Ignore every device\u2019s rules (routing only)</label>'+
+        (allOn?'<p class="note" style="margin:6px 0 0">While this is on, the choices below are kept but have no effect.</p>':'')+
+        '<div style="display:flex;gap:6px;margin-top:8px;align-items:center">'+
+          '<input id="sp-q" placeholder="Filter devices" value="'+esc(q)+'" style="flex:1;background:var(--bg);color:var(--ink);border:1px solid var(--rule);border-radius:4px;padding:5px 8px">'+
+          '<button class="btn" id="sp-on">Tick all</button><button class="btn" id="sp-off">Untick all</button>'+
+        '</div>'+
+        '<p class="note" style="margin:8px 0 0">'+n+' of '+devs.length+' device'+(devs.length===1?'':'s')+' with rules or ACLs ticked to be ignored.</p>'+
+      '</div>'+
+      '<div style="overflow:auto;flex:1;min-height:0'+(allOn?';opacity:.5':'')+'">'+
+      (vis.length? vis.map(d=>{
+        const rules=(d.rules||[]).length, acls=Object.keys(d.acls||{}).length;
+        const what=[rules?rules+' rule'+(rules===1?'':'s'):'', acls?acls+' ACL'+(acls===1?'':'s'):''].filter(Boolean).join(' \u00b7 ');
+        return '<label class="secpick-row" data-id="'+esc(d.id)+'">'+
+          '<input type="checkbox"'+(d.noPolicy?' checked':'')+'>'+
+          '<span>'+esc(d.name)+' <span class="meta">'+(isFirewall(d)?'firewall':roleOf(d))+'</span></span>'+
+          '<span class="meta">'+esc(what)+'</span></label>';
+      }).join('') : '<p class="note" style="padding:14px">No loaded device has security rules or access lists.</p>')+
+      '</div>';
+    box.querySelector('#sp-done').onclick=close;
+    box.querySelector('#sp-all').onchange=(e)=>{ setIgnoreAll(e.target.checked); paint(); };
+    const qi=box.querySelector('#sp-q');
+    qi.oninput=()=>{ q=qi.value; const pos=qi.selectionStart; paint(); const n2=box.querySelector('#sp-q'); n2.focus(); n2.setSelectionRange(pos,pos); };
+    box.querySelector('#sp-on').onclick=()=>{ for(const d of vis) d.noPolicy=true; changed(); };
+    box.querySelector('#sp-off').onclick=()=>{ for(const d of vis) d.noPolicy=false; changed(); };
+    box.querySelectorAll('.secpick-row').forEach(row=>{
+      const cb=row.querySelector('input');
+      cb.onchange=()=>{ const d=devs.find(x=>x.id===row.dataset.id); if(d){ d.noPolicy=cb.checked; changed(); } };
+    });
+    // drag by the header
+    const hdr=box.querySelector('header');
+    hdr.onmousedown=(e)=>{
+      if(e.target.closest('button,input')) return;
+      const r=box.getBoundingClientRect(), ox=e.clientX-r.left, oy=e.clientY-r.top;
+      box.style.transform='none'; box.style.left=r.left+'px'; box.style.top=r.top+'px';
+      const mv=(m)=>{ box.style.left=Math.max(0,Math.min(m.clientX-ox,innerWidth-80))+'px';
+                      box.style.top=Math.max(0,Math.min(m.clientY-oy,innerHeight-40))+'px'; };
+      const up=()=>{ document.removeEventListener('mousemove',mv); document.removeEventListener('mouseup',up); };
+      document.addEventListener('mousemove',mv); document.addEventListener('mouseup',up); e.preventDefault();
+    };
+  };
+  const changed=()=>{ syncSecurityUI(); autosave(); paint();
+    if(STATE.lastTrace && document.getElementById('src').value) runTrace(); /* re-run directly: the Trace button toggles */ };
+  const close=()=>{ back.remove(); box.remove(); syncSecurityUI(); };
+  back.onclick=close;
+  document.body.appendChild(back); document.body.appendChild(box);
+  paint();
 }
 
 /* ---------- picking several devices at once ---------- */
@@ -5437,8 +5716,10 @@ function deviceColor(d, role){
 function zoneColor(g){
   const bg=(g&&g.bg)||TH('zoneBg'), fg=(g&&g.fg)||TH('zoneText');
   const bd=(g&&g.bd)||TH('zoneBorder');
-  // the name sits on a tab filled with the border colour, so pick ink that reads on it
-  const tabfg = luminance(bd)>0.55 ? '#12202c' : '#f2f7fb';
+  /* The name sits on a tab filled with the border colour. Its text colour is
+     the zone's own choice if it has one, then the global one, and only then
+     worked out from the tab so it reads. */
+  const tabfg = (g&&g.tabColor) || TH('zoneTabColor') || (luminance(bd)>0.55 ? '#12202c' : '#f2f7fb');
   return {bg, fg, bd, tabfg};
 }
 const FONTS=[
@@ -5457,7 +5738,7 @@ function deviceFont(d){
   return {size, weight: bold?'bold':'normal', fam};
 }
 function zoneFont(g){
-  const size=(g&&g.fontSize)||TH('zoneFontSize')||12;
+  const size=(g&&g.tabSize)||(g&&g.fontSize)||TH('zoneTabSize')||TH('zoneFontSize')||12;
   const bold=(g&&g.bold!=null)?g.bold:!!TH('zoneBold');
   const fam=(g&&g.font)||TH('zoneFont')||'IBM Plex Sans Condensed, sans-serif';
   return {size, weight: bold?'bold':'normal', fam};
@@ -5581,6 +5862,8 @@ function graphStyle(){
         'text-valign':'bottom','text-halign':'left','text-margin-y':-8,'text-margin-x':10,
         'text-background-color':'data(bd)','text-background-opacity':1,
         'text-background-shape':'roundrectangle','text-background-padding':7,
+        // a zone can be made bigger than its contents need, never smaller
+        'min-width':'data(minw)','min-height':'data(minh)',
         'z-index':0}},
       {selector:'node[gkind="site"]', style:{
         'background-opacity':TH('zoneGrid')?0.35:1,
@@ -5747,7 +6030,7 @@ function render(){
     for(const g of groups()){
       if(!pathGroups.has(g.id)) continue;
       const gc=zoneColor(g), gf=zoneFont(g);
-      els.unshift({data:{id:'g_'+g.id, label:g.name, kind:'group',
+      els.unshift({data:{id:'g_'+g.id, label:g.name, kind:'group', minw:(g.minW||0)+'px', minh:(g.minH||0)+'px',
                          gkind:g.parent?'zone':'site', bg:gc.bg, fg:gc.fg, bd:gc.bd, tabfg:gc.tabfg,
                          fs:gf.size, fw:gf.weight, ff:gf.fam, pad:(g.padding||26)+'px',
                          parent: g.parent && pathGroups.has(g.parent) ? 'g_'+g.parent : undefined}});
@@ -6049,7 +6332,7 @@ function render(){
     const gc=zoneColor(g), gf=zoneFont(g);
     els.push({data:{id:'g_'+g.id, label:g.name, kind:'group',
                     gkind:g.parent?'zone':'site', bg:gc.bg, fg:gc.fg, bd:gc.bd, tabfg:gc.tabfg,
-                    fs:gf.size, fw:gf.weight, ff:gf.fam, pad:(g.padding||26)+'px',
+                    fs:gf.size, fw:gf.weight, ff:gf.fam, pad:(g.padding||26)+'px', minw:(g.minW||0)+'px', minh:(g.minH||0)+'px',
                     parent: g.parent && usedGroups.has(g.parent) ? 'g_'+g.parent : undefined}});
   }
 
@@ -6422,28 +6705,47 @@ function render(){
     }
   });
 
-  /* Grab the bottom-right corner of a device box to resize it. Anywhere else
-     on the box still does the normal Cytoscape drag-to-move. */
-  cy.on('mousedown','node[kind="device"]', evt=>{
-    const node=evt.target;
+  /* Grab the bottom-right corner of a box to resize it — a device, a zone or a
+     WAN cloud. Anywhere else on it still does the normal drag-to-move. */
+  cy.on('mousedown','node[kind="device"], node[kind="group"], node[kind="wan"]', evt=>{
+    const node=evt.target, kind=node.data('kind');
+    // a zone under a device: the device's own corner wins
+    if(kind==='group' && evt.originalEvent && evt.originalEvent.__dgHandled) return;
     const rp=evt.renderedPosition||evt.position;
-    const bb=node.renderedBoundingBox();
-    if(Math.abs(rp.x-bb.x2)>12 || Math.abs(rp.y-bb.y2)>12) return;   // not the corner — let it drag
+    const bb=node.renderedBoundingBox({includeLabels:false});
+    const grab = kind==='group' ? 16 : 12;
+    if(Math.abs(rp.x-bb.x2)>grab || Math.abs(rp.y-bb.y2)>grab) return;   // not the corner
+    if(evt.originalEvent) evt.originalEvent.__dgHandled=true;
     pushUndo();
     node.ungrabify();
-    const startW=node.data('w')||bb.w, startH=node.data('h')||bb.h;
     const z=cy.zoom();
+    const mb=node.boundingBox({includeLabels:false});
+    const startW = kind==='group' ? mb.w : (node.data('w')||mb.w);
+    const startH = kind==='group' ? mb.h : (node.data('h')||mb.h);
+    const minW = kind==='device'?70 : kind==='wan'?60 : 80;
+    const minH = kind==='device'?36 : kind==='wan'?36 : 60;
     const move=(e)=>{
       const p=e.renderedPosition||e.position;
-      const w=Math.max(70, startW+(p.x-rp.x)/z);
-      const h=Math.max(36, startH+(p.y-rp.y)/z);
-      node.data('w', w); node.data('h', h);
+      const w=Math.max(minW, startW+(p.x-rp.x)/z);
+      const h=Math.max(minH, startH+(p.y-rp.y)/z);
+      if(kind==='group'){ node.data('minw', w+'px'); node.data('minh', h+'px'); }
+      else { node.data('w', w); node.data('h', h); }
     };
     const up=()=>{
       cy.off('mousemove', move); cy.off('mouseup', up); cy.off('tapend', up);
       node.grabify();
-      const d=STATE.model && STATE.model.devices.find(x=>x.id===node.id());
-      if(d){ d.boxW=Math.round(node.data('w')); d.boxH=Math.round(node.data('h')); autosave(); }
+      if(kind==='device'){
+        const d=STATE.model && STATE.model.devices.find(x=>x.id===node.id());
+        if(d){ d.boxW=Math.round(node.data('w')); d.boxH=Math.round(node.data('h')); }
+      } else if(kind==='group'){
+        const g=(STATE.groups||[]).find(x=>'g_'+x.id===node.id());
+        if(g){ g.minW=Math.round(parseFloat(node.data('minw'))); g.minH=Math.round(parseFloat(node.data('minh'))); }
+      } else {
+        STATE.cloudSizes=STATE.cloudSizes||{};
+        STATE.cloudSizes[node.data('label')]={w:Math.round(node.data('w')), h:Math.round(node.data('h'))};
+      }
+      autoRouteEdges(cy,'ortho');
+      autosave();
     };
     cy.on('mousemove', move); cy.on('mouseup', up); cy.on('tapend', up);
   });
@@ -7535,9 +7837,27 @@ function renderGroups(){
       '<option value="'+esc(v)+'"'+((g.font===v)?' selected':'')+'>'+esc(l)+'</option>').join('');
     fsel.onclick=(ev)=>ev.stopPropagation();
     fsel.onchange=(ev)=>{ ev.stopPropagation(); if(fsel.value) g.font=fsel.value; else delete g.font; render(); autosave(); };
+    /* The name tab at the bottom of the box: its own text colour and size. */
+    const tcIn=document.createElement('input'); tcIn.type='color';
+    tcIn.value=g.tabColor||zoneColor(g).tabfg;
+    tcIn.title='Name-tab text colour';
+    tcIn.style.cssText='width:20px;height:18px;padding:0;border:1px solid var(--rule);margin-left:4px;cursor:pointer';
+    tcIn.onclick=(ev)=>ev.stopPropagation();
+    tcIn.oninput=(ev)=>{ ev.stopPropagation(); g.tabColor=tcIn.value; render(); autosave(); };
+    const tsIn=document.createElement('input'); tsIn.type='number'; tsIn.min=8; tsIn.max=36;
+    tsIn.value=g.tabSize||''; tsIn.placeholder=String(zoneFont(g).size);
+    tsIn.title='Name-tab text size';
+    tsIn.style.cssText='width:38px;margin-left:4px;background:var(--bg);color:var(--ink);border:1px solid var(--rule);border-radius:3px;font-size:11px;padding:1px 3px';
+    tsIn.onclick=(ev)=>ev.stopPropagation();
+    tsIn.onchange=(ev)=>{ ev.stopPropagation();
+      const v=parseInt(tsIn.value,10);
+      if(v>=8 && v<=36) g.tabSize=v; else delete g.tabSize;
+      render(); autosave(); };
     const rs=document.createElement('button');
-    rs.className='dev-x'; rs.textContent='↺'; rs.title='Use default colours';
-    rs.onclick=(ev)=>{ ev.stopPropagation(); delete g.bg; delete g.fg; renderGroups(); render(); autosave(); };
+    rs.className='dev-x'; rs.textContent='↺'; rs.title='Back to defaults: colours, name tab and size';
+    rs.onclick=(ev)=>{ ev.stopPropagation();
+      delete g.bg; delete g.fg; delete g.tabColor; delete g.tabSize; delete g.minW; delete g.minH;
+      renderGroups(); render(); autosave(); };
     const minus=document.createElement('button');
     minus.className='dev-x'; minus.textContent='−'; minus.title='Smaller';
     minus.style.marginLeft='3px';
@@ -7554,7 +7874,7 @@ function renderGroups(){
       STATE.groups=groups().filter(z=>!gone.has(z.id));
       rebuild();
     };
-    li.append(nm,bgIn,fgIn,fsel,rs,minus,plus,x);
+    li.append(nm,bgIn,fgIn,tcIn,tsIn,fsel,rs,minus,plus,x);
     li.onclick=()=>{ const el=document.getElementById('grp-name'); el.value=g.name; el.focus(); };
     ul.appendChild(li);
     for(const z of groups().filter(y=>y.parent===g.id)) draw(z,1);
@@ -8432,9 +8752,10 @@ function showDevice(d, opts){
         '</select>'+
         '<button class="btn" id="dev-clearcfg">Clear config</button>'+
       '</div>'+
-      (d.vendor==='palo-alto'
+      (hasSecurity(d)
         ? '<label class="auth"><input type="checkbox" id="dev-nopolicy"'+(d.noPolicy?' checked':'')+'>'+
-          '<span>Ignore this firewall\u2019s security rules when tracing — routing only.</span></label>'
+          '<span>Ignore this device\u2019s '+(isFirewall(d)?'security rules':'access lists')+
+          ' when tracing \u2014 routing only.</span></label>'
         : '');
 
   r.innerHTML =
@@ -8466,7 +8787,7 @@ function showDevice(d, opts){
     if(e.key==='Escape') rnCancel.click();
   };
   const devNoPol=document.getElementById('dev-nopolicy');
-  if(devNoPol) devNoPol.onchange=()=>{ d.noPolicy=devNoPol.checked; autosave(); };
+  if(devNoPol) devNoPol.onchange=()=>{ d.noPolicy=devNoPol.checked; syncSecurityUI(); autosave(); };
   const devBg=document.getElementById('dev-bg'), devFg=document.getElementById('dev-fg');
   let dbT=null, dfT=null;
   if(devBg){ devBg.oninput=()=>{ d.bg=devBg.value; if(dbT) return; dbT=setTimeout(()=>{dbT=null; render();},120); };
@@ -8775,6 +9096,13 @@ function hopsHtml(res){
       html+='<div class="hop-line">crosses <span>'+esc(h.viaCloud)+'</span>'+
             '<span class="tag table">wan</span></div>';
     }
+    if(h.acl){
+      const bad=h.acl.action==='deny';
+      html+='<div class="hop-line">acl <span>'+esc(h.acl.name)+' '+esc(h.acl.dir)+'</span>'+
+            '<span class="tag '+(bad?'deny':'allow')+'">'+esc(h.acl.action)+'</span>'+
+            (h.acl.ace?' <span class="muted">'+esc(h.acl.ace.text)+'</span>':'')+'</div>';
+    }
+    if(h.aclNote) html+='<div class="hop-line muted" style="font-size:11.5px">'+esc(h.aclNote)+'</div>';
     if(h.policyBypassed){
       html+='<div class="hop-line">policy <span>not evaluated</span>'+
             '<span class="tag igp">bypassed</span></div>';
@@ -8851,6 +9179,8 @@ function showTrace(res, opts){
   let html='<div class="verdict '+(v.ok?'ok':'bad')+'"><b>'+esc(v.title)+
     (opts.label?' <span style="font-weight:400;color:var(--ink-faint)">— '+esc(opts.label)+'</span>':'')+
     '</b><p>'+esc(v.detail)+'</p></div>';
+  { const ig=securityIgnoredNote();
+    if(ig) html+='<div class="scope-note" style="border-left:3px solid var(--amber,#e0a53a);padding-left:8px">'+esc(ig)+'</div>'; }
   if(res.hops && res.hops.length && (document.getElementById('opt-view')||{}).value!=='path')
     html+='<div class="btn-row" style="margin:10px 0 2px"><button class="btn" id="path-only">'+
           'Show only these '+res.hops.length+' device'+(res.hops.length===1?'':'s')+'</button></div>';
@@ -8930,7 +9260,7 @@ async function ingestFiles(list){
     return (order[ka]??3)-(order[kb]??3);
   });
 
-  let made=0, attached=0, orphan=[];
+  let made=0, attached=0, orphan=[], noRules=[];
   for(const f of files){
     const text=await read(f);
     const c=classifyCapture(f.name);
@@ -8963,11 +9293,11 @@ async function ingestFiles(list){
     } else if(kind==='policy'){
       /* Rules on their own: parse them as a config fragment and take just the
          policy out of it, so the device keeps its real interfaces. */
-      const frag=parseConfig(text, f.name);
-      if((frag.rules||[]).length){ dev.rules=frag.rules; attached++; }
-      if(frag.addrObjects && Object.keys(frag.addrObjects).length)
-        dev.addrObjects=Object.assign(dev.addrObjects||{}, frag.addrObjects);
-      if(Object.keys(frag.acls||{}).length) dev.acls=Object.assign(dev.acls||{}, frag.acls);
+      const frag=rulesFromPolicyFile(text, f.name);
+      if(frag.rules.length){ dev.rules=frag.rules; attached++; }
+      else noRules.push(f.name);
+      if(Object.keys(frag.addrObjects).length) dev.addrObjects=Object.assign(dev.addrObjects||{}, frag.addrObjects);
+      if(Object.keys(frag.acls).length) dev.acls=Object.assign(dev.acls||{}, frag.acls);
     }
   }
   rebuild(); autosave();
@@ -8979,6 +9309,9 @@ async function ingestFiles(list){
     if(orphan.length) bits.push(orphan.length+' left over \u2014 no device of that name yet');
     note.textContent=bits.join(' \u00b7 ');
   }
+  if(noRules.length) alert('No firewall rules could be read from:\n\n  '+noRules.join('\n  ')+
+    '\n\nExport the policy with "show running security-policy", or with '+
+    '"set cli config-output-format set" then "show config running".');
   if(orphan.length){
     const names=(STATE.devices||[]).map(d=>d.name).slice(0,12).join('\n  ');
     alert('These files did not match any device, so nothing was imported from them:\n\n  '+
@@ -9894,6 +10227,8 @@ function projectObject(){
     flowText: STATE.flowText||'',
     zen: !!STATE.zen,
     linkStyle: STATE.linkStyle||'ortho',
+    cloudSizes: STATE.cloudSizes||{},
+    noPolicyAll: !!(document.getElementById('opt-nopolicy')||{}).checked,
     barHidden: !!STATE.barHidden,
     bends:STATE.bends||{},
     lineWidths:STATE.lineWidths||{},
@@ -9982,6 +10317,9 @@ function loadProject(obj){
   STATE.flowText = obj.flowText||'';
   if(obj.zen) setTimeout(()=>setZen(true),0);
   STATE.linkStyle = obj.linkStyle || 'ortho';
+  STATE.cloudSizes = obj.cloudSizes || {};
+  { const g=document.getElementById('opt-nopolicy'); if(g) g.checked=!!obj.noPolicyAll; }
+  setTimeout(()=>{ try{ syncSecurityUI(); }catch(e){} },0);
   const lsSel=document.getElementById('opt-linkstyle');
   if(lsSel) lsSel.value=STATE.linkStyle;
   if(obj.barHidden) setTimeout(()=>setBarHidden(true),0);
@@ -10180,11 +10518,33 @@ const LAB_DEVICES = [
    device in a redundant pair, and everything crossing the firewall pair. The
    two sites meet over a DCI between their internal cores. */
 document.getElementById('refresh-folder').onclick=()=>refreshFromFolder();
+document.getElementById('sec-all').onchange=(e)=>setIgnoreAll(e.target.checked);
+document.getElementById('sec-pick').onclick=showSecurityPicker;
+document.getElementById('opt-nopolicy').addEventListener('change', ()=>{ STATE.noPolicyAll=document.getElementById('opt-nopolicy').checked; syncSecurityUI(); autosave(); });
 (function(){
   const dlg=document.getElementById('settings'), back=document.getElementById('settings-back');
-  const open=()=>{ dlg.classList.remove('hidden'); back.classList.remove('hidden'); };
+  const open=()=>{ dlg.classList.remove('hidden'); back.classList.remove('hidden'); back.style.background='rgba(0,0,0,.12)'; };
   const close=()=>{ dlg.classList.add('hidden'); back.classList.add('hidden'); };
   document.getElementById('open-settings').onclick=open;
+  /* Drag the header to move the dialog out of the way of the diagram. */
+  const hdr=dlg.querySelector('header');
+  if(hdr){
+    hdr.style.cursor='move'; hdr.title='Drag to move';
+    hdr.addEventListener('mousedown', e=>{
+      if(e.target.closest('button,input,select')) return;
+      const r=dlg.getBoundingClientRect();
+      const ox=e.clientX-r.left, oy=e.clientY-r.top;
+      dlg.style.transform='none'; dlg.style.left=r.left+'px'; dlg.style.top=r.top+'px';
+      const mv=(m)=>{
+        const x=Math.min(Math.max(0, m.clientX-ox), window.innerWidth-80);
+        const y=Math.min(Math.max(0, m.clientY-oy), window.innerHeight-40);
+        dlg.style.left=x+'px'; dlg.style.top=y+'px';
+      };
+      const up=()=>{ document.removeEventListener('mousemove',mv); document.removeEventListener('mouseup',up); };
+      document.addEventListener('mousemove',mv); document.addEventListener('mouseup',up);
+      e.preventDefault();
+    });
+  }
   document.getElementById('settings-close').onclick=close;
   back.onclick=close;
   document.addEventListener('keydown',e=>{ if(e.key==='Escape' && !dlg.classList.contains('hidden')) close(); });
@@ -10325,6 +10685,11 @@ function initTheme(){
     dff.onchange=()=>{ STATE.theme.devFont=dff.value; applyTheme(); autosave(); }; }
   if(zff){ fontOpts(zff, STATE.theme.zoneFont);
     zff.onchange=()=>{ STATE.theme.zoneFont=zff.value; applyTheme(); autosave(); }; }
+  const ztc=document.getElementById('th-zoneTabColor');
+  if(ztc){
+    ztc.value=STATE.theme.zoneTabColor||'#f2f7fb';
+    ztc.oninput=()=>{ STATE.theme.zoneTabColor=ztc.value; render(); renderGroups(); autosave(); };
+  }
   const dfs=document.getElementById('th-devFontSize'), zfs=document.getElementById('th-zoneFontSize');
   if(dfs){ dfs.value=STATE.theme.devFontSize||13;
     dfs.onchange=()=>{ STATE.theme.devFontSize=parseInt(dfs.value,10)||13; applyTheme(); autosave(); }; }
