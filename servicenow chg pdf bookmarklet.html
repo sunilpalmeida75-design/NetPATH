@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ServiceNow CHG PDF downloader</title>
+<style>
+  :root { --bg:#eef1f4; --ink:#1d2733; --muted:#5a6878; --line:#c9d1da; --accent:#1f5f8b; --card:#ffffff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#141a21; --ink:#e3e8ee; --muted:#9aa7b5; --line:#2e3946; --accent:#6fb1dd; --card:#1b232c; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.55 "Segoe UI", system-ui, -apple-system, sans-serif; }
+  main { max-width:720px; margin:0 auto; padding:40px 20px 60px; }
+  h1 { font-size:1.6rem; margin:0 0 6px; }
+  p.lead { color:var(--muted); margin:0 0 28px; }
+  .drag { display:inline-block; padding:12px 20px; background:var(--accent); color:#fff; border-radius:6px;
+          text-decoration:none; font-weight:600; cursor:grab; }
+  .drag:focus-visible, button:focus-visible { outline:3px solid var(--ink); outline-offset:2px; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:20px 22px; margin:0 0 18px; }
+  h2 { font-size:1.1rem; margin:0 0 10px; }
+  ol { margin:0; padding-left:22px; }
+  li { margin:4px 0; }
+  textarea { width:100%; height:160px; font:12px/1.4 Consolas, monospace; background:var(--bg); color:var(--ink);
+             border:1px solid var(--line); border-radius:6px; padding:10px; resize:vertical; }
+  button { margin-top:8px; padding:8px 14px; border:1px solid var(--accent); background:transparent; color:var(--accent);
+           border-radius:6px; font:inherit; cursor:pointer; }
+  small { color:var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>ServiceNow change PDF downloader</h1>
+  <p class="lead">Downloads the PDFs attached to a change, or the change record itself as a PDF, using the ServiceNow login already open in your browser.</p>
+
+  <section>
+    <h2>Set it up once</h2>
+    <ol>
+      <li>Show your bookmarks bar (Ctrl+Shift+B).</li>
+      <li>Drag this button onto the bar: <a class="drag" id="bm" href="#">Get CHG PDFs</a></li>
+    </ol>
+    <p><small>If dragging is blocked, right-click the bar → Add page, name it "Get CHG PDFs", and paste the code below (with <code>javascript:</code> in front) as the URL.</small></p>
+  </section>
+
+  <section>
+    <h2>Use it</h2>
+    <ol>
+      <li>Open any ServiceNow page and make sure you're logged in.</li>
+      <li>Click <b>Get CHG PDFs</b> in the bookmarks bar.</li>
+      <li>Enter one or more change numbers, then choose what to download.</li>
+      <li>If the browser asks to allow multiple downloads, allow it.</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>Bookmarklets blocked? Use the console</h2>
+    <p>On a ServiceNow tab press F12, open Console, paste this and press Enter.</p>
+    <textarea id="console" readonly></textarea>
+    <button id="copy" type="button">Copy code</button>
+  </section>
+</main>
+
+<script>
+async function snChgPdf() {
+  const O = location.origin;
+  const raw = prompt('Change numbers (e.g. CHG0012345, CHG0012346):');
+  if (!raw) return;
+  const chgs = [...new Set(raw.toUpperCase().match(/CHG\d+/g) || [])];
+  if (!chgs.length) { alert('No CHG numbers found in what you entered.'); return; }
+  const mode = (prompt('What to download?\n1 = attached PDFs\n2 = change record as PDF\n3 = both\n4 = all attachments (any type) + record', '3') || '').trim();
+  if (!mode) return;
+  const wantAtt = mode !== '2', wantForm = mode !== '1', allFiles = mode === '4';
+  const opt = { credentials: 'same-origin' };
+  const report = [];
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const save = (blob, name) => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = name;
+    document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 10000);
+  };
+  const fileNameOf = (res, fallback) => {
+    const cd = res.headers.get('content-disposition') || '';
+    const m = cd.match(/filename\*=(?:UTF-8'')?([^;]+)/i) || cd.match(/filename="?([^";]+)"?/i);
+    let n = m ? m[1].trim().replace(/^"|"$/g, '') : fallback;
+    try { n = decodeURIComponent(n); } catch (e) {}
+    return n.replace(/[\\/:*?"<>|]+/g, '_');
+  };
+  const getJSON = async url => {
+    try {
+      const r = await fetch(url, opt);
+      if (r.ok && (r.headers.get('content-type') || '').includes('json')) return await r.json();
+    } catch (e) {}
+    return null;
+  };
+
+  for (const chg of chgs) {
+    let sid = null, formHtml = null;
+    const q = encodeURIComponent('number=' + chg);
+    const j = await getJSON(`${O}/change_request.do?JSONv2&sysparm_action=getRecords&sysparm_query=${q}`);
+    if (j && j.records && j.records.length) sid = j.records[0].sys_id;
+    if (!sid) {
+      formHtml = await (await fetch(`${O}/change_request.do?sysparm_query=${q}`, opt)).text();
+      const m = formHtml.match(/id="sys_uniqueValue"[^>]*value="([0-9a-f]{32})"/) ||
+                formHtml.match(/value="([0-9a-f]{32})"[^>]*id="sys_uniqueValue"/);
+      sid = m && m[1];
+    }
+    if (!sid) { report.push(`${chg}: not found, or you don't have access`); continue; }
+
+    if (wantAtt) {
+      let ids = [];
+      const aq = encodeURIComponent('table_name=change_request^table_sys_id=' + sid);
+      const a = await getJSON(`${O}/sys_attachment_list.do?JSONv2&sysparm_action=getRecords&sysparm_query=${aq}`);
+      if (a && a.records && a.records.length) ids = a.records.map(r => r.sys_id);
+      if (!ids.length) {
+        if (!formHtml) formHtml = await (await fetch(`${O}/change_request.do?sys_id=${sid}`, opt)).text();
+        ids = [...new Set([...formHtml.matchAll(/(?:sys_attachment\.do\?sys_id=|tearOffAttachment\(['"])([0-9a-f]{32})/g)].map(m => m[1]))];
+      }
+      let n = 0;
+      for (const id of ids) {
+        const r = await fetch(`${O}/sys_attachment.do?sys_id=${id}`, opt);
+        if (!r.ok) continue;
+        const name = fileNameOf(r, id);
+        const isPdf = /pdf/i.test(r.headers.get('content-type') || '') || /\.pdf$/i.test(name);
+        if (!allFiles && !isPdf) continue;
+        save(await r.blob(), `${chg}_${name}`); n++; await sleep(600);
+      }
+      report.push(`${chg}: ${n} attachment(s) downloaded` + (ids.length ? '' : ' (no attachments found)'));
+    }
+
+    if (wantForm) {
+      const r = await fetch(`${O}/change_request.do?PDF&sys_id=${sid}`, opt);
+      const b = await r.blob();
+      const head = String.fromCharCode(...new Uint8Array(await b.slice(0, 4).arrayBuffer()));
+      if (r.ok && head === '%PDF') { save(b, `${chg}_record.pdf`); report.push(`${chg}: record PDF downloaded`); await sleep(600); }
+      else report.push(`${chg}: record PDF export failed (HTTP ${r.status}); PDF export may be disabled`);
+    }
+  }
+  alert(report.join('\n'));
+}
+
+const code = '(' + snChgPdf.toString() + ')();';
+document.getElementById('bm').href = 'javascript:' + encodeURIComponent(code);
+document.getElementById('bm').addEventListener('click', e => {
+  e.preventDefault();
+  alert('Drag this button to your bookmarks bar, then click it while you are on a ServiceNow page.');
+});
+document.getElementById('console').value = code;
+document.getElementById('copy').addEventListener('click', async () => {
+  const btn = document.getElementById('copy');
+  try { await navigator.clipboard.writeText(code); btn.textContent = 'Copied'; }
+  catch (e) { document.getElementById('console').select(); document.execCommand('copy'); btn.textContent = 'Copied'; }
+  setTimeout(() => btn.textContent = 'Copy code', 2000);
+});
+</script>
+</body>
+</html>
