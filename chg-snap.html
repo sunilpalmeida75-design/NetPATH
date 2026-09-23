@@ -31,7 +31,7 @@
 <body>
 <main>
   <h1>CHG Snap</h1>
-  <p class="lead">One click on a ServiceNow change saves it as a PDF and opens your CHG Reviewer agent with the prompt and a link to the PDF.</p>
+  <p class="lead">One click on a ServiceNow change saves it as a PDF, reads the compliance checklist from the same folder, and builds a Copilot prompt that checks the PDF against it.</p>
 
   <section>
     <h2>Set it up once</h2>
@@ -44,7 +44,7 @@
           <li><b>Agent link</b>: open your CHG Reviewer agent in Copilot and paste its address-bar URL (…/chat/agent/…).</li>
         </ul>
       </li>
-      <li>Recommended: in the agent's Knowledge, add that OneDrive folder as a backup source.</li>
+      <li>Put your compliance checklist in the save folder with "checklist" in its file name (e.g. <i>CHG Compliance Checklist.docx</i>). Word, Excel (first sheet), .txt, .md and .csv work. PDF checklists don't: save them as Word first.</li>
     </ol>
   </section>
 
@@ -53,7 +53,9 @@
     <ol>
       <li><b>On an open change:</b> click CHG Snap. It saves the PDF straight away.</li>
       <li><b>Other changes:</b> type or edit numbers in the box and press Enter. Highlighting CHG numbers on the page before clicking also works.</li>
-      <li>Click <b>Open in CHG Reviewer</b>. The prompt is also copied, so if it isn't prefilled, just paste.</li>
+      <li><b>Edge Copilot (quickest):</b> click <b>Ask Edge Copilot</b>. The PDF opens in a new tab and the prompt, including the full checklist, is copied. Press Ctrl+Shift+. (or the Copilot button in the toolbar), paste and send. Copilot reads the open PDF.</li>
+      <li><b>Change the prompt:</b> click <b>Edit</b> next to Prompt in the panel, change the text, and click Save. It's remembered for next time; Reset to default brings back the original.</li>
+      <li><b>Or your CHG Reviewer agent:</b> click <b>Open in CHG Reviewer</b>, paste, attach the PDF with <b>+</b>, send.</li>
     </ol>
     <p><small>Give OneDrive a few seconds to sync before sending, or Copilot may not find the file yet.</small></p>
   </section>
@@ -70,7 +72,15 @@
 async function chgSnap() {
   const O = location.origin;
   const opt = { credentials: 'same-origin' };
-  const K_AGENT = 'chgpdf_agent_url', K_OD = 'chgsnap_onedrive_base';
+  const K_AGENT = 'chgpdf_agent_url', K_OD = 'chgsnap_onedrive_base', K_TPL = 'chgsnap_prompt_template';
+  const DEFAULT_TPL =
+`Check {SOURCE} ({CHG}) against the compliance checklist below.
+
+For each checklist item, give: Item | Status (Pass / Fail / Partial / Not stated) | Evidence (short quote from the PDF with its section) | Fix needed.
+Then give an overall result (Compliant / Non-compliant) and list the failed or missing items first.
+Judge only from the PDF. If the PDF doesn't cover an item, mark it "Not stated". Don't assume.
+
+{CHECKLIST}`;
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
@@ -105,6 +115,86 @@ async function chgSnap() {
       if (id && id.startsWith('/')) return x.origin + id.split('/').map(encodeURIComponent).join('/');
       return (x.origin + x.pathname.replace(/^\/:[a-z]:\/[rs]/i, '')).replace(/\/+$/, '');
     } catch (e) { return ''; }
+  };
+
+  /* ---------- checklist ---------- */
+  let ckHandle = await idb('readonly', s => s.get('checklist')).catch(() => null);
+  const unzipEntry = async (blob, wanted) => {
+    const buf = new Uint8Array(await blob.arrayBuffer());
+    const dv = new DataView(buf.buffer);
+    let e = buf.length - 22;
+    while (e >= 0 && dv.getUint32(e, true) !== 0x06054b50) e--;
+    if (e < 0) return null;
+    let p = dv.getUint32(e + 16, true);
+    const n = dv.getUint16(e + 10, true);
+    for (let i = 0; i < n; i++) {
+      const method = dv.getUint16(p + 10, true), csize = dv.getUint32(p + 20, true);
+      const nlen = dv.getUint16(p + 28, true), xlen = dv.getUint16(p + 30, true), clen = dv.getUint16(p + 32, true);
+      const off = dv.getUint32(p + 42, true);
+      const name = new TextDecoder().decode(buf.subarray(p + 46, p + 46 + nlen));
+      if (name === wanted) {
+        const start = off + 30 + dv.getUint16(off + 26, true) + dv.getUint16(off + 28, true);
+        const data = buf.subarray(start, start + csize);
+        if (method === 0) return new TextDecoder().decode(data);
+        const ds = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+        return await new Response(ds).text();
+      }
+      p += 46 + nlen + xlen + clen;
+    }
+    return null;
+  };
+  const unent = t => t.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
+  const docxText = xml => xml ? unent(xml
+      .replace(/<w:tab\/>/g, '\t').replace(/<w:br[^>]*\/>/g, '\n')
+      .replace(/<\/w:p>\s*<\/w:tc>/g, ' | ').replace(/<\/w:tc>/g, ' | ').replace(/<\/w:tr>/g, '\n').replace(/<\/w:p>/g, '\n').replace(/<[^>]+>/g, ''))
+      .replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n') : '';
+  const xlsxText = async file => {
+    const ss = await unzipEntry(file, 'xl/sharedStrings.xml');
+    const strs = ss ? [...new DOMParser().parseFromString(ss, 'application/xml').getElementsByTagName('si')].map(x => x.textContent) : [];
+    const sh = await unzipEntry(file, 'xl/worksheets/sheet1.xml');
+    if (!sh) return '';
+    const doc = new DOMParser().parseFromString(sh, 'application/xml');
+    return [...doc.getElementsByTagName('row')].map(r => [...r.getElementsByTagName('c')].map(c => {
+      const t = c.getAttribute('t');
+      if (t === 'inlineStr') return c.textContent.trim();
+      const v = (c.getElementsByTagName('v')[0] || {}).textContent || '';
+      return t === 's' ? (strs[+v] || '') : v;
+    }).join(' | ')).filter(l => l.replace(/[\s|]/g, '')).join('\n');
+  };
+  const CK_EXT = ['.md', '.txt', '.docx', '.xlsx', '.csv', '.json', '.pdf'];
+  const extOf = n => ((n.match(/\.[^.]+$/) || [''])[0]).toLowerCase();
+  const findChecklist = async () => {
+    if (ckHandle) {
+      try {
+        let p = await ckHandle.queryPermission({ mode: 'read' });
+        if (p !== 'granted') p = await ckHandle.requestPermission({ mode: 'read' });
+        if (p === 'granted') return { h: ckHandle, auto: false };
+      } catch (e) {}
+    }
+    if (!dir || !dirOk) return null;
+    const found = [];
+    try {
+      for await (const [name, h] of dir.entries()) {
+        if (h.kind === 'file' && /checklist/i.test(name) && !name.startsWith('~$') && CK_EXT.includes(extOf(name))) found.push(h);
+      }
+    } catch (e) { return null; }
+    found.sort((a, b) => CK_EXT.indexOf(extOf(a.name)) - CK_EXT.indexOf(extOf(b.name)));
+    return found[0] ? { h: found[0], auto: true } : null;
+  };
+  const readChecklist = async () => {
+    const f = await findChecklist();
+    if (!f) return null;
+    const file = await f.h.getFile();
+    const ext = extOf(file.name);
+    if (ext === '.pdf') return { name: file.name, text: '', err: 'PDF checklists can\'t be read here. Save it as .docx, .xlsx, .txt or .md.' };
+    let text = '';
+    try {
+      if (ext === '.docx') text = docxText(await unzipEntry(file, 'word/document.xml'));
+      else if (ext === '.xlsx') text = await xlsxText(file);
+      else text = await file.text();
+    } catch (e) { return { name: file.name, text: '', err: 'Couldn\'t read the checklist: ' + e.message }; }
+    text = text.trim();
+    return text ? { name: file.name, text, auto: f.auto } : { name: file.name, text: '', err: 'The checklist file looks empty.' };
   };
 
   /* ---------- ServiceNow lookups ---------- */
@@ -197,8 +287,15 @@ async function chgSnap() {
 #chgsnap-panel .lk{border:0;background:none;color:#1f5f8b;cursor:pointer;padding:0;text-decoration:underline;flex:none}
 #chgsnap-panel .st{margin-top:8px;max-height:110px;overflow:auto}
 #chgsnap-panel .st:empty{display:none}
-#chgsnap-panel .ho{margin-top:8px;display:none;gap:6px}
-#chgsnap-panel .ho .btn{flex:1}
+#chgsnap-panel .ho{margin-top:8px;display:none;flex-direction:column;gap:6px}
+#chgsnap-panel .eg{display:flex;flex-direction:column;gap:6px}
+#chgsnap-panel .r2{display:flex;gap:6px}
+#chgsnap-panel .r2 .btn{flex:1}
+#chgsnap-panel .hint{font-size:12px;color:#5a6878}
+#chgsnap-panel .ed{display:none;flex-direction:column;gap:6px;margin-top:8px}
+#chgsnap-panel textarea{width:100%;height:220px;padding:8px;border:1px solid #c9d1da;border-radius:6px;background:#fff;
+  font:12px/1.45 Consolas,monospace;resize:vertical}
+#chgsnap-panel textarea:focus{outline:2px solid #1f5f8b;outline-offset:0}
 </style>
 <div class="hd"><b>CHG Snap</b><button class="x" data-a="close" aria-label="Close">×</button></div>
 <div class="row">
@@ -207,26 +304,47 @@ async function chgSnap() {
 </div>
 <div class="set">
   <div class="s"><span>Save folder: <span class="v" data-f="dir"></span></span><button class="lk" data-a="dir">Change</button></div>
+  <div class="s"><span>Checklist: <span class="v" data-f="ck"></span></span><button class="lk" data-a="ck">Choose</button></div>
+  <div class="s"><span>Prompt: <span class="v" data-f="tp"></span></span><button class="lk" data-a="tpl">Edit</button></div>
   <div class="s"><span>OneDrive link: <span class="v" data-f="od"></span></span><button class="lk" data-a="od">Set</button></div>
   <div class="s"><span>Agent link: <span class="v" data-f="ag"></span></span><button class="lk" data-a="ag">Set</button></div>
 </div>
+<div class="ed" data-f="editor">
+  <textarea data-f="tpltext" spellcheck="false" aria-label="Prompt template"></textarea>
+  <div class="hint">Placeholders: {CHG} change number(s) · {SOURCE} "the PDF open in this tab" or "the attached PDF" · {CHECKLIST} full checklist text · {CHECKLIST_NAME} · {FILES} PDF names with OneDrive links</div>
+  <div class="r2">
+    <button class="btn pri" data-a="tplsave">Save</button>
+    <button class="btn" data-a="tplreset">Reset to default</button>
+    <button class="btn" data-a="tplcancel">Cancel</button>
+  </div>
+</div>
 <div class="st" data-f="status"></div>
 <div class="ho" data-f="handoff">
-  <a class="btn pri" data-a="open" target="_blank" rel="noopener">Open in CHG Reviewer</a>
-  <button class="btn" data-a="copy">Copy prompt</button>
+  <div class="eg" data-f="edge"></div>
+  <div class="hint">Opens the PDF in a new tab and copies the prompt. Then press Ctrl+Shift+. (or the Copilot button), paste, send.</div>
+  <div class="r2">
+    <a class="btn" data-a="open" target="_blank" rel="noopener">Open in CHG Reviewer</a>
+    <button class="btn" data-a="copy">Copy agent prompt</button>
+  </div>
 </div>`;
   document.body.appendChild(P);
   const $ = s => P.querySelector(s);
   const input = $('[data-f="chg"]');
   input.value = prefill.join(', ');
 
-  let promptText = '';
+  let promptText = '', lastSaved = [], lastCk = null;
   const agentUrl = () => { const a = localStorage.getItem(K_AGENT) || ''; return /^https:\/\//i.test(a) ? a : ''; };
   const renderSettings = () => {
     const fd = $('[data-f="dir"]');
     if (!window.showDirectoryPicker) { fd.innerHTML = '<span class="warn">Downloads (browser can\'t pick folders)</span>'; $('[data-a="dir"]').style.display = 'none'; }
     else if (!dir) fd.innerHTML = '<span class="warn">not set, using Downloads</span>';
     else fd.innerHTML = esc(dir.name) + (dirOk ? '' : ' <span class="warn">(needs permission)</span>');
+    $('[data-f="tp"]').innerHTML = localStorage.getItem(K_TPL) ? 'custom' : 'default';
+    const ckEl = $('[data-f="ck"]');
+    findChecklist().then(f => {
+      ckEl.innerHTML = f ? esc(f.h.name) + (f.auto ? ' <span style="color:#5a6878">(auto)</span>' : '')
+        : '<span class="warn">none found in folder</span>';
+    });
     const od = localStorage.getItem(K_OD) || '';
     $('[data-f="od"]').innerHTML = od ? esc(decodeURIComponent(od.split('/').pop())) : '<span class="warn">not set</span>';
     $('[data-a="od"]').textContent = od ? 'Change' : 'Set';
@@ -238,9 +356,11 @@ async function chgSnap() {
   const renderHandoff = () => {
     const ho = $('[data-f="handoff"]'), open = $('[data-a="open"]'), ag = agentUrl();
     ho.style.display = promptText ? 'flex' : 'none';
+    $('[data-f="edge"]').innerHTML = lastSaved.map((x, i) =>
+      `<button class="btn pri" data-a="edge" data-i="${i}">Ask Edge Copilot: ${esc(x.num)}</button>`).join('');
     if (ag && promptText) {
       open.style.display = '';
-      open.href = ag + (ag.includes('?') ? '&' : '?') + 'q=' + encodeURIComponent(promptText);
+      open.href = promptText.length < 1800 ? ag + (ag.includes('?') ? '&' : '?') + 'q=' + encodeURIComponent(promptText) : ag;
     } else open.style.display = 'none';
   };
   const status = html => { $('[data-f="status"]').innerHTML = html; };
@@ -263,12 +383,33 @@ async function chgSnap() {
     return 'downloads';
   };
 
+  const buildPrompt = (where, items) => {
+    const many = items.length > 1;
+    const od = localStorage.getItem(K_OD) || '';
+    const ck = lastCk;
+    const tpl = localStorage.getItem(K_TPL) || DEFAULT_TPL;
+    const files = items.map(x => x.name + (od ? ' (' + od + '/' + encodeURIComponent(x.name) + ')' : '')).join(', ');
+    const map = {
+      '{CHG}': items.map(x => x.num).join(', '),
+      '{SOURCE}': where === 'tab' ? 'the change request PDF open in this tab'
+                                   : `the attached change request PDF${many ? 's' : ''}`,
+      '{CHECKLIST}': ck && ck.text ? `=== COMPLIANCE CHECKLIST (${ck.name}) ===\n${ck.text}\n=== END OF CHECKLIST ===`
+                                   : '(No checklist provided: review risk, implementation, rollback, testing and approvals instead.)',
+      '{CHECKLIST_NAME}': ck && ck.name ? ck.name : 'none',
+      '{FILES}': files
+    };
+    let out = tpl;
+    for (const k in map) out = out.split(k).join(map[k]);
+    if (where !== 'tab' && !tpl.includes('{FILES}')) out += `\n\nFile${many ? 's' : ''}: ${files}`;
+    return out.trim();
+  };
+
   let busy = false;
   const snap = async () => {
     if (busy) return;
     const list = [...new Set(input.value.toUpperCase().match(/CHG\d+/g) || [])];
     if (!list.length) { status('Enter a change number, e.g. CHG0012345.'); input.focus(); return; }
-    busy = true; promptText = ''; renderHandoff();
+    busy = true; promptText = ''; lastSaved = []; lastCk = null; renderHandoff();
     const lines = [], saved = [];
     for (const num of list) {
       status(esc([...lines, `${num}: saving…`].join('<br>')).replace(/&lt;br&gt;/g, '<br>'));
@@ -281,7 +422,7 @@ async function chgSnap() {
         if (!(r.ok && head === '%PDF')) { lines.push(`${num}: PDF export failed (HTTP ${r.status})`); continue; }
         const name = `${num}.pdf`;
         const where = await save(b, name);
-        saved.push({ num, name });
+        saved.push({ num, name, blob: b });
         lines.push(`${num}: saved to ${where === 'folder' ? dir.name : 'Downloads'}`);
       } catch (e) { lines.push(`${num}: error, ${e.message}`); }
     }
@@ -289,9 +430,17 @@ async function chgSnap() {
     if (saved.length) {
       const od = localStorage.getItem(K_OD) || '';
       const many = saved.length > 1;
-      promptText =
-        `Review ${many ? 'these change requests' : 'this change request'} using the attached PDF${many ? 's' : ''} as the source document${many ? 's' : ''}:\n` +
-        saved.map(s => `- ${s.num}: ${od ? od + '/' + encodeURIComponent(s.name) : s.name}`).join('\n');
+      const ck = await readChecklist();
+      lastSaved = saved; lastCk = ck;
+      promptText = buildPrompt('agent', saved);
+      if (ck && ck.text) {
+        lines.push(`Checklist: ${ck.name} added to prompt`);
+        if (promptText.length > 12000) lines.push('Note: long prompt. If Copilot cuts it off, shorten the checklist.');
+      } else {
+        lines.push(ck && ck.err ? `Checklist: ${ck.err}` :
+          (dir ? 'No checklist found: put a file with "checklist" in its name in the save folder.' : 'No checklist: set a save folder first.'));
+      }
+      status(lines.map(esc).join('<br>'));
     }
     renderHandoff();
     busy = false;
@@ -302,6 +451,7 @@ async function chgSnap() {
       const h = await window.showDirectoryPicker({ id: 'chgpdf', mode: 'readwrite' });
       await idb('readwrite', s => s.put(h, 'dir'));
       dir = h; dirOk = true;
+      ckHandle = null; await idb('readwrite', s => s.delete('checklist')).catch(() => {});
     } catch (e) { /* cancelled */ }
     renderSettings();
   };
@@ -313,6 +463,15 @@ async function chgSnap() {
     if (act === 'close') P.remove();
     if (act === 'snap') snap();
     if (act === 'dir') chooseDir();
+    if (act === 'ck') {
+      if (!window.showOpenFilePicker) { alert('Choosing a file needs Edge or Chrome.'); return; }
+      try {
+        const [h] = await window.showOpenFilePicker({ startIn: dir || 'documents', id: 'chgck' });
+        await idb('readwrite', s => s.put(h, 'checklist'));
+        ckHandle = h;
+      } catch (e) { /* cancelled */ }
+      renderSettings();
+    }
     if (act === 'od') {
       const cur = localStorage.getItem(K_OD) || '';
       const u = prompt('Open your save folder in OneDrive on the web and paste the address-bar URL:', cur);
@@ -327,13 +486,45 @@ async function chgSnap() {
       const u = prompt('Open your CHG Reviewer agent in Copilot and paste the address-bar URL:', localStorage.getItem(K_AGENT) || '');
       if (u !== null) { localStorage.setItem(K_AGENT, u.trim()); renderSettings(); }
     }
+    if (act === 'tpl') {
+      const ed = $('[data-f="editor"]');
+      const open = ed.style.display === 'flex';
+      ed.style.display = open ? 'none' : 'flex';
+      if (!open) { const t = $('[data-f="tpltext"]'); t.value = localStorage.getItem(K_TPL) || DEFAULT_TPL; t.focus(); }
+    }
+    if (act === 'tplreset') $('[data-f="tpltext"]').value = DEFAULT_TPL;
+    if (act === 'tplcancel') $('[data-f="editor"]').style.display = 'none';
+    if (act === 'tplsave') {
+      const v = $('[data-f="tpltext"]').value.trim();
+      if (!v || v === DEFAULT_TPL.trim()) localStorage.removeItem(K_TPL); else localStorage.setItem(K_TPL, v);
+      $('[data-f="editor"]').style.display = 'none';
+      if (lastSaved.length) promptText = buildPrompt('agent', lastSaved);
+      const note = v && !v.includes('{CHECKLIST}') ? ' (no {CHECKLIST} in it, so the checklist won\'t be included)' : '';
+      status(esc('Prompt saved' + note + '.'));
+      renderSettings();
+    }
+    if (act === 'edge') {
+      const x = lastSaved[+a.dataset.i];
+      if (!x) return;
+      const text = buildPrompt('tab', [x]);
+      const cp = navigator.clipboard.writeText(text).then(() => true, () => false);  // start while this page has focus
+      const url = URL.createObjectURL(new Blob([x.blob], { type: 'application/pdf' }));
+      window.open(url, '_blank');
+      setTimeout(() => URL.revokeObjectURL(url), 30 * 60 * 1000);
+      if (!(await cp)) prompt('Copy this prompt, then paste it into Edge Copilot:', text);
+      a.textContent = `Opened ${x.num}: now Ctrl+Shift+. and paste`;
+    }
     if (act === 'open' || act === 'copy') {
       try { await navigator.clipboard.writeText(promptText); if (act === 'copy') { a.textContent = 'Copied'; setTimeout(() => a.textContent = 'Copy prompt', 1500); } }
       catch (err) { if (act === 'copy') prompt('Copy this prompt:', promptText); }
     }
   });
   input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); snap(); } });
-  P.addEventListener('keydown', e => { if (e.key === 'Escape') P.remove(); });
+  P.addEventListener('keydown', e => {
+    if (e.key !== 'Escape') return;
+    const ed = $('[data-f="editor"]');
+    if (ed.style.display === 'flex') ed.style.display = 'none'; else P.remove();
+  });
 
   renderSettings();
   if (!dir && window.showDirectoryPicker) status('Tip: set a save folder in OneDrive so Copilot can read the PDFs.');
