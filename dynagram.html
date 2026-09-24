@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Dynagram 0.25 — dynamic network diagrams from device configs</title>
+<title>Dynagram 0.26 — dynamic network diagrams from device configs</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -2815,7 +2815,16 @@ function cloudExit(model, cloud, from, dst){
     const vrf = m.iface ? m.iface.vrf : 'default';
     const r = lookup(m.dev, dst, vrf);
     if(!r) continue;
-    if(m.iface && r.iface && String(r.iface).toLowerCase()===m.iface.name.toLowerCase()) continue; // points back into the cloud
+    /* A member whose best route leaves by its own WAN interface does not know
+       the destination any better than the WAN does — it would hand the packet
+       straight back. Routes from an imported table usually give only a next
+       hop, so work out the interface rather than relying on the route to name
+       one; that gap is what let a router answer with a summary and send the
+       packet back out the way it came. */
+    const eg=egressFor(m.dev, r);
+    const egName=(eg?eg.name:(r.iface||'')).toLowerCase();
+    if(m.iface && egName && egName===m.iface.name.toLowerCase()) continue;
+    if(m.iface && r.nextHop!=null && m.iface.addrs.some(a=>a.len<32 && inNet(r.nextHop,netOf(a.ip,a.len),a.len))) continue;
     if(!best || r.len>best.route.len || (r.len===best.route.len && r.ad<best.route.ad))
       best={member:m, route:r};
   }
@@ -2832,6 +2841,56 @@ function siteKey(d){
 function inScopeForTrace(d, i){
   try{ return deviceInScope(d) && (!i || ifaceInScope(i)); }catch(e){ return true; }
 }
+
+/* Who owns this next hop, as reached from this device and interface.
+
+   The same address can exist more than once — reused across VRFs, or across
+   datacentres behind a WAN. "The first device with that address" could be in
+   the other DC entirely, and the trace would jump there. So the owner must sit
+   on the same segment as the interface the packet leaves by; failing that,
+   the same site; only then anywhere. */
+function ownerOfFrom(model, ipInt, cur, outIf){
+  const cands=[];
+  for(const d of model.devices){
+    if(d===cur) continue;
+    for(const i of d.interfaces){
+      if(!inScopeForTrace(d,i) || i.shutdown) continue;
+      for(const a of i.addrs) if(a.ip===ipInt) cands.push({dev:d, iface:i, a});
+    }
+  }
+  if(!cands.length) return null;
+  if(cands.length===1) return cands[0];
+  if(outIf){
+    const mine=outIf.addrs.filter(a=>a.len<32);
+    const sameSeg=cands.filter(c=>mine.some(m=>m.len===c.a.len && netOf(m.ip,m.len)===netOf(c.a.ip,c.a.len)));
+    if(sameSeg.length===1) return sameSeg[0];
+    if(sameSeg.length>1){
+      const here=siteKey(cur);
+      const local=sameSeg.filter(c=>siteKey(c.dev)===here);
+      return (local.length?local:sameSeg)[0];
+    }
+  }
+  const here=siteKey(cur);
+  const local=cands.filter(c=>siteKey(c.dev)===here);
+  return (local.length?local:cands)[0];
+}
+/* The interface a route leaves by, in the route's own VRF. */
+function egressFor(dev, route){
+  const inVrf=(i)=>(i.vrf||'default')===(route.vrf||'default');
+  if(route.iface){
+    const n=String(route.iface).toLowerCase();
+    const byName=dev.interfaces.find(i=>i.name.toLowerCase()===n);
+    if(byName) return byName;
+    // an interface name that matches nothing: work it out from the next hop
+  }
+  const pick=(pred)=>dev.interfaces.find(i=>inVrf(i) && pred(i)) || dev.interfaces.find(pred) || null;
+  if(route.nextHop!=null)
+    return pick(i=>!i.shutdown && i.addrs.some(a=>a.len<32 && inNet(route.nextHop,netOf(a.ip,a.len),a.len)));
+  if(route.type==='connected')
+    return pick(i=>i.addrs.some(a=>netOf(a.ip,a.len)===route.net && a.len===route.len));
+  return null;
+}
+
 function ownerOf(model, ipInt){
   for(const d of model.devices)
     for(const i of d.interfaces){
@@ -3062,14 +3121,10 @@ function trace(model, srcStr, dstStr, startId, opts){
     }
 
     // egress interface
-    let outIf=null;
-    if(route.iface) outIf = cur.interfaces.find(i=>i.name.toLowerCase()===String(route.iface).toLowerCase()) || null;
-    if(!outIf && route.nextHop!=null){
-      outIf = cur.interfaces.find(i=>i.addrs.some(a=>a.len<32 && inNet(route.nextHop,netOf(a.ip,a.len),a.len))) || null;
-    }
-    if(!outIf && route.type==='connected'){
-      outIf = cur.interfaces.find(i=>i.addrs.some(a=>netOf(a.ip,a.len)===route.net && a.len===route.len)) || null;
-    }
+    /* The interface it leaves by is looked for in the route's own VRF first.
+       Taking "the first interface on that subnet" in any VRF let a trace leave
+       by an interface in another VRF when a subnet is reused. */
+    let outIf=egressFor(cur, route);
 
     const bypass = (opts && opts.noPolicy) || cur.noPolicy;
     const pol = (cur.vendor==='palo-alto' && !bypass)
@@ -3166,7 +3221,7 @@ function trace(model, srcStr, dstStr, startId, opts){
           break;
         }
       }
-      let own = ownerOf(model, route.nextHop);
+      let own = ownerOfFrom(model, route.nextHop, cur, outIf);
       if(!own){
         const v=vipOwner(model, route.nextHop, cur);
         if(v){
@@ -3243,7 +3298,7 @@ function trace(model, srcStr, dstStr, startId, opts){
     // ingress interface on the next device
     let nextIn=null;
     if(route.nextHop!=null){
-      const own=ownerOf(model, route.nextHop); nextIn = own?own.iface:null;
+      const own=ownerOfFrom(model, route.nextHop, cur, outIf); nextIn = own?own.iface:null;
       /* A next-hop that is an HSRP or VRRP virtual address belongs to no real
          interface, so the owner lookup finds nothing. Fall back to the active
          member's interface — otherwise the arriving interface is unknown, the
@@ -3461,7 +3516,7 @@ function applyBends(els){
 /* A small stable hash, so a link always starts from the same channel. */
 /* Still pre-1.0: the diagram, tracing and reports are solid, but the file
    format and the routing behaviour are both still moving. */
-const APP_VERSION='0.25';
+const APP_VERSION='0.26';
 function hashStr(t){ let h=0; for(let i=0;i<t.length;i++){ h=(h*31 + t.charCodeAt(i))|0; } return h; }
 function zoneAncestors(node){
   const out=new Set();
