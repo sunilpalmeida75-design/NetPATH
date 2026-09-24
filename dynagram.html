@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Dynagram 0.26 — dynamic network diagrams from device configs</title>
+<title>Dynagram 0.27 — dynamic network diagrams from device configs</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -3516,7 +3516,7 @@ function applyBends(els){
 /* A small stable hash, so a link always starts from the same channel. */
 /* Still pre-1.0: the diagram, tracing and reports are solid, but the file
    format and the routing behaviour are both still moving. */
-const APP_VERSION='0.26';
+const APP_VERSION='0.27';
 function hashStr(t){ let h=0; for(let i=0;i<t.length;i++){ h=(h*31 + t.charCodeAt(i))|0; } return h; }
 function zoneAncestors(node){
   const out=new Set();
@@ -10160,6 +10160,8 @@ const LS_KEY='dynagram.session.v1';
    the next start. */
 const LS_FILE='dynagram.lastfile.v1';
 function rememberFile(){
+  /* Kept for older callers. The project is now stored once, by autosave. */
+  return;
   try{
     if(!STATE.fileName) return;
     localStorage.setItem(LS_FILE, JSON.stringify({
@@ -10759,11 +10761,117 @@ function loadProject(obj){
   rebuild();
   return true;
 }
+
+/* ============================================================
+   Keeping your work between sessions
+
+   The project used to live in localStorage, which a browser caps at about
+   5 MB — and every autosave wrote it twice, as the session and as the last
+   file. Real configs, route tables and policies outgrow that quickly; the
+   write then failed without a word, leaving an older copy behind. Reopening
+   brought back that stale copy: its filters, but not its devices.
+
+   It now lives in IndexedDB, the browser's large store, as one copy. On
+   opening you get either the whole last project or a clean blank start —
+   never filters from one state laid over the devices of another.
+   ============================================================ */
+const IDB_NAME='dynagram', IDB_STORE='kv', IDB_KEY='project';
+function idbOpen(){
+  return new Promise((res,rej)=>{
+    if(!window.indexedDB) return rej(new Error('no IndexedDB'));
+    const rq=indexedDB.open(IDB_NAME,1);
+    rq.onupgradeneeded=()=>rq.result.createObjectStore(IDB_STORE);
+    rq.onsuccess=()=>res(rq.result);
+    rq.onerror=()=>rej(rq.error);
+  });
+}
+async function idbPut(key,val){
+  const db=await idbOpen();
+  return new Promise((res,rej)=>{ const tx=db.transaction(IDB_STORE,'readwrite');
+    tx.objectStore(IDB_STORE).put(val,key); tx.oncomplete=()=>res(true); tx.onerror=()=>rej(tx.error); });
+}
+async function idbGet(key){
+  const db=await idbOpen();
+  return new Promise((res,rej)=>{ const tx=db.transaction(IDB_STORE,'readonly');
+    const rq=tx.objectStore(IDB_STORE).get(key); rq.onsuccess=()=>res(rq.result||null); rq.onerror=()=>rej(rq.error); });
+}
+async function idbDel(key){
+  try{ const db=await idbOpen();
+    return new Promise((res)=>{ const tx=db.transaction(IDB_STORE,'readwrite');
+      tx.objectStore(IDB_STORE).delete(key); tx.oncomplete=()=>res(true); tx.onerror=()=>res(false); });
+  }catch(e){ return false; }
+}
+
+/* A blank start: no project, and nothing left over from one. */
+function blankStart(note){
+  STATE.devices=[]; STATE.groups=[]; STATE.clouds=[]; STATE.positions={};
+  STATE.fileName=null; STATE.fileHandle=null; STATE.lastTrace=null;
+  if(STATE.vrfOff) STATE.vrfOff.clear();
+  if(STATE.vsysOff) STATE.vsysOff.clear();
+  if(typeof qClear==='function') qClear();
+  if(typeof updateFileLabel==='function') updateFileLabel();
+  rebuild();
+  if(typeof renderQueryBar==='function') renderQueryBar();
+  const n=document.getElementById('autosave-note'); if(n && note) n.textContent=note;
+}
+/* After a project opens: if its filters would hide every device, the diagram
+   looks empty and broken. Clear them rather than show nothing. */
+function sanityAfterOpen(){
+  if(!STATE.devices.length){ blankStart(); return false; }
+  let visible=0;
+  try{ visible=STATE.devices.filter(d=>deviceInScope(d)).length; }catch(e){ visible=STATE.devices.length; }
+  if(!visible){
+    if(STATE.vrfOff) STATE.vrfOff.clear();
+    if(STATE.vsysOff) STATE.vsysOff.clear();
+    if(typeof qClear==='function') qClear();
+    rebuild();
+    if(typeof renderQueryBar==='function') renderQueryBar();
+    const n=document.getElementById('autosave-note');
+    if(n) n.textContent='The saved filters hid every device, so they were cleared.';
+  }
+  return true;
+}
+/* Startup: the last project from IndexedDB; failing that, anything an older
+   version left in localStorage; failing that, blank. */
+async function startupRestore(){
+  let rec=null;
+  try{ rec=await idbGet(IDB_KEY); }catch(e){}
+  if(rec && rec.project){
+    let ok=false;
+    try{ ok=loadProject(rec.project); }catch(e){ ok=false; }
+    if(ok){
+      STATE.fileName=rec.name||null; STATE.fileHandle=null;
+      if(typeof updateFileLabel==='function') updateFileLabel();
+      if(sanityAfterOpen()){
+        const n=document.getElementById('autosave-note');
+        if(n && rec.name && !/cleared/.test(n.textContent)) n.textContent='Reopened '+rec.name+' \u2014 Save will ask where to put it';
+      }
+      return;
+    }
+  }
+  // older versions kept it in localStorage: bring it across once
+  if(restoreLastFile() || restore()){
+    if(sanityAfterOpen()){
+      try{ await idbPut(IDB_KEY,{name:STATE.fileName||null, at:Date.now(), project:projectObject()});
+           localStorage.removeItem(LS_FILE); localStorage.removeItem(LS_KEY); }catch(e){}
+    }
+    return;
+  }
+  blankStart();
+}
+
 let saveTimer=null;
 function doAutosave(){
-  try{ localStorage.setItem(LS_KEY, JSON.stringify(projectObject())); if(STATE.fileName) rememberFile(); }
-  catch(e){ document.getElementById('autosave-note').textContent =
-    'This browser is not storing your work. Use Save project to keep it.'; }
+  const rec={name:STATE.fileName||null, at:Date.now(), project:projectObject()};
+  idbPut(IDB_KEY, rec).then(()=>{
+    // the old two-copy localStorage entries are no longer used; free the space
+    try{ localStorage.removeItem(LS_KEY); localStorage.removeItem(LS_FILE); }catch(e){}
+  }).catch(()=>{
+    // no IndexedDB (rare): fall back to one localStorage copy, and say if even that fails
+    try{ localStorage.setItem(LS_KEY, JSON.stringify(rec.project)); }
+    catch(e){ const n=document.getElementById('autosave-note');
+      if(n) n.textContent='This project is too large for the browser to keep between sessions. Use Save project to keep it.'; }
+  });
 }
 /* Serializing every config is expensive, and this fires on each rebuild and
    each node drag. Coalesce the bursts. */
@@ -10900,6 +11008,7 @@ function newProject(){
   const fl=document.getElementById('flow-list'); if(fl) fl.value='';
   ['src','dst'].forEach(id=>{ const e=document.getElementById(id); if(e) e.value=''; });
   try{ localStorage.removeItem(LS_FILE); localStorage.removeItem(LS_KEY); }catch(e){}
+  idbDel(IDB_KEY);
   if(typeof updateFileLabel==='function') updateFileLabel();
   document.getElementById('result').innerHTML='<p class="note">New project. Add configs to start.</p><div id="warnbox"></div>';
   const note=document.getElementById('autosave-note'); if(note) note.textContent='New project';
@@ -11176,7 +11285,7 @@ setTimeout(()=>{ pushUndo(); updateUndoButtons(); }, 300);   // the starting lay
 /* Start on the file you were last working on. Falling back to the session
    keeps unsaved work; failing that, start empty — the example lab is only ever
    loaded by pressing its button. */
-if(!restoreLastFile() && !restore()) rebuild();
+startupRestore();   // the last project whole, or a clean blank start
 </script>
 </body>
 </html>
