@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Dynagram 0.23 — dynamic network diagrams from device configs</title>
+<title>Dynagram 0.25 — dynamic network diagrams from device configs</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -573,6 +573,9 @@ body.zen .sb-show{position:fixed;right:14px;top:10px}
 .secpick-row:hover{background:var(--panel)}
 .secpick-row .meta{font-size:11.5px;color:var(--ink-faint);white-space:nowrap}
 .secpick-row input{accent-color:var(--amber,#e0a53a)}
+
+tr.rt-best td{background:rgba(88,196,140,.12)}
+tr.rt-best td:first-child{box-shadow:inset 3px 0 0 var(--green,#58c48c)}
 </style>
 </head>
 <body>
@@ -1487,7 +1490,10 @@ function parsePanSet(text, fname){
       }
       if(k[0]==='import' && k[1]==='network'){
         if(k[2]==='interface'){
-          for(const m of flat(k.slice(3))) if(m) iface(String(m)).vsys=lineVsys;
+          /* The member list arrives as one bracketed token, [ a b ], which
+             flat() leaves as a nested array; String() of that is "a,b" — one
+             bogus interface named after both. Flatten all the way down. */
+          for(const m of k.slice(3).flat(Infinity)) if(m && m!=='[' && m!==']') iface(String(m)).vsys=lineVsys;
           continue;
         }
         if(k[2]==='virtual-router' && k[3]){
@@ -2898,11 +2904,33 @@ function deviceForAddress(model, ipInt, opts){
   for(const c of tied){ const k=siteKey(c.dev)||('dev:'+c.dev.id); if(!seen.has(k)){ seen.add(k); perSite.push(c); } }
   return {dev:best.dev, iface:best.iface, alternatives: perSite.length>1 ? perSite.map(c=>({dev:c.dev, iface:c.iface})) : null};
 }
+/* Is this route one the current VRF/VSYS filter allows a trace to use?
+
+   A route leaves by an interface. If that interface is filtered out — its VRF
+   or VSYS removed from the view — the route is not part of the network being
+   looked at, and a trace must not use it. Before, the filter decided where a
+   trace started and whose address a next hop was, but not which route was
+   chosen, so a more specific route out of a hidden VRF could still win and
+   carry the trace off through places you had removed. */
+function routeUsableInScope(dev, r){
+  if(typeof ifaceInScope!=='function' || typeof scopeActive!=='function') return true;
+  let active=false; try{ active=scopeActive(); }catch(e){ return true; }
+  if(!active) return true;
+  let out=null;
+  if(r.iface) out=dev.interfaces.find(i=>i.name===r.iface) || null;
+  if(!out && r.nextHop!=null)
+    out=dev.interfaces.find(i=>(i.vrf||'default')===(r.vrf||'default') &&
+         i.addrs.some(a=>a.len<32 && inNet(r.nextHop, netOf(a.ip,a.len), a.len))) || null;
+  if(out){ try{ return ifaceInScope(out); }catch(e){ return true; } }
+  // no interface to judge by: fall back to the route's own VRF
+  try{ return !(STATE.vrfOff && STATE.vrfOff.has(r.vrf||'default')); }catch(e){ return true; }
+}
 function lookup(dev, dstInt, vrf){
   let best=null;
   for(const r of dev.fib){
     if(vrf && r.vrf!==vrf) continue;
     if(!inNet(dstInt, r.net, r.len)) continue;
+    if(!routeUsableInScope(dev, r)) continue;
     if(!best || r.len>best.len || (r.len===best.len && r.ad<best.ad)) best=r;
   }
   return best;
@@ -3433,7 +3461,7 @@ function applyBends(els){
 /* A small stable hash, so a link always starts from the same channel. */
 /* Still pre-1.0: the diagram, tracing and reports are solid, but the file
    format and the routing behaviour are both still moving. */
-const APP_VERSION='0.23';
+const APP_VERSION='0.25';
 function hashStr(t){ let h=0; for(let i=0;i<t.length;i++){ h=(h*31 + t.charCodeAt(i))|0; } return h; }
 function zoneAncestors(node){
   const out=new Set();
@@ -4941,12 +4969,12 @@ function panRulesHtml(d, opts){
     ((a.tier==null?1:a.tier)-(b.tier==null?1:b.tier)) || ((a.order||0)-(b.order||0)));
   if(!rules.length) return '<p class="note">No security rules were found in this config.</p>';
   const only=opts && opts.zones;      // limit to rules touching these zones
+  const pq=opts && opts.pq;
   const rows=rules.filter(r=>{
-    if(!only) return true;
-    const hit=(l)=>l.some(z=>z==='any'||only.has(z));
-    return hit(r.from)||hit(r.to);
+    if(only){ const hit=(l)=>l.some(z=>z==='any'||only.has(z)); if(!(hit(r.from)||hit(r.to))) return false; }
+    const m=ruleMatchesQuery(d,r,pq); r._side=m.side; return m.ok;
   });
-  if(!rows.length) return '<p class="note">No rule mentions the zones on this link.</p>';
+  if(!rows.length) return '<p class="note">'+(pq?'No rule matches \u201c'+esc(pq.text)+'\u201d.':'No rule mentions the zones on this link.')+'</p>';
   const multi = new Set(rules.map(r=>r.vsys||'vsys1')).size>1;
   const stages = new Set(rules.map(r=>r.stage||'rulebase')).size>1;
   return '<table class="fib pol"><tr><th>#</th>'+(multi?'<th>VSYS</th>':'')+
@@ -4956,7 +4984,8 @@ function panRulesHtml(d, opts){
       '<td class="muted">'+((r.order!=null?r.order:'')+'')+'</td>'+
       (multi?'<td>'+esc(r.vsys||'vsys1')+'</td>':'')+
       (stages?'<td class="muted">'+esc((r.stage||'rulebase').replace('-rulebase',''))+'</td>':'')+
-      '<td class="nm">'+esc(r.name)+(r.disabled?' <span class="muted">(disabled)</span>':'')+'</td>'+
+      '<td class="nm">'+esc(r.name)+(r.disabled?' <span class="muted">(disabled)</span>':'')+
+        (pq&&pq.ip!=null&&r._side?'<br><span class="muted">matches as '+esc(r._side)+'</span>':'')+'</td>'+
       '<td>'+listOf(r.from)+'</td><td>'+listOf(r.to)+'</td>'+
       '<td>'+(Array.isArray(r.source)?r.source.map(x=>esc(x)+addrHint(d,x)).join(', '):listOf(r.source))+'</td>'+
       '<td>'+(Array.isArray(r.destination)?r.destination.map(x=>esc(x)+addrHint(d,x)).join(', '):listOf(r.destination))+'</td>'+
@@ -4980,39 +5009,97 @@ function aclHtml(d, opts){
     }
   }
   const only=opts && opts.ifaces;   // limit to lists bound to these interfaces
+  const pq=opts && opts.pq;
   const show=names.filter(n=>{
     if(!only) return true;
     return (bind[n]||[]).some(b=>only.has(b.split(' ')[0]));
   });
   if(!show.length) return only ? '<p class="note">No access list is applied to the interfaces on this link.</p>' : '';
-  return show.map(n=>{
+  let anyShown=false;
+  const html=show.map(n=>{
     const l=d.acls[n];
+    const ents=l.entries.map((e,i)=>({e,i,m:aceMatchesQuery(e,pq)})).filter(x=>x.m.ok);
+    if(pq && !ents.length) return '';
+    anyShown=true;
     return '<h3 class="sub">'+esc(n)+
       (bind[n]?' <span class="muted">on '+esc(bind[n].join(', '))+'</span>':' <span class="muted">not applied to any interface</span>')+'</h3>'+
       '<table class="fib pol"><tr><th>#</th><th>Action</th><th>Protocol</th><th>Source</th><th>Destination</th><th>Ports</th></tr>'+
-      l.entries.map((e,i)=>{
+      ents.map(({e,i,m})=>{
         const spec=(x)=>!x?'any':x.any?'any':(x.len===32?int2ip(x.net):cidr(x.net,x.len));
         const ports=[e.sPorts?('src '+e.sPorts.op+' '+e.sPorts.vals.join('-')):'',
                      e.dPorts?('dst '+e.dPorts.op+' '+e.dPorts.vals.join('-')):''].filter(Boolean).join(', ');
         return '<tr'+(e.action==='deny'?' class="rdeny"':'')+'>'+
           '<td class="muted">'+(i+1)+'</td><td>'+actionTag(e.action)+'</td>'+
           '<td>'+esc(e.proto)+'</td><td>'+esc(spec(e.src))+'</td><td>'+esc(spec(e.dst))+'</td>'+
-          '<td>'+esc(ports||'')+'</td></tr>';
+          '<td>'+esc(ports||'')+(pq&&pq.ip!=null?' <span class="muted">'+esc(m.side)+'</span>':'')+'</td></tr>';
       }).join('')+
       '<tr class="rdeny"><td class="muted">\u2014</td><td>'+actionTag('deny')+
       '</td><td colspan="4" class="muted">implicit deny at the end of every list</td></tr>'+
       '</table>';
   }).join('');
+  if(pq && !anyShown) return '<p class="note">No access-list line matches \u201c'+esc(pq.text)+'\u201d.</p>';
+  return html;
+}
+
+
+/* ---------- policy search ----------
+   An address finds the rules and ACL lines that would apply to it — "any"
+   included, address objects resolved — and says whether it matched as source
+   or destination. Anything else is a text search over the rule itself. */
+function polQuery(q){
+  const t=String(q||'').trim();
+  if(!t) return null;
+  const m=t.match(/^(\d{1,3}(?:\.\d{1,3}){3})(?:\/(\d{1,2}))?$/);
+  if(m){ const ip=ip2int(m[1]); if(ip!==null) return {ip, len:m[2]!=null?+m[2]:32, text:t}; }
+  return {text:t.toLowerCase()};
+}
+function addrItemCovers(dev, item, ip){
+  const v=String(item||'');
+  if(v==='any') return true;
+  const obj=(dev.addrObjects||{})[v];
+  const s=obj!=null ? String(obj) : v;
+  const c=parseCidr(s.includes('/')?s:s+'/32');
+  if(c) return inNet(ip, c.net, c.len);
+  const rg=s.match(/^(\d+\.\d+\.\d+\.\d+)-(\d+\.\d+\.\d+\.\d+)$/);        // ip-range objects
+  if(rg){ const a=ip2int(rg[1]), b=ip2int(rg[2]); return a!==null&&b!==null&&ip>=a&&ip<=b; }
+  return false;
+}
+function ruleMatchesQuery(dev, r, pq){
+  if(!pq) return {ok:true};
+  if(pq.ip!=null){
+    const arr=(x)=>Array.isArray(x)?x:[x];
+    const src=arr(r.source).some(it=>addrItemCovers(dev,it,pq.ip));
+    const dst=arr(r.destination).some(it=>addrItemCovers(dev,it,pq.ip));
+    return {ok:src||dst, side: src&&dst?'source and destination':src?'source':dst?'destination':''};
+  }
+  const hay=[r.name, r.action, r.vsys, r.stage].concat(r.from||[], r.to||[], r.source||[], r.destination||[])
+    .map(x=>String(x||'')).concat([].concat(r.source||[], r.destination||[]).map(x=>String((dev.addrObjects||{})[x]||'')))
+    .join(' ').toLowerCase();
+  return {ok: hay.includes(pq.text)};
+}
+function aceMatchesQuery(e, pq){
+  if(!pq) return {ok:true};
+  if(pq.ip!=null){
+    const cov=(x)=>!x || x.any || inNet(pq.ip, x.net, x.len);
+    const s=cov(e.src), d=cov(e.dst);
+    return {ok:s||d, side: s&&d?'source and destination':s?'source':'destination'};
+  }
+  return {ok: String(e.text||'').toLowerCase().includes(pq.text) || String(e.proto||'').toLowerCase()===pq.text};
 }
 
 /* Everything that decides traffic on this device. */
 function policyTabHtml(d){
+  return '<div class="rt-form"><input id="pol-search" class="wide" spellcheck="false" '+
+    'placeholder="Search policy \u2014 an address (finds rules that apply to it), a rule name, zone, object or action"></div>'+
+    '<div id="pol-body">'+policyBodyHtml(d, null)+'</div>';
+}
+function policyBodyHtml(d, pq){
   const bits=[];
   if(isFirewall(d)){
-    bits.push('<h2 class="sec">Security rules</h2>'+panRulesHtml(d));
+    bits.push('<h2 class="sec">Security rules</h2>'+panRulesHtml(d, pq?{pq}:undefined));
     if(d.noPolicy) bits.push('<p class="note">Policy is being ignored for this device in traces.</p>');
   }
-  const acl=aclHtml(d);
+  const acl=aclHtml(d, pq?{pq}:undefined);
   if(acl) bits.push('<h2 class="sec">Access lists</h2>'+acl);
   if((d.nat||[]).length){
     bits.push('<h2 class="sec">NAT</h2><table class="fib pol">'+
@@ -5332,6 +5419,94 @@ function showSecurityPicker(){
   back.onclick=close;
   document.body.appendChild(back); document.body.appendChild(box);
   paint();
+}
+
+
+/* ============================================================
+   Route search
+
+   Runs against the device's whole table, not just the rows on screen — the
+   table only draws the first 250, so anything past that could not be found
+   before. Three kinds of query:
+
+     an address   10.65.140.122     the routes that would carry it: every
+                                    route containing it, with the one the
+                                    device would actually use (longest prefix,
+                                    then lowest distance) marked, per VRF
+     a prefix     10.65.140.0/24    that exact route; if it is not there, the
+                                    larger routes that cover it, best first,
+                                    down to the default route
+     text         Vlan2265, static  prefix, next hop, outgoing interface,
+                                    source and VRF
+   ============================================================ */
+function routeOutIface(dev, f){
+  if(f.iface) return f.iface;
+  if(f.nextHop==null) return '';
+  const i=dev.interfaces.find(x=>(x.vrf||'default')===(f.vrf||'default') &&
+    x.addrs.some(a=>a.len<32 && inNet(f.nextHop, netOf(a.ip,a.len), a.len)));
+  return i ? i.name : '';
+}
+function searchRoutes(dev, rawQ, fib){
+  const q=String(rawQ||'').trim();
+  if(!q) return null;
+  const better=(a,b)=> b.len-a.len || (a.ad??1)-(b.ad??1);
+  const ipM=q.match(/^(\d{1,3}(?:\.\d{1,3}){3})$/);
+  const pfxM=q.match(/^(\d{1,3}(?:\.\d{1,3}){3})\/(\d{1,2})$/);
+  if(ipM || pfxM){
+    const ip=ip2int(ipM?ipM[1]:pfxM[1]);
+    if(ip===null) return {kind:'bad', rows:[], note:'That is not a valid address.'};
+    const len=pfxM ? Math.min(32,parseInt(pfxM[2],10)) : 32;
+    const net=netOf(ip,len);
+    // exact prefix first, when one was asked for
+    if(pfxM){
+      const exact=fib.filter(f=>f.len===len && f.net===net);
+      if(exact.length) return {kind:'exact', rows:exact.map(f=>({f, best:true})),
+        note:'Exact route'+(exact.length>1?'s':'')+' for '+cidr(net,len)+'.'};
+    }
+    // every route that contains it: the same prefix or larger, down to 0/0
+    const covering=fib.filter(f=>f.len<=len && inNet(net, f.net, f.len));
+    if(!covering.length) return {kind:'none', rows:[],
+      note:'No route covers '+(pfxM?cidr(net,len):ipM[1])+' \u2014 not even a default route. Traffic to it is dropped here.'};
+    const byVrf={};
+    for(const f of covering) (byVrf[f.vrf||'default']=byVrf[f.vrf||'default']||[]).push(f);
+    const rows=[];
+    const bestPer=[];
+    for(const v of Object.keys(byVrf).sort()){
+      const list=byVrf[v].sort(better);
+      bestPer.push(list[0]);
+      list.forEach((f,i)=>rows.push({f, best:i===0}));
+    }
+    const what = pfxM ? cidr(net,len) : ipM[1];
+    const say=(f)=>cidr(f.net,f.len)+(f.len===0?' (default route)':'')+
+      (f.nextHop!=null?' via '+int2ip(f.nextHop):(routeOutIface(dev,f)?' on '+routeOutIface(dev,f):''));
+    const note = (pfxM ? 'No exact route for '+what+'. ' : '') +
+      (bestPer.length===1
+        ? 'Traffic to '+what+' uses '+say(bestPer[0])+'.'
+        : 'Traffic to '+what+' uses, per VRF: '+bestPer.map(f=>(f.vrf||'default')+' \u2192 '+say(f)).join(' \u00b7 ')+'.');
+    return {kind: pfxM?'covering':'lookup', rows, note};
+  }
+  // plain text
+  const t=q.toLowerCase();
+  const rows=fib.filter(f=>[cidr(f.net,f.len), f.nextHop!=null?int2ip(f.nextHop):'', routeOutIface(dev,f),
+                            f.type, f.vrf||'default'].join(' ').toLowerCase().includes(t)).map(f=>({f}));
+  return {kind:'text', rows, note: rows.length+' route'+(rows.length===1?'':'s')+' match \u201c'+q+'\u201d.'};
+}
+function renderRouteSearch(dev, q, fib){
+  const res=searchRoutes(dev, q, fib);
+  if(!res) return null;
+  const CAP=400;
+  const rows=res.rows.slice(0,CAP);
+  const body=rows.map(({f,best})=>
+    '<tr'+(best && res.kind!=='text' && res.kind!=='exact'?' class="rt-best"':'')+'>'+
+    '<td>'+cidr(f.net,f.len)+(f.len===0?' <span class="muted">default</span>':'')+'</td>'+
+    '<td>'+esc(f.vrf||'default')+'</td>'+
+    '<td>'+(f.nextHop!=null?int2ip(f.nextHop):'\u2014')+'</td>'+
+    '<td>'+esc(routeOutIface(dev,f)||'\u2014')+'</td>'+
+    '<td><span class="tag '+f.type+'">'+f.type+'</span></td>'+
+    '<td>'+(best && res.kind!=='text' && res.kind!=='exact'?'<b>used</b>':'')+'</td></tr>').join('');
+  return '<p class="note" style="margin:6px 0 8px">'+esc(res.note)+'</p>'+
+    (rows.length?'<table class="fib"><tr><th>Prefix</th><th>VRF</th><th>Next hop</th><th>Out</th><th>Source</th><th></th></tr>'+body+'</table>':'')+
+    (res.rows.length>CAP?'<p class="note">Showing '+CAP+' of '+res.rows.length+'.</p>':'');
 }
 
 /* ---------- picking several devices at once ---------- */
@@ -8803,7 +8978,8 @@ function showDevice(d, opts){
 
   const routingTabHtml =
     '<div class="rt-form"><input id="dev-search" class="wide" '+
-      'placeholder="Filter routes — prefix, next hop, type, vrf..." spellcheck="false"></div>'+
+      'placeholder="Search routes \u2014 an address, a prefix like 10.1.0.0/16, or text (next hop, interface, vrf)" spellcheck="false"></div>'+
+    '<div id="rt-search-results" class="hidden"></div>'+
     '<h2 class="sec">Routing table <span id="dev-search-count" style="color:var(--ink-faint);font-weight:400"></span></h2>'+
     '<p class="note" style="margin-top:0">What this device actually routes on — the table the trace engine uses.</p>'+
     (hiddenRoutes ? '<p class="scope-note">'+hiddenRoutes+' route'+(hiddenRoutes===1?'':'s')+
@@ -8947,7 +9123,26 @@ function showDevice(d, opts){
 
   const zoneSel=document.getElementById('dev-zone');
   const devSearch=document.getElementById('dev-search');
-  if(devSearch){
+  if(devSearch && STATE.devSubTab==='routing'){
+    const scopeOn2 = (typeof scopeActive==='function') && scopeActive();
+    const fibAllR = d.fib.slice().sort((a,b)=>a.net-b.net||a.len-b.len);
+    const fibForSearch = scopeOn2 ? fibAllR.filter(r=>routeInScope(r,d)) : fibAllR;
+    const out=document.getElementById('rt-search-results'), table=document.getElementById('rt-table');
+    const cnt=document.getElementById('dev-search-count');
+    devSearch.oninput=()=>{
+      const q=devSearch.value;
+      const html=renderRouteSearch(d, q, fibForSearch);
+      if(html===null){
+        out.classList.add('hidden'); out.innerHTML='';
+        if(table) table.style.display='';
+        if(cnt) cnt.textContent='';
+        return;
+      }
+      out.innerHTML=html; out.classList.remove('hidden');
+      if(table) table.style.display='none';
+      if(cnt) cnt.textContent='';
+    };
+  } else if(devSearch){
     devSearch.oninput=()=>{
       const q=devSearch.value.trim().toLowerCase();
       let total=0, shown=0;
@@ -9120,6 +9315,13 @@ function showDevice(d, opts){
   r.querySelectorAll('[data-nbdel]').forEach(b=>b.onclick=()=>{
     d.neighbors.splice(parseInt(b.dataset.nbdel,10),1); refresh();
   });
+  const polSearch=document.getElementById('pol-search');
+  if(polSearch){
+    polSearch.oninput=()=>{
+      const body=document.getElementById('pol-body');
+      if(body) body.innerHTML=policyBodyHtml(d, polQuery(polSearch.value));
+    };
+  }
   const nbImp=document.getElementById('nb-import');
   if(nbImp) nbImp.onclick=()=>{
     const box=document.getElementById('nb-paste');
