@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Dynagram 0.22 — dynamic network diagrams from device configs</title>
+<title>Dynagram 0.23 — dynamic network diagrams from device configs</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -2708,12 +2708,22 @@ function buildModel(devices, opts){
 }
 
 /* Which device answers for a virtual IP — the highest priority member. */
-function vipOwner(model, ipInt){
+/* Which member answers for a shared (HSRP/VRRP) address.
+
+   On a VLAN stretched across two datacentres the same gateway address exists
+   in both, usually with the same priorities in each. A packet already in one
+   DC is answered by that DC's gateway, so members in the same site as the
+   device forwarding the packet come first; then priority. Before, a tie was
+   settled by whichever config had been loaded first, which could send the
+   packet across the DCI and back. */
+function vipOwner(model, ipInt, fromDev){
   const mem=(model.vips||{})[ipInt];
   if(!mem || !mem.length) return null;
-  // prefer an active member the scope still shows
-  const live=mem.filter(m=>inScopeForTrace(m.dev, m.iface));
-  return (live.length?live:mem)[0];
+  let pool=mem.filter(m=>inScopeForTrace(m.dev, m.iface) && !m.iface.shutdown);
+  if(!pool.length) pool=mem;
+  const here=fromDev ? siteKey(fromDev) : null;
+  if(here){ const local=pool.filter(m=>siteKey(m.dev)===here); if(local.length) pool=local; }
+  return pool.slice().sort((a,b)=>(b.prio||100)-(a.prio||100) || a.dev.name.localeCompare(b.dev.name))[0];
 }
 
 /* Carrier names as they actually appear in interface descriptions. Word
@@ -2808,6 +2818,11 @@ function cloudExit(model, cloud, from, dst){
 
 /* A device the scope has removed takes no part in a trace, so a next hop is
    never resolved onto one. */
+/* The top-level site (datacentre) a device belongs to, or null. */
+function siteKey(d){
+  try{ if(typeof siteOf==='function'){ const g=siteOf(d); return g?g.id:null; } }catch(e){}
+  return null;
+}
 function inScopeForTrace(d, i){
   try{ return deviceInScope(d) && (!i || ifaceInScope(i)); }catch(e){ return true; }
 }
@@ -2855,19 +2870,33 @@ function deviceForAddress(model, ipInt, opts){
         if(!(a.len<32 && inNet(ipInt,netOf(a.ip,a.len),a.len))) continue;
         // the active member of a virtual address (first in the group) beats a
         // standby, which beats any other switch or router, which beats a firewall
+        /* Active means the highest priority among the group's members in the
+           same site — on a stretched VLAN each DC has its own active gateway,
+           and being first in the whole group says nothing but load order. */
         let rank = isFirewall(d) ? 3 : 2;
         for(const v in (model.vips||{})){
           const mem=model.vips[v]||[];
-          const at=mem.findIndex(m=>m.iface===i);
-          if(at===0){ rank=0; break; }
-          if(at>0) rank=Math.min(rank,1);
+          const me=mem.find(m=>m.iface===i);
+          if(!me) continue;
+          const site=siteKey(d);
+          const peers=mem.filter(m=>siteKey(m.dev)===site);
+          const top=Math.max(...peers.map(m=>m.prio||100));
+          if((me.prio||100)===top){ rank=0; break; }
+          rank=Math.min(rank,1);
         }
         cands.push({rank, dev:d, iface:i});
       }
     }
   if(!cands.length) return null;
-  cands.sort((x,y)=>x.rank-y.rank);
-  return {dev:cands[0].dev, iface:cands[0].iface};
+  cands.sort((x,y)=>x.rank-y.rank || x.dev.name.localeCompare(y.dev.name));
+  const best=cands[0];
+  /* Equally good gateways in different sites mean the subnet is stretched and
+     the host could be in either. Hand back one per site so the trace can try
+     each rather than trusting load order. */
+  const tied=cands.filter(c=>c.rank===best.rank);
+  const perSite=[], seen=new Set();
+  for(const c of tied){ const k=siteKey(c.dev)||('dev:'+c.dev.id); if(!seen.has(k)){ seen.add(k); perSite.push(c); } }
+  return {dev:best.dev, iface:best.iface, alternatives: perSite.length>1 ? perSite.map(c=>({dev:c.dev, iface:c.iface})) : null};
 }
 function lookup(dev, dstInt, vrf){
   let best=null;
@@ -2935,6 +2964,30 @@ function trace(model, srcStr, dstStr, startId, opts){
     }
   } else {
     const found = deviceForAddress(model, src);
+    if(found && found.alternatives && !(opts && opts._noSiteChoice)){
+      /* The source subnet exists in several sites. Trace from each site's
+         gateway and keep the best: delivered beats not delivered, then the one
+         that stays in the destination's own site, then the shorter path. */
+      const dstHome = deviceForAddress(model, dst);
+      const dstSite = dstHome ? siteKey(dstHome.dev) : null;
+      const tries = found.alternatives.map(a=>{
+        const r=trace(model, srcStr, dstStr, a.dev.id, Object.assign({}, opts||{}, {_noSiteChoice:true}));
+        const ok=!!(r.verdict && r.verdict.ok && !r.exitsNetwork);
+        const sites=new Set((r.hops||[]).map(h=>siteKey(h.dev)).filter(Boolean));
+        const local = dstSite ? (sites.size===1 && sites.has(dstSite)) : sites.size<=1;
+        return {r, a, ok, local, n:(r.hops||[]).length};
+      });
+      tries.sort((x,y)=>(y.ok-x.ok) || (y.local-x.local) || (x.n-y.n));
+      const pick=tries[0];
+      if(pick.r && !pick.r.error){
+        pick.r.siteChoice = 'The source subnet '+(found.iface.addrs[0]?cidr(netOf(found.iface.addrs[0].ip,found.iface.addrs[0].len),found.iface.addrs[0].len):'')+
+          ' exists in '+found.alternatives.length+' sites. Traced from '+pick.a.dev.name+
+          ', the gateway that reaches the destination'+(pick.local?' without leaving its site':'')+
+          '. Choose a starting device to trace from '+
+          tries.slice(1).map(t=>t.a.dev.name).join(' or ')+' instead.';
+        return pick.r;
+      }
+    }
     if(found){ start=found.dev; ingress=found.iface; }
   }
   if(!start){
@@ -3087,7 +3140,7 @@ function trace(model, srcStr, dstStr, startId, opts){
       }
       let own = ownerOf(model, route.nextHop);
       if(!own){
-        const v=vipOwner(model, route.nextHop);
+        const v=vipOwner(model, route.nextHop, cur);
         if(v){
           own={dev:v.dev, iface:v.iface};
           hop.viaVip=int2ip(route.nextHop)+' · '+v.proto+' '+v.group+' active on '+v.dev.name;
@@ -3169,7 +3222,7 @@ function trace(model, srcStr, dstStr, startId, opts){
          VRF defaults to the global table, and a perfectly good route inside a
          VRF looks like no route at all. */
       if(!nextIn){
-        const v=vipOwner(model, route.nextHop);
+        const v=vipOwner(model, route.nextHop, cur);
         if(v && v.dev===nextDev) nextIn=v.iface;
       }
       /* Still nothing: match the next-hop against the arriving device's own
@@ -3380,7 +3433,7 @@ function applyBends(els){
 /* A small stable hash, so a link always starts from the same channel. */
 /* Still pre-1.0: the diagram, tracing and reports are solid, but the file
    format and the routing behaviour are both still moving. */
-const APP_VERSION='0.22';
+const APP_VERSION='0.23';
 function hashStr(t){ let h=0; for(let i=0;i<t.length;i++){ h=(h*31 + t.charCodeAt(i))|0; } return h; }
 function zoneAncestors(node){
   const out=new Set();
@@ -9258,6 +9311,7 @@ function showTrace(res, opts){
   let html='<div class="verdict '+(v.ok?'ok':'bad')+'"><b>'+esc(v.title)+
     (opts.label?' <span style="font-weight:400;color:var(--ink-faint)">— '+esc(opts.label)+'</span>':'')+
     '</b><p>'+esc(v.detail)+'</p></div>';
+  if(res.siteChoice) html+='<div class="scope-note">'+esc(res.siteChoice)+'</div>';
   { const ig=securityIgnoredNote();
     if(ig) html+='<div class="scope-note" style="border-left:3px solid var(--amber,#e0a53a);padding-left:8px">'+esc(ig)+'</div>'; }
   if(res.hops && res.hops.length && (document.getElementById('opt-view')||{}).value!=='path')
