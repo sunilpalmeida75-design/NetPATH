@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Dynagram 0.20 — dynamic network diagrams from device configs</title>
+<title>Dynagram 0.21 — dynamic network diagrams from device configs</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -867,6 +867,15 @@ body.zen .sb-show{position:fixed;right:14px;top:10px}
       <div class="rt-form" style="align-items:center">
         <label style="font-size:12px;color:var(--ink-dim)">Zone name-tab text</label>
         <input type="color" id="th-zoneTabColor" title="Name-tab text colour for every zone">
+      </div>
+      <div class="rt-form">
+        <select id="th-devWeight" title="How heavy device names are drawn">
+          <option value="400">Device text: regular</option>
+          <option value="500">Device text: medium</option>
+          <option value="600">Device text: semibold</option>
+          <option value="700">Device text: bold</option>
+          <option value="800">Device text: extra bold</option>
+        </select>
       </div>
       <div class="rt-form">
         <select id="th-devFont" title="Device typeface"></select>
@@ -3369,7 +3378,7 @@ function applyBends(els){
 /* A small stable hash, so a link always starts from the same channel. */
 /* Still pre-1.0: the diagram, tracing and reports are solid, but the file
    format and the routing behaviour are both still moving. */
-const APP_VERSION='0.20';
+const APP_VERSION='0.21';
 function hashStr(t){ let h=0; for(let i=0;i<t.length;i++){ h=(h*31 + t.charCodeAt(i))|0; } return h; }
 function zoneAncestors(node){
   const out=new Set();
@@ -5638,7 +5647,7 @@ function l2IsTrunk(L){
 
 const THEME_DEFAULT={
   canvasBg:'#232b34', canvasGrid:true, gridStyle:'lines',
-  devBg:'#1b222a', devText:'#e8edf2',
+  devBg:'#1b222a', devText:'#f4f7fa',
   roleRouter:'#3a5273', roleSwitch:'#3f7a63', roleFirewall:'#8a6a2e',
   zoneBg:'#1e262f', zoneText:'#8a9bad', zoneBorder:'#3f8f63', zoneGrid:false,
   textFill:0.8,                                // how much of a box its label fills
@@ -5646,7 +5655,7 @@ const THEME_DEFAULT={
   linkIntra:'#4a6076', linkInter:'#c98a3e',   // within a site, and between sites
   linkDown:'#e0625f',                         // an end is administratively down
   boxBorderW:2, boxW:null, boxH:null,          // null = auto-sized from the label
-  devFontSize:15, devBold:false, zoneFontSize:13, zoneBold:false,
+  devFontSize:15, devBold:false, devWeight:'600', zoneFontSize:13, zoneBold:false,
   devFont:'Arial, Helvetica, sans-serif', zoneFont:'Arial, Helvetica, sans-serif',
   linkWidth:1.4,
   netText:'#4fc3d9', linkText:'#61799a'
@@ -5661,7 +5670,7 @@ const THEME_VISIO={
   textFill:0.8, showRole:true,
   linkIntra:'#8496a6', linkInter:'#c07a22', linkDown:'#c8453f',
   boxBorderW:3, boxW:null, boxH:null,
-  devFontSize:15, devBold:false, zoneFontSize:13, zoneBold:false,
+  devFontSize:15, devBold:false, devWeight:'600', zoneFontSize:13, zoneBold:false,
   devFont:'Arial, Helvetica, sans-serif', zoneFont:'Arial, Helvetica, sans-serif',
   linkWidth:1.4,
   netText:'#12628f', linkText:'#3d5568'
@@ -5709,8 +5718,21 @@ function roleColor(role){
        : role==='switch'   ? TH('roleSwitch')
        :                     TH('roleRouter');
 }
+/* WCAG contrast between two colours, 1 to 21. */
+function contrastRatio(a,b){
+  const lin=(c)=>{ c/=255; return c<=0.03928 ? c/12.92 : Math.pow((c+0.055)/1.055, 2.4); };
+  const L=(hex)=>{ const h=String(hex||'').replace('#',''); if(h.length!==6) return 0;
+    const n=parseInt(h,16); return 0.2126*lin((n>>16)&255)+0.7152*lin((n>>8)&255)+0.0722*lin(n&255); };
+  const x=L(a), y=L(b); return (Math.max(x,y)+0.05)/(Math.min(x,y)+0.05);
+}
 function deviceColor(d, role){
-  const bg=(d&&d.bg)||TH('devBg'), fg=(d&&d.fg)||TH('devText');
+  const bg=(d&&d.bg)||TH('devBg');
+  let fg=(d&&d.fg)||TH('devText');
+  /* If a colour choice leaves the name hard to read against its box, use
+     near-black or near-white instead — whichever the box needs. 4.5 is the
+     usual threshold for text that has to be read, not just seen. */
+  if(/^#[0-9a-f]{6}$/i.test(bg) && /^#[0-9a-f]{6}$/i.test(fg) && contrastRatio(fg,bg)<4.5)
+    fg = contrastRatio('#0b1620',bg) > contrastRatio('#f7fafc',bg) ? '#0b1620' : '#f7fafc';
   return {bg, fg, bd:(d&&d.bd)||roleColor(role||roleOf(d))};
 }
 function zoneColor(g){
@@ -5731,11 +5753,17 @@ const FONTS=[
   ['Arial, Helvetica, sans-serif','Arial'],
   ['"Courier New", monospace','Courier']
 ];
+/* Device names are the thing people read most, and at normal weight on a
+   dark box they looked thin and faint, especially zoomed out. The default is
+   now semibold; the Appearance setting picks the weight for every box, and a
+   box marked bold goes one step heavier. */
 function deviceFont(d){
   const size=(d&&d.fontSize)||TH('devFontSize')||13;
   const bold=(d&&d.bold!=null)?d.bold:!!TH('devBold');
   const fam=(d&&d.font)||TH('devFont')||'IBM Plex Mono, monospace';
-  return {size, weight: bold?'bold':'normal', fam};
+  const base=String(TH('devWeight')||'600');
+  const heavier={'400':'700','500':'700','600':'800','700':'900','800':'900','900':'900'};
+  return {size, weight: bold ? (heavier[base]||'800') : base, fam};
 }
 function zoneFont(g){
   const size=(g&&g.tabSize)||(g&&g.fontSize)||TH('zoneTabSize')||TH('zoneFontSize')||12;
@@ -5796,7 +5824,10 @@ function graphStyle(){
         'background-color':'data(bg)','border-width':TH('boxBorderW'),'border-color':'data(bd)',
         'label':'data(label)','color':'data(fg)','font-family':'data(ff)',
         'font-size':'data(fs)','font-weight':'data(fw)','text-valign':'center','text-halign':'center',
-        'text-wrap':'wrap',
+        'text-wrap':'wrap','text-opacity':1,
+        /* a hairline stroke in the text's own colour thickens the glyphs a
+           touch, which keeps names legible when zoomed out */
+        'text-outline-color':'data(fg)','text-outline-width':0.35,'text-outline-opacity':0.9,
         'background-image':'data(dotUri)','background-width':'11px','background-height':'11px',
         'background-position-x':'100%','background-position-y':'0%','background-clip':'none',
         'background-image-opacity':1
@@ -10716,6 +10747,11 @@ function initTheme(){
     dff.onchange=()=>{ STATE.theme.devFont=dff.value; applyTheme(); autosave(); }; }
   if(zff){ fontOpts(zff, STATE.theme.zoneFont);
     zff.onchange=()=>{ STATE.theme.zoneFont=zff.value; applyTheme(); autosave(); }; }
+  const dw=document.getElementById('th-devWeight');
+  if(dw){
+    dw.value=String(STATE.theme.devWeight||'600');
+    dw.onchange=()=>{ STATE.theme.devWeight=dw.value; render(); autosave(); };
+  }
   const ztc=document.getElementById('th-zoneTabColor');
   if(ztc){
     ztc.value=STATE.theme.zoneTabColor||'#f2f7fb';
