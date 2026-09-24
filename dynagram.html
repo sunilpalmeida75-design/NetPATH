@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Dynagram 0.21 — dynamic network diagrams from device configs</title>
+<title>Dynagram 0.22 — dynamic network diagrams from device configs</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -632,7 +632,7 @@ body.zen .sb-show{position:fixed;right:14px;top:10px}
       </div>
       <div class="btn-row">
         <button class="btn" id="open-proj">Open project</button>
-        <button class="btn" id="clear-all">Clear all</button>
+        <button class="btn" id="clear-all" title="Start an empty project. Appearance settings are kept.">New project</button>
       </div>
       <input type="file" id="projfile" accept=".json,.dynagram" class="hidden">
       <p class="saved-note" id="autosave-note">Your work stays in this browser until you clear it.</p>
@@ -2204,6 +2204,8 @@ function reparseInto(existing, text){
   Object.assign(existing, fresh);
   existing.id = id; existing.file = file; existing.originalText = originalText;
   existing.manualRoutes = manualRoutes; existing.tableAuthoritative = tableAuthoritative;
+  // a separately imported policy survives the config being re-read
+  if(existing.policySource && typeof applyPolicySource==='function') applyPolicySource(existing);
   existing.customName = customName;
   existing.neighbors = neighbors;
   existing.bgpTable = bgpTable;
@@ -3378,7 +3380,7 @@ function applyBends(els){
 /* A small stable hash, so a link always starts from the same channel. */
 /* Still pre-1.0: the diagram, tracing and reports are solid, but the file
    format and the routing behaviour are both still moving. */
-const APP_VERSION='0.21';
+const APP_VERSION='0.22';
 function hashStr(t){ let h=0; for(let i=0;i<t.length;i++){ h=(h*31 + t.charCodeAt(i))|0; } return h; }
 function zoneAncestors(node){
   const out=new Set();
@@ -4834,8 +4836,9 @@ async function applyFolderRefresh(rows, sel){
       }
       const pf=pick('policy');
       if(pf){
-        const frag=rulesFromPolicyFile(await pf.get(), pf.name);
-        if(frag.rules.length) dev.rules=frag.rules;
+        const ptext=await pf.get();
+        const frag=rulesFromPolicyFile(ptext, pf.name);
+        if(frag.rules.length){ dev.rules=frag.rules; dev.policySource={text:ptext, file:pf.name}; }
         else failed.push(r.host+': no rules could be read from '+pf.name);
         if(Object.keys(frag.addrObjects).length) dev.addrObjects=Object.assign(dev.addrObjects||{}, frag.addrObjects);
         if(Object.keys(frag.acls).length) dev.acls=Object.assign(dev.acls||{}, frag.acls);
@@ -5146,6 +5149,20 @@ function parseRunningPolicy(text){
   }
   rules.sort((a,b)=>a.order-b.order);
   return rules;
+}
+
+
+/* A policy imported from its own file (.policy / .sec) is not part of the
+   device's config text, so anything that rebuilds the device from that text —
+   reopening a project, refreshing the config — used to drop it. The file's
+   text is now kept on the device and re-applied whenever it is rebuilt. */
+function applyPolicySource(dev){
+  if(!dev || !dev.policySource || !dev.policySource.text) return false;
+  const frag=rulesFromPolicyFile(dev.policySource.text, dev.policySource.file||'policy');
+  if(frag.rules.length) dev.rules=frag.rules;
+  if(Object.keys(frag.addrObjects).length) dev.addrObjects=Object.assign(dev.addrObjects||{}, frag.addrObjects);
+  if(Object.keys(frag.acls).length) dev.acls=Object.assign(dev.acls||{}, frag.acls);
+  return frag.rules.length>0;
 }
 
 /* A .policy file: whatever format it is in, get the rules out of it. */
@@ -9356,7 +9373,7 @@ async function ingestFiles(list){
       /* Rules on their own: parse them as a config fragment and take just the
          policy out of it, so the device keeps its real interfaces. */
       const frag=rulesFromPolicyFile(text, f.name);
-      if(frag.rules.length){ dev.rules=frag.rules; attached++; }
+      if(frag.rules.length){ dev.rules=frag.rules; dev.policySource={text, file:f.name}; attached++; }
       else noRules.push(f.name);
       if(Object.keys(frag.addrObjects).length) dev.addrObjects=Object.assign(dev.addrObjects||{}, frag.addrObjects);
       if(Object.keys(frag.acls).length) dev.acls=Object.assign(dev.acls||{}, frag.acls);
@@ -10325,6 +10342,7 @@ function serializeDevice(d){
       boxW: d.boxW||null, boxH: d.boxH||null,
       fontSize: d.fontSize||null, bold: d.bold!=null?d.bold:null, font: d.font||null,
       stem: d.sourceStem||null,
+      pol: d.policySource||null,
       nbrs: d.neighbors||[],
       bgp: d.bgpTable||[],
       auth:d.tableAuthoritative,
@@ -10343,6 +10361,7 @@ function deviceFromRecord(pd){
   d.noPolicy = !!pd.nopol;
   if(pd.boxW) d.boxW=pd.boxW;
   if(pd.stem) d.sourceStem=pd.stem;
+  if(pd.pol){ d.policySource=pd.pol; applyPolicySource(d); }
   if(pd.boxH) d.boxH=pd.boxH;
   if(pd.fontSize) d.fontSize=pd.fontSize;
   if(pd.font) d.font=pd.font;
@@ -10547,13 +10566,39 @@ document.getElementById('projfile').onchange=function(){
   rd.readAsText(f);
   this.value='';
 };
-document.getElementById('clear-all').onclick=()=>{
-  if(!STATE.devices.length) return;
-  STATE.devices=[]; STATE.positions={}; STATE.lastTrace=null; STATE.selected=null;
-  STATE.clouds=[]; STATE.groups=[]; STATE.findResult=null;
-  document.getElementById('result').innerHTML='<p class="note">Cleared. Add a config to start again.</p><div id="warnbox"></div>';
+/* New project: unload everything that belongs to the current one, so nothing
+   leaks into the next — and forget it as the last file, or the next start
+   would quietly reopen it. Appearance settings are yours, not the project's,
+   so they stay. */
+function newProject(){
+  const name=STATE.fileName ? '\u201c'+STATE.fileName+'\u201d' : 'the current project';
+  if(STATE.devices.length &&
+     !confirm('Start a new, empty project?\n\n'+name+' will be closed. Anything not saved to a file will be lost.')) return;
+  if(typeof stopFx==='function') stopFx();
+  Object.assign(STATE, {
+    devices:[], positions:{}, groups:[], clouds:[], parked:[],
+    bends:{}, waypoints:{}, anchors:{}, freeLinks:{}, linkColors:{}, lineWidths:{}, cloudSizes:{},
+    lastTrace:null, lastBefore:null, selected:null, findResult:null,
+    flowText:'', flowResults:[], redundancy:null, returnPaths:[],
+    fileName:null, fileHandle:null, viewHist:[]
+  });
+  if(STATE.vrfOff) STATE.vrfOff.clear();
+  if(STATE.vsysOff) STATE.vsysOff.clear();
+  if(typeof qClear==='function') qClear();
+  const np=document.getElementById('opt-nopolicy'); if(np) np.checked=false;
+  const fl=document.getElementById('flow-list'); if(fl) fl.value='';
+  ['src','dst'].forEach(id=>{ const e=document.getElementById(id); if(e) e.value=''; });
+  try{ localStorage.removeItem(LS_FILE); localStorage.removeItem(LS_KEY); }catch(e){}
+  if(typeof updateFileLabel==='function') updateFileLabel();
+  document.getElementById('result').innerHTML='<p class="note">New project. Add configs to start.</p><div id="warnbox"></div>';
+  const note=document.getElementById('autosave-note'); if(note) note.textContent='New project';
   rebuild();
-};
+  if(typeof renderGroups==='function') renderGroups();
+  if(typeof renderDevTree==='function') renderDevTree();
+  if(typeof syncSecurityUI==='function') syncSecurityUI();
+  if(typeof renderGrid==='function') renderGrid();
+}
+document.getElementById('clear-all').onclick=newProject;
 
 /* ---- example lab ---- */
 const LAB_ZONES = [{"id": "g_fra", "name": "Frankfurt DC", "parent": null}, {"id": "g_fra_inet", "name": "FRA Internet-Out", "parent": "g_fra"}, {"id": "g_fra_dmz", "name": "FRA DMZ", "parent": "g_fra"}, {"id": "g_fra_int", "name": "FRA Internal", "parent": "g_fra"}, {"id": "g_lon", "name": "London DC", "parent": null}, {"id": "g_lon_inet", "name": "LON Internet-Out", "parent": "g_lon"}, {"id": "g_lon_dmz", "name": "LON DMZ", "parent": "g_lon"}, {"id": "g_lon_int", "name": "LON Internal", "parent": "g_lon"}];
