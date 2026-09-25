@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Dynagram 0.27 — dynamic network diagrams from device configs</title>
+<title>Dynagram 0.29 — dynamic network diagrams from device configs</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -680,11 +680,11 @@ tr.rt-best td:first-child{box-shadow:inset 3px 0 0 var(--green,#58c48c)}
           <option value="transit">Topology + segments</option>
           <!-- the rest are reached by an action (trace, open a link, select,
                search) and only shown while you are in them -->
-          <option value="path" class="ctx hidden">Traced path</option>
-          <option value="link" class="ctx hidden">Link detail</option>
-          <option value="sel" class="ctx hidden">Selected devices</option>
-          <option value="find" class="ctx hidden">Search results</option>
-          <option value="vrf" class="ctx hidden">VRF / VSYS filter</option>
+          <option value="path" class="ctx hidden" hidden disabled>Traced path</option>
+          <option value="link" class="ctx hidden" hidden disabled>Link detail</option>
+          <option value="sel" class="ctx hidden" hidden disabled>Selected devices</option>
+          <option value="find" class="ctx hidden" hidden disabled>Search results</option>
+          <option value="vrf" class="ctx hidden" hidden disabled>VRF / VSYS filter</option>
         </select>
       </label>
       <label class="toggle">Layer
@@ -1059,6 +1059,7 @@ function baseName(s){
 function parseCisco(text, fname){
   const dev = newDevice('cisco', fname);
   dev.acls={}; dev.nat=[];
+  dev.isAsa = /^\s*ASA Version\b/mi.test(text);
   const lines = text.split(/\r?\n/);
   let cur=null, ctx=null, lastVlans=[], curAcl=null;
 
@@ -1070,7 +1071,7 @@ function parseCisco(text, fname){
     const indented = /^\s/.test(line);
 
     if(indented && ctx==='acl' && curAcl){
-      const ace=parseAceLine(t, lineNo);
+      const ace=parseAceLine(t, lineNo, {asa:dev.isAsa});
       if(ace){ curAcl.entries.push(ace); return; }
       if(/^(remark|exit)\b/i.test(t)) return;
     }
@@ -1086,7 +1087,7 @@ function parseCisco(text, fname){
       /* access-list 101 permit ...  — the whole entry on one line */
       if((am=t.match(/^access-list\s+(\d+)\s+(.*)$/i))){
         const l=dev.acls[am[1]]=dev.acls[am[1]]||{name:am[1], entries:[], line:lineNo};
-        const ace=parseAceLine(am[2].trim(), lineNo);
+        const ace=parseAceLine(am[2].trim(), lineNo, {asa:dev.isAsa});
         if(ace) l.entries.push(ace);
         curAcl=null; ctx=null; return;
       }
@@ -1971,28 +1972,50 @@ function parsePanCurly(text, fname){
     }
   });
 
-  // security rules
+  /* Security rules, with where each one lives.
+
+     Walking every "rules" block collected NAT, decryption and forwarding rules
+     as if they were security policy, and gave no rule a vsys or a stage — so
+     on a multi-vsys box every vsys's rules applied to all traffic, and a rule
+     name reused in another vsys, or in pre- and post-rulebase, was dropped as
+     a duplicate. Now only blocks under "security" count, each rule records the
+     vsys and the stage it sits in, and a duplicate means the same name in the
+     same vsys and stage. */
   let order=0;
-  panWalk(root, (key, node)=>{
-    if(key!=='rules') return;
-    for(const r of pEntries(node)){
+  const walkPath=(node, path)=>{
+    for(const k in node.kids) for(const n of node.kids[k]){
+      const here=path.concat([k]);
+      if(k==='rules' && path[path.length-1]==='security') takeRules(n, path);
+      walkPath(n, here);
+    }
+  };
+  const takeRules=(rulesNode, path)=>{
+    // stage: the key just above "security" — rulebase, pre-rulebase or post-rulebase
+    const stage=String(path[path.length-2]||'rulebase').toLowerCase();
+    const tier = stage==='pre-rulebase' ? 0 : stage==='post-rulebase' ? 2 : 1;
+    // vsys: the entry directly under a "vsys" key, if any
+    let vsys='vsys1';
+    for(let i=0;i<path.length-1;i++) if(path[i]==='vsys' && /^vsys\d+$/i.test(path[i+1])){ vsys=path[i+1]; break; }
+    for(const r of pEntries(rulesNode)){
       const list=(k)=>{
         const n=pKid(r.node,k);
         if(!n) return ['any'];
-        const out=n.vals.slice();
+        const out=n.vals.filter(v=>v!=='['&&v!==']').slice();
         for(const e of pEntries(n)) out.push(e.name);
         return out.length?out:['any'];
       };
-      if(dev.rules.some(x=>x.name===r.name)) continue;
+      if(dev.rules.some(x=>x.name===r.name && x.vsys===vsys && x.stage===stage)) continue;
       dev.rules.push({
-        name:r.name, from:list('from'), to:list('to'),
+        name:r.name, vsys, stage, tier,
+        from:list('from'), to:list('to'),
         source:list('source'), destination:list('destination'),
         action: pVal(r.node,'action') || 'allow',
         disabled: /^yes$/i.test(pVal(r.node,'disabled')||''),
         order:order++, firstLine:r.node.line, actionLine:r.node.line
       });
     }
-  });
+  };
+  walkPath(root, []);
 
   let usedFallbackName=false;
   if(!dev.name){ dev.name=fname.replace(/\.[^.]+$/,'') || ('firewall-'+(++devSeq)); usedFallbackName=true; }
@@ -2044,7 +2067,43 @@ function isFirewall(d){ return !!d && d.vendor==='palo-alto'; }
 /* An access-list entry, reduced to what a trace needs: does this packet match,
    and if so is it permitted. Ports and protocols are kept so a rule that only
    covers tcp/443 does not silently block everything. */
-function parseAceLine(t, lineNo){
+/* "address mask" in an access list, matched bit by bit.
+
+   IOS writes a wildcard (0.0.0.255: the set bits are the ones that may vary);
+   an ASA writes a subnet mask (255.255.255.0: the set bits must match). The
+   old code read everything as a wildcard and turned it into a prefix length
+   by rounding a logarithm, so:
+     - an ASA-style 255.255.255.0 became /0 and matched every address;
+     - a non-contiguous wildcard such as 0.0.255.0 became /16, matching far
+       more than it should — no prefix length can express it at all.
+   Now the kind of mask is read from its shape (trailing ones = wildcard,
+   leading ones = subnet mask), and matching tests the "care" bits exactly,
+   so any mask, contiguous or not, matches what the device would match. */
+function addrWithMask(base, m, asa){
+  base=base>>>0; m=m>>>0;
+  const inv=(~m)>>>0;
+  const trailingOnes = ((m & ((m+1)>>>0))>>>0)===0;       // 0.0.0.255 — a wildcard
+  const leadingOnes  = ((inv & ((inv+1)>>>0))>>>0)===0;   // 255.255.255.0 — a subnet mask
+  let care;
+  if(trailingOnes && !leadingOnes) care=inv;               // wildcard
+  else if(leadingOnes && !trailingOnes) care=m;            // subnet mask
+  else if(trailingOnes && leadingOnes) care = asa ? m : inv;  // 0.0.0.0 or 255.255.255.255: depends on the platform
+  else care=inv;                                           // non-contiguous: always a wildcard
+  care=care>>>0;
+  const net=(base & care)>>>0;
+  const cinv=(~care)>>>0;
+  const contiguous=((cinv & ((cinv+1)>>>0))>>>0)===0;
+  let len=null;
+  if(contiguous){ let c=care, n=0; while(c){ n+=c&1; c>>>=1; } len=n; }
+  return {net, care, len: len==null?32:len, wild:cinv, noncontig:!contiguous};
+}
+/* Does an access-list address spec cover this address? */
+function specCovers(spec, ip){
+  if(!spec || spec.any) return true;
+  if(spec.care!=null) return (((ip ^ spec.net) & spec.care)>>>0)===0;
+  return inNet(ip, spec.net, spec.len);
+}
+function parseAceLine(t, lineNo, aopts){
   /* "10 permit ip any any" and "20 deny udp any any eq snmp": IOS-XE and NX-OS
      number their entries. The number is the order, which is already the order
      the lines appear in; it is not part of the match. Missing this was why a
@@ -2067,11 +2126,7 @@ function parseAceLine(t, lineNo){
       rest=rest.slice(mm[0].length); return {net:netOf(ip2int(mm[1]),+mm[2]), len:+mm[2]}; }
     if((mm=rest.match(/^(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+)\s*/))){
       rest=rest.slice(mm[0].length);
-      const wild=ip2int(mm[2]);
-      // a wildcard mask is the inverse of a subnet mask
-      const len=32-Math.round(Math.log2((wild>>>0)+1));
-      const ok=isFinite(len)&&len>=0&&len<=32;
-      return ok ? {net:netOf(ip2int(mm[1]),len), len} : {net:ip2int(mm[1]), len:32};
+      return addrWithMask(ip2int(mm[1]), ip2int(mm[2]), !!(aopts && aopts.asa));
     }
     return null;
   };
@@ -2093,7 +2148,7 @@ function parseAceLine(t, lineNo){
   return {action:act, proto, src, dst:dst||{any:true}, sPorts, dPorts, line:lineNo, text:t};
 }
 function aceMatches(ace, sIp, dIp){
-  const inSpec=(spec, ip)=> !spec ? true : spec.any ? true : inNet(ip, spec.net, spec.len);
+  const inSpec=(spec, ip)=> specCovers(spec, ip);
   return inSpec(ace.src, sIp) && inSpec(ace.dst, dIp);
 }
 /* Walk an access list in order and return the first entry that matches.
@@ -2325,7 +2380,10 @@ function parsePanRoutes(text){
   for(const raw of text.split(/\r?\n/)){
     const line=raw.trim(); if(!line) continue;
     let m;
-    if((m=line.match(/^VIRTUAL ROUTER:\s*(\S+)/i))){ vr=m[1]; continue; }
+    /* "VIRTUAL ROUTER: DR router (id 2)" — the name can contain spaces.
+       Taking only the first word turned "DR router" into "DR", so its routes
+       landed in a table of their own next to the config's copy. */
+    if((m=line.match(/^VIRTUAL ROUTER:\s*(.+?)\s*(?:\(id\s*\d+\))?\s*$/i))){ vr=m[1].replace(/^"|"$/g,''); continue; }
     if(/^(destination\s+nexthop|flags:|total\b)/i.test(line)) continue;
     const tk=line.split(/\s+/);
     const c=parseCidr(tk[0]); if(!c) continue;
@@ -2445,9 +2503,19 @@ function buildModel(devices, opts){
       d.fib.push({net:s.net, len:s.len, type:'static', ad:s.ad!=null?s.ad:1,
                   iface:s.iface, nextHop:s.nextHop, vrf:s.vrf||'default', name:s.name, line:s.line||null});
     }
+    /* The imported table is the device's own view, so it already contains
+       the statics from its config. Adding both listed every static twice.
+       A table entry that repeats a config static (same prefix, table and next
+       hop) is dropped — the static is kept because it points at the config
+       line — and a table imported twice does not double up either. */
+    const seenRt=new Set(d.fib.filter(f=>f.type!=='connected').map(f=>f.net+'/'+f.len+'|'+(f.vrf||'default')+'|'+(f.nextHop??'')+'|'+String(f.iface||'').toLowerCase()));
     for(const mr of d.manualRoutes){
       const dupConnected = d.fib.some(f=>f.type==='connected' && f.net===mr.net && f.len===mr.len && f.vrf===mr.vrf);
       if(dupConnected) continue;
+      const kNh=mr.net+'/'+mr.len+'|'+(mr.vrf||'default')+'|'+(mr.nextHop??'');
+      if(seenRt.has(kNh+'|'+String(mr.iface||'').toLowerCase()) || seenRt.has(kNh+'|')) continue;
+      if(mr.nextHop!=null && [...seenRt].some(k=>k.startsWith(kNh+'|'))) continue;
+      seenRt.add(kNh+'|'+String(mr.iface||'').toLowerCase());
       d.fib.push({net:mr.net, len:mr.len, type:'table', ad:mr.ad!=null?mr.ad:1,
                   iface:mr.iface, nextHop:mr.nextHop, vrf:mr.vrf||'default', line:null});
     }
@@ -3516,7 +3584,7 @@ function applyBends(els){
 /* A small stable hash, so a link always starts from the same channel. */
 /* Still pre-1.0: the diagram, tracing and reports are solid, but the file
    format and the routing behaviour are both still moving. */
-const APP_VERSION='0.27';
+const APP_VERSION='0.29';
 function hashStr(t){ let h=0; for(let i=0;i<t.length;i++){ h=(h*31 + t.charCodeAt(i))|0; } return h; }
 function zoneAncestors(node){
   const out=new Set();
@@ -3632,15 +3700,56 @@ function autoRouteEdges(cy, mode){
   const legHits=(ax,ay,bx,by,b,pad)=>
     Math.max(ax,bx) >= b.x-b.hw-pad && Math.min(ax,bx) <= b.x+b.hw+pad &&
     Math.max(ay,by) >= b.y-b.hh-pad && Math.min(ay,by) <= b.y+b.hh+pad;
+  /* A uniform grid over every box and zone, built once per routing pass.
+     A box can only touch a path if it overlaps the rectangle the path spans,
+     so each test looks at the few boxes near the path instead of every box on
+     the diagram. The answer is identical — it is the same test on fewer
+     boxes — but testing every box for every candidate path was about 80% of
+     routing time, and it grew with the square of the diagram's size. */
+  const GRID_CELL=240;
+  const makeGrid=(boxes)=>{
+    const cells=new Map(); let stamp=0;
+    boxes.forEach(b=>{
+      const x1=Math.floor((b.x-b.hw)/GRID_CELL), x2=Math.floor((b.x+b.hw)/GRID_CELL);
+      const y1=Math.floor((b.y-b.hh)/GRID_CELL), y2=Math.floor((b.y+b.hh)/GRID_CELL);
+      for(let cx=x1;cx<=x2;cx++) for(let cy2=y1;cy2<=y2;cy2++){
+        const k=cx*100003+cy2; let arr=cells.get(k); if(!arr){ arr=[]; cells.set(k,arr); } arr.push(b);
+      }
+    });
+    return { isGrid:true, query(ax1,ay1,ax2,ay2){
+      stamp++; const out=[];
+      const x1=Math.floor(ax1/GRID_CELL), x2=Math.floor(ax2/GRID_CELL);
+      const y1=Math.floor(ay1/GRID_CELL), y2=Math.floor(ay2/GRID_CELL);
+      for(let cx=x1;cx<=x2;cx++) for(let cy2=y1;cy2<=y2;cy2++){
+        const arr=cells.get(cx*100003+cy2); if(!arr) continue;
+        for(const b of arr){ if(b._gs!==stamp){ b._gs=stamp; out.push(b); } }
+      }
+      return out;
+    }};
+  };
   const pathHits=(pts,boxes,skip,pad)=>{
+    let cand=boxes;
+    if(boxes && boxes.isGrid){
+      let x1=Infinity,y1=Infinity,x2=-Infinity,y2=-Infinity;
+      for(const q of pts){ if(q[0]<x1)x1=q[0]; if(q[0]>x2)x2=q[0]; if(q[1]<y1)y1=q[1]; if(q[1]>y2)y2=q[1]; }
+      cand=boxes.query(x1-pad, y1-pad, x2+pad, y2+pad);
+    }
     let n=0;
-    for(const b of boxes){
+    for(const b of cand){
       if(skip.has(b.id)) continue;
       for(let i=0;i<pts.length-1;i++)
         if(legHits(pts[i][0],pts[i][1],pts[i+1][0],pts[i+1][1],b,pad)){ n++; break; }
     }
     return n;
   };
+
+  // every link's own endpoints and zones are in its skip set, so one grid over
+  // all boxes answers exactly what the per-link obstacle list did
+  /* Measured: on small diagrams building the index costs more than it saves
+     (about 15% slower at 50 devices); from roughly 100 boxes up it wins, and
+     increasingly so (1.8x at 300 devices). Below that, test the plain list. */
+  const allBoxes=dev.concat(zone);
+  const ALL_GRID = allBoxes.length>=100 ? makeGrid(allBoxes) : allBoxes;
 
   cy.edges().forEach(e=>{
     const S=e.source(), T=e.target();
@@ -3801,7 +3910,7 @@ function autoRouteEdges(cy, mode){
     if(sideA && sideB && horizA!==horizB){
       const corner = horizA ? [B.x, A.y] : [A.x, B.y];
       const pts=[[A.x,A.y], corner, [B.x,B.y]];
-      if(pathHits(pts,obstacles,skip,M)===0){ toSeg(pts.slice(1,-1)); return; }
+      if(pathHits(pts,ALL_GRID,skip,M)===0){ toSeg(pts.slice(1,-1)); return; }
     }
     /* Start each link at a slightly different point along the span. Beginning
        every one at the midpoint means they all contend for the same lane and
@@ -3832,7 +3941,7 @@ function autoRouteEdges(cy, mode){
           coord=snap(A.y+ABy*f)+nudge*ROUTE_GRID; axis='h'; spanA=A.x; spanB=B.x;
           pts=[[A.x,A.y],[A.x,coord],[B.x,coord],[B.x,B.y]];
         }
-        const hits=pathHits(pts,obstacles,skip,M);
+        const hits=pathHits(pts,ALL_GRID,skip,M);
         let clash=laneFree(axis,coord,spanA,spanB)?0:1;
         for(let i=0;i<pts.length-1;i++){
           const [ax,ay]=pts[i], [bx,by]=pts[i+1];
@@ -3891,7 +4000,7 @@ function autoRouteEdges(cy, mode){
         if(isFinite(rx)) pts=[[A.x,A.y],[A.x,y1],[rx,y1],[rx,y2],[B.x,y2],[B.x,B.y]];
       }
       if(pts){
-        const uh=pathHits(pts,obstacles,skip,M);
+        const uh=pathHits(pts,ALL_GRID,skip,M);
         if(uh<best.hits) best={pts,hits:uh,cost:0};
       }
     }
@@ -3915,7 +4024,7 @@ function autoRouteEdges(cy, mode){
         const pp = c.horiz
           ? [[A.x,A.y],[A.x,c.v],[B.x,c.v],[B.x,B.y]]
           : [[A.x,A.y],[c.v,A.y],[c.v,B.y],[B.x,B.y]];
-        const h=pathHits(pp,obstacles,skip,M);
+        const h=pathHits(pp,ALL_GRID,skip,M);
         if(h<best.hits) best={pts:pp,hits:h,cost:0};
         if(h===0) break;
       }
@@ -3945,7 +4054,7 @@ function autoRouteEdges(cy, mode){
             const q = vertical
               ? [P[0], [P[1][0]+off, P[1][1]], [P[2][0]+off, P[2][1]], P[3]]
               : [P[0], [P[1][0], P[1][1]+off], [P[2][0], P[2][1]+off], P[3]];
-            if(pathHits(q,obstacles,skip,M)===0 && !clashing(q)){ best.pts=q; found=true; break; }
+            if(pathHits(q,ALL_GRID,skip,M)===0 && !clashing(q)){ best.pts=q; found=true; break; }
           }
           if(found) break;
         }
@@ -4010,7 +4119,11 @@ function syncViewMenu(active){
   const hasTrace=!!(STATE.lastTrace && STATE.lastTrace.hops && STATE.lastTrace.hops.length);
   sel.querySelectorAll('option.ctx').forEach(o=>{
     const show = o.value===cur || (o.value==='path' && hasTrace);
+    /* Safari ignores display:none on <option>, so a class alone left hidden
+       views visible there. The hidden and disabled properties work everywhere;
+       the class stays for the stylesheet. */
     o.classList.toggle('hidden', !show);
+    o.hidden=!show; o.disabled=!show;
   });
 }
 function goBack(){
@@ -4018,7 +4131,7 @@ function goBack(){
   if(v==null) return;
   STATE.navBack=true;
   const sel=document.getElementById('opt-view');
-  sel.querySelectorAll('option.ctx').forEach(o=>o.classList.toggle('hidden', o.value!==v));
+  sel.querySelectorAll('option.ctx').forEach(o=>{ const hide=o.value!==v; o.classList.toggle('hidden', hide); o.hidden=hide; o.disabled=hide; });
   sel.value=v;
   render();
   STATE.navBack=false;
@@ -4230,10 +4343,27 @@ function ifaceInScope(i){
      routers and switches that have no vsys at all. */
   return true;
 }
+/* The vsys a firewall route belongs to: the vsys that imports its virtual
+   router, or failing that the vsys of the interface it leaves by. */
+function routeVsys(dev, r){
+  const map=dev.vsysVr||{};
+  for(const vs in map) if(String(map[vs]).toLowerCase()===String(r.vrf||'').toLowerCase()) return vs;
+  const out=(typeof egressFor==='function') ? egressFor(dev, r) : null;
+  return out && out.vsys ? out.vsys : null;
+}
 function routeInScope(r, dev){
   if(!scopeActive()) return true;
   if(STATE.scopeIgnoreFw && isFirewall(dev)) return true;
-  if(isFirewall(dev) && !STATE.scopeStrict) return true;   // VR names are not VRFs; routes stay
+  /* A virtual router is not a VRF, so the VRF filter leaves firewall routes
+     alone — but a hidden VSYS must still hide the routes that belong to it.
+     Before, nothing on a firewall was ever filtered, so a hidden DR vsys
+     still showed its DR router routes. */
+  if(isFirewall(dev)){
+    const s=scopeSets();
+    const vs=routeVsys(dev, r);
+    if(vs && s.so && (s.so.has(vsysKey(dev.name, vs)) || s.so.has(vs))) return false;
+    if(!STATE.scopeStrict) return true;
+  }
   const s=scopeSets();
   const vrf=(r && r.vrf) || 'default';
   if(s.vo.size && s.vo.has(vrf)) return false;
@@ -5080,7 +5210,7 @@ function aclHtml(d, opts){
       (bind[n]?' <span class="muted">on '+esc(bind[n].join(', '))+'</span>':' <span class="muted">not applied to any interface</span>')+'</h3>'+
       '<table class="fib pol"><tr><th>#</th><th>Action</th><th>Protocol</th><th>Source</th><th>Destination</th><th>Ports</th></tr>'+
       ents.map(({e,i,m})=>{
-        const spec=(x)=>!x?'any':x.any?'any':(x.len===32?int2ip(x.net):cidr(x.net,x.len));
+        const spec=(x)=>!x?'any':x.any?'any':x.noncontig?(int2ip(x.net)+' '+int2ip(x.wild)+' (non-contiguous)'):(x.len===32?int2ip(x.net):cidr(x.net,x.len));
         const ports=[e.sPorts?('src '+e.sPorts.op+' '+e.sPorts.vals.join('-')):'',
                      e.dPorts?('dst '+e.dPorts.op+' '+e.dPorts.vals.join('-')):''].filter(Boolean).join(', ');
         return '<tr'+(e.action==='deny'?' class="rdeny"':'')+'>'+
@@ -5135,7 +5265,7 @@ function ruleMatchesQuery(dev, r, pq){
 function aceMatchesQuery(e, pq){
   if(!pq) return {ok:true};
   if(pq.ip!=null){
-    const cov=(x)=>!x || x.any || inNet(pq.ip, x.net, x.len);
+    const cov=(x)=>specCovers(x, pq.ip);
     const s=cov(e.src), d=cov(e.dst);
     return {ok:s||d, side: s&&d?'source and destination':s?'source':'destination'};
   }
@@ -5537,7 +5667,8 @@ function searchRoutes(dev, rawQ, fib){
     const note = (pfxM ? 'No exact route for '+what+'. ' : '') +
       (bestPer.length===1
         ? 'Traffic to '+what+' uses '+say(bestPer[0])+'.'
-        : 'Traffic to '+what+' uses, per VRF: '+bestPer.map(f=>(f.vrf||'default')+' \u2192 '+say(f)).join(' \u00b7 ')+'.');
+        : 'Traffic to '+what+' uses, per '+(isFirewall(dev)?'virtual router':'VRF')+': '+
+            bestPer.map(f=>tableLabel(dev,f.vrf)+' \u2192 '+say(f)).join('  |  ')+'.');
     return {kind: pfxM?'covering':'lookup', rows, note};
   }
   // plain text
@@ -5545,6 +5676,16 @@ function searchRoutes(dev, rawQ, fib){
   const rows=fib.filter(f=>[cidr(f.net,f.len), f.nextHop!=null?int2ip(f.nextHop):'', routeOutIface(dev,f),
                             f.type, f.vrf||'default'].join(' ').toLowerCase().includes(t)).map(f=>({f}));
   return {kind:'text', rows, note: rows.length+' route'+(rows.length===1?'':'s')+' match \u201c'+q+'\u201d.'};
+}
+/* A routing table's name as a person would say it: on a firewall, the
+   virtual router and the vsys (with its display name) that owns it. */
+function tableLabel(dev, vrf){
+  const v=vrf||'default';
+  if(!isFirewall(dev)) return v;
+  const vs=routeVsys(dev,{vrf:v});
+  if(!vs) return v;
+  const dn=(dev.vsysNames||{})[vs];
+  return v+' \u00b7 '+vs+(dn?' \u2014 '+dn:'');
 }
 function renderRouteSearch(dev, q, fib){
   const res=searchRoutes(dev, q, fib);
@@ -5554,13 +5695,14 @@ function renderRouteSearch(dev, q, fib){
   const body=rows.map(({f,best})=>
     '<tr'+(best && res.kind!=='text' && res.kind!=='exact'?' class="rt-best"':'')+'>'+
     '<td>'+cidr(f.net,f.len)+(f.len===0?' <span class="muted">default</span>':'')+'</td>'+
-    '<td>'+esc(f.vrf||'default')+'</td>'+
+    '<td>'+esc(tableLabel(dev, f.vrf))+'</td>'+
     '<td>'+(f.nextHop!=null?int2ip(f.nextHop):'\u2014')+'</td>'+
     '<td>'+esc(routeOutIface(dev,f)||'\u2014')+'</td>'+
     '<td><span class="tag '+f.type+'">'+f.type+'</span></td>'+
     '<td>'+(best && res.kind!=='text' && res.kind!=='exact'?'<b>used</b>':'')+'</td></tr>').join('');
+  const fw=isFirewall(dev);
   return '<p class="note" style="margin:6px 0 8px">'+esc(res.note)+'</p>'+
-    (rows.length?'<table class="fib"><tr><th>Prefix</th><th>VRF</th><th>Next hop</th><th>Out</th><th>Source</th><th></th></tr>'+body+'</table>':'')+
+    (rows.length?'<table class="fib"><tr><th>Prefix</th><th>'+(fw?'Virtual router':'VRF')+'</th><th>Next hop</th><th>Out</th><th>Source</th><th></th></tr>'+body+'</table>':'')+
     (res.rows.length>CAP?'<p class="note">Showing '+CAP+' of '+res.rows.length+'.</p>':'');
 }
 
@@ -7095,7 +7237,25 @@ function render(){
      links end up cutting straight through them and under boxes. So route once
      the graph is ready, again after the layout settles, and once more on the
      next frame when every size is final. */
-  const reroute=()=>autoRouteEdges(cy,'ortho');
+  /* Zone sizes settle late, so routing is retried as the graph becomes ready,
+     on the next frame, when layout stops, and at 120 ms and 400 ms. Most of
+     those retries find nothing moved and would recompute the same answer —
+     at a few seconds a pass on a large diagram. Each retry now checks a
+     fingerprint of every box's position and size first, and only routes if
+     something actually changed. */
+  const geomSig=()=>{
+    let sig='';
+    cy.nodes().forEach(n=>{ const p=n.position();
+      sig+=n.id()+':'+Math.round(p.x)+','+Math.round(p.y)+','+Math.round(n.outerWidth())+','+Math.round(n.outerHeight())+';'; });
+    return sig;
+  };
+  let routedSig=null;              // one per diagram instance; a redraw starts afresh
+  const reroute=()=>{
+    const sig=geomSig();
+    if(sig===routedSig) return;
+    routedSig=sig;
+    autoRouteEdges(cy,'ortho');
+  };
   cy.on('layoutstop', reroute);
   if(typeof cy.ready==='function') cy.ready(()=>{ reroute(); requestAnimationFrame(reroute); });
   else reroute();
@@ -8800,7 +8960,7 @@ function showDevice(d, opts){
   }
   function vrfBlock(vrf, count, inner, openByDefault){
     return '<details class="vrf-group" data-vrfgroup'+(openByDefault?' open':'')+'>'+
-      '<summary class="cfgpane-label"><span>VRF '+esc(vrf)+'</span><span>'+count+'</span></summary>'+
+      '<summary class="cfgpane-label"><span>'+(isFirewall(d)?'Virtual router ':'VRF ')+esc(tableLabel(d,vrf))+'</span><span>'+count+'</span></summary>'+
       inner+'</details>';
   }
 
