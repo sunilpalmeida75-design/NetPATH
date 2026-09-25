@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Dynagram 0.29 — dynamic network diagrams from device configs</title>
+<title>Dynagram 0.31 — dynamic network diagrams from device configs</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -576,6 +576,24 @@ body.zen .sb-show{position:fixed;right:14px;top:10px}
 
 tr.rt-best td{background:rgba(88,196,140,.12)}
 tr.rt-best td:first-child{box-shadow:inset 3px 0 0 var(--green,#58c48c)}
+
+.bb-box{width:min(1200px,96vw);max-height:88vh}
+.bb-body{overflow:auto;flex:1;min-height:0;padding:10px 14px}
+table.bb{width:100%;border-collapse:collapse;font:12px var(--mono);table-layout:fixed}
+table.bb th{position:sticky;top:0;background:var(--panel-2);text-align:left;padding:5px 8px;font:600 11.5px var(--sans);color:var(--ink-faint);border-bottom:1px solid var(--rule)}
+table.bb td{padding:1px 8px;vertical-align:top;white-space:pre-wrap;word-break:break-all}
+table.bb td.ln{width:46px;color:var(--ink-faint);text-align:right;user-select:none}
+table.bb tr.bb-del td.tx:nth-child(2), table.bb tr.bb-del td:nth-child(2){background:rgba(224,98,95,.16)}
+table.bb tr.bb-add td.tx:last-child{background:rgba(88,196,140,.16)}
+table.bb tr.bb-chg td.tx{background:rgba(224,165,58,.13)}
+table.bb tr.bb-chg mark{background:rgba(224,165,58,.45);color:inherit;border-radius:2px}
+table.bb tr.bb-gap td{color:var(--ink-faint);text-align:center;font:italic 11.5px var(--sans);padding:4px;background:var(--panel)}
+.bb-count{display:inline-block;min-width:16px;padding:0 5px;border-radius:8px;background:var(--amber,#e0a53a);color:#111;font-size:11px;margin-left:3px}
+.bb-legend{margin-right:auto;font-size:11.5px;color:var(--ink-faint)}
+.bb-legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin:0 3px 0 10px;vertical-align:-1px}
+.bb-legend i.bb-del{background:rgba(224,98,95,.5)} .bb-legend i.bb-add{background:rgba(88,196,140,.5)} .bb-legend i.bb-chg{background:rgba(224,165,58,.55)}
+.bb-banner{display:flex;align-items:center;gap:10px;padding:8px 10px;margin:0 0 10px;border:1px solid var(--rule);border-left:3px solid var(--amber,#e0a53a);border-radius:5px;font-size:12.5px}
+.bb-banner .sp{flex:1}
 </style>
 </head>
 <body>
@@ -772,10 +790,11 @@ tr.rt-best td:first-child{box-shadow:inset 3px 0 0 var(--green,#58c48c)}
       <div class="field">
         <label>Trace against</label>
         <div class="seg" id="modeseg">
-          <button type="button" data-mode="after" class="on">After</button>
-          <button type="button" data-mode="before">Before</button>
-          <button type="button" data-mode="both">Compare</button>
+          <button type="button" data-mode="after" class="on" title="Trace the network as it is now">After</button>
+          <button type="button" data-mode="before" title="Trace the network as it was before the last refresh">Before</button>
+          <button type="button" data-mode="both" title="Trace both and show what changed">Compare</button>
         </div>
+        <div id="bb-summary" class="sec-status"></div>
       </div>
       <button class="btn btn-go" id="run" style="width:100%">Trace the path</button>
       <div class="secrules">
@@ -3584,7 +3603,7 @@ function applyBends(els){
 /* A small stable hash, so a link always starts from the same channel. */
 /* Still pre-1.0: the diagram, tracing and reports are solid, but the file
    format and the routing behaviour are both still moving. */
-const APP_VERSION='0.29';
+const APP_VERSION='0.31';
 function hashStr(t){ let h=0; for(let i=0;i<t.length;i++){ h=(h*31 + t.charCodeAt(i))|0; } return h; }
 function zoneAncestors(node){
   const out=new Set();
@@ -5075,7 +5094,7 @@ async function applyFolderRefresh(rows, sel){
           const probe=parseConfig(text, cf.name);
           dev=STATE.devices.find(d=>d.name.toLowerCase()===String(probe.name).toLowerCase()) || null;
         }
-        if(dev){ reparseInto(dev, text); dev.originalText=text; updated++; }   // keeps every setting
+        if(dev){ refreshConfig(dev, text); updated++; }   // keeps every setting; the old config becomes Before
         else{
           addText(text, cf.name);
           dev=STATE.devices[STATE.devices.length-1];
@@ -5093,7 +5112,7 @@ async function applyFolderRefresh(rows, sel){
       const nb=pick('cdp');
       if(nb){
         const got=parseNeighbors(await nb.get());
-        if(got.length){ dev.neighbors=got; nbrs++; }
+        if(got.length){ refreshNeighbors(dev, got); nbrs++; }
       }
       const bg=pick('bgp');
       if(bg){
@@ -5104,7 +5123,7 @@ async function applyFolderRefresh(rows, sel){
       if(pf){
         const ptext=await pf.get();
         const frag=rulesFromPolicyFile(ptext, pf.name);
-        if(frag.rules.length){ dev.rules=frag.rules; dev.policySource={text:ptext, file:pf.name}; }
+        if(frag.rules.length){ refreshPolicy(dev, ptext, pf.name); }
         else failed.push(r.host+': no rules could be read from '+pf.name);
         if(Object.keys(frag.addrObjects).length) dev.addrObjects=Object.assign(dev.addrObjects||{}, frag.addrObjects);
         if(Object.keys(frag.acls).length) dev.acls=Object.assign(dev.acls||{}, frag.acls);
@@ -5525,6 +5544,29 @@ function securityIgnoredNote(){
     some.slice(0,4).map(d=>d.name).join(', ')+(some.length>4?' \u2026':'');
   return '';
 }
+/* Under the Before / After switch: how many devices differ, so it is clear
+   whether a Before trace will show anything different. */
+function syncBeforeAfterUI(){
+  const el=document.getElementById('bb-summary'); if(!el) return;
+  const n=(STATE.devices||[]).filter(d=>changesOf(d).any).length;
+  el.innerHTML = n ? n+' device'+(n===1?'':'s')+' changed since Before \u00b7 '+
+    '<a href="#" id="bb-accept-all" title="Make every device\u2019s current config, neighbours and policy the new baseline">Accept all as baseline</a>' : '';
+  const a=document.getElementById('bb-accept-all');
+  if(a) a.onclick=(e)=>{ e.preventDefault(); acceptAllChanges(); };
+}
+/* After a cutover: what every device has now becomes the baseline. */
+function acceptAllChanges(){
+  const changed=(STATE.devices||[]).filter(d=>changesOf(d).any);
+  if(!changed.length) return;
+  if(!confirm('Make the current state of '+changed.length+' changed device'+(changed.length===1?'':'s')+
+     ' the new baseline?\n\nTheir Before is discarded and cannot be recovered afterwards.')) return;
+  if(typeof pushUndo==='function') pushUndo();
+  for(const d of changed) acceptChanges(d);
+  rebuild(); autosave();
+  if(STATE.selected){ const d=STATE.devices.find(x=>x.id===STATE.selected); if(d) showDevice(d); }
+  const n=document.getElementById('autosave-note');
+  if(n) n.textContent=changed.length+' device'+(changed.length===1?'':'s')+' accepted as the new baseline';
+}
 function syncSecurityUI(){
   const g=document.getElementById('opt-nopolicy'), a=document.getElementById('sec-all');
   if(g && a) a.checked=g.checked;
@@ -5704,6 +5746,215 @@ function renderRouteSearch(dev, q, fib){
   return '<p class="note" style="margin:6px 0 8px">'+esc(res.note)+'</p>'+
     (rows.length?'<table class="fib"><tr><th>Prefix</th><th>'+(fw?'Virtual router':'VRF')+'</th><th>Next hop</th><th>Out</th><th>Source</th><th></th></tr>'+body+'</table>':'')+
     (res.rows.length>CAP?'<p class="note">Showing '+CAP+' of '+res.rows.length+'.</p>':'');
+}
+
+
+/* ============================================================
+   Before and after
+
+   A refresh used to overwrite the original config with the new one, so
+   "before" and "after" were always the same and the Before trace compared a
+   change with itself. Now, whenever a refresh brings in something different,
+   what the device had until then becomes its Before — for its config, its
+   CDP/LLDP neighbours and its firewall policy. Routing tables are imported
+   views of the live device, not something you change, so they have no Before.
+
+   Before is the baseline for a migration: it stays fixed across any number of
+   refreshes until "Accept changes" (one device) or "Accept all" (every device)
+   makes what is there now the new baseline. "Revert" puts Before back.
+   ============================================================ */
+const nbrSig=(list)=>(list||[]).map(n=>[n.localPort,n.peerName,n.peerPort].join('|')).sort().join('\n');
+/* The Before is the migration baseline, so it stays fixed until you accept
+   the changes. A refresh always updates After; it only sets a Before when the
+   device has none pending — so refreshing on Monday and again on Tuesday
+   still compares against the baseline, not against Monday. */
+function refreshConfig(dev, text){
+  const prev=dev.rawText||'';
+  const pending = dev.originalText!=null && dev.originalText.trim()!==prev.trim();
+  reparseInto(dev, text);
+  if(pending) return;                                   // keep the baseline
+  if(prev.trim() && prev.trim()!==String(text).trim()) dev.originalText=prev;
+  else if(dev.originalText==null) dev.originalText=text;
+}
+function refreshNeighbors(dev, list){
+  const pending = dev.beforeNeighbors!==undefined;
+  if(!pending && nbrSig(dev.neighbors)!==nbrSig(list) && (dev.neighbors||[]).length)
+    dev.beforeNeighbors=(dev.neighbors||[]).map(n=>Object.assign({},n));
+  dev.neighbors=list;
+}
+function refreshPolicy(dev, text, file){
+  const prev=dev.policySource||null;
+  const pending = dev.beforePolicySource!==undefined;
+  const changed = !prev || String(prev.text).trim()!==String(text).trim();
+  /* Only a policy that replaces an earlier policy file is a change. The first
+     one imported completes the baseline — it is not a change from whatever
+     rules the config happened to hold. */
+  if(!pending && changed && prev) dev.beforePolicySource = prev;
+  dev.policySource={text, file};
+  applyPolicySource(dev);
+}
+/* What has changed on this device since its Before. */
+function changesOf(d){
+  const cfg = d.originalText!=null && (d.originalText||'').trim()!==(d.rawText||'').trim();
+  const nbr = d.beforeNeighbors!==undefined && nbrSig(d.beforeNeighbors)!==nbrSig(d.neighbors);
+  const pol = d.beforePolicySource!==undefined &&
+              String((d.beforePolicySource||{}).text||'').trim()!==String((d.policySource||{}).text||'').trim();
+  return {cfg, nbr, pol, any: cfg||nbr||pol};
+}
+function acceptChanges(d){
+  d.originalText=d.rawText;
+  delete d.beforeNeighbors;
+  delete d.beforePolicySource;
+}
+function revertChanges(d){
+  if(d.originalText!=null && d.originalText!==d.rawText) reparseInto(d, d.originalText);
+  if(d.beforeNeighbors!==undefined){ d.neighbors=d.beforeNeighbors; delete d.beforeNeighbors; }
+  if(d.beforePolicySource!==undefined){
+    d.policySource=d.beforePolicySource; delete d.beforePolicySource;
+    if(d.policySource) applyPolicySource(d); else reparseInto(d, d.rawText);
+  }
+}
+
+
+/* ---------- side-by-side comparison ---------- */
+function sideBySideConfig(beforeText, afterText, onlyChanges){
+  const a=String(beforeText||'').split(/\r?\n/), b=String(afterText||'').split(/\r?\n/);
+  const ops=diffLines(a,b);
+  // pair up a removed run with the added run after it, so a changed line sits beside its old self
+  const rows=[];
+  for(let i=0;i<ops.length;){
+    if(ops[i].type==='same'){ rows.push({k:'same', l:ops[i], r:ops[i]}); i++; continue; }
+    const dels=[], adds=[];
+    while(i<ops.length && ops[i].type==='del') dels.push(ops[i++]);
+    while(i<ops.length && ops[i].type==='add') adds.push(ops[i++]);
+    const n=Math.max(dels.length, adds.length);
+    for(let k=0;k<n;k++){
+      const l=dels[k]||null, r=adds[k]||null;
+      rows.push({k: l&&r ? 'chg' : l ? 'del' : 'add', l, r});
+    }
+  }
+  const words=(x,y)=>{        // highlight the words that differ within a changed line
+    const A=String(x).split(/(\s+)/), B=String(y).split(/(\s+)/);
+    const setB=new Set(B), setA=new Set(A);
+    return [A.map(w=>setB.has(w)?esc(w):'<mark>'+esc(w)+'</mark>').join(''),
+            B.map(w=>setA.has(w)?esc(w):'<mark>'+esc(w)+'</mark>').join('')];
+  };
+  const CONTEXT=3, out=[];
+  let changed=0;
+  for(let i=0;i<rows.length;i++){
+    const r=rows[i];
+    if(r.k!=='same'){ changed++; continue; }
+  }
+  // decide which unchanged rows to show
+  const keep=new Array(rows.length).fill(!onlyChanges);
+  if(onlyChanges) rows.forEach((r,i)=>{ if(r.k!=='same') for(let j=Math.max(0,i-CONTEXT);j<=Math.min(rows.length-1,i+CONTEXT);j++) keep[j]=true; });
+  let skipped=0;
+  const flush=()=>{ if(skipped){ out.push('<tr class="bb-gap"><td colspan="4">\u22ef '+skipped+' unchanged line'+(skipped===1?'':'s')+'</td></tr>'); skipped=0; } };
+  rows.forEach((r,i)=>{
+    if(!keep[i]){ skipped++; return; }
+    flush();
+    let lt=r.l?esc(r.l.text):'', rt=r.r?esc(r.r.text):'';
+    if(r.k==='chg'){ [lt,rt]=words(r.l.text, r.r.text); }
+    out.push('<tr class="bb-'+r.k+'"><td class="ln">'+(r.l?r.l.o:'')+'</td><td class="tx">'+lt+'</td>'+
+             '<td class="ln">'+(r.r?r.r.c:'')+'</td><td class="tx">'+rt+'</td></tr>');
+  });
+  flush();
+  return {changed, html: changed ? '<table class="bb"><tr><th colspan="2">Before</th><th colspan="2">After</th></tr>'+out.join('')+'</table>'
+                                 : '<p class="note">No differences.</p>'};
+}
+function sideBySideNeighbors(before, after){
+  const key=(n)=>n.localPort;
+  const B=new Map((before||[]).map(n=>[key(n),n])), A=new Map((after||[]).map(n=>[key(n),n]));
+  const ports=[...new Set([...B.keys(), ...A.keys()])].sort((x,y)=>String(x).localeCompare(String(y),undefined,{numeric:true}));
+  let changed=0;
+  const rows=ports.map(p=>{
+    const b=B.get(p), a=A.get(p);
+    const t=(n)=>n?esc(n.peerName)+' <span class="muted">'+esc(n.peerPort||'')+'</span>':'';
+    const k = !b ? 'add' : !a ? 'del' : (b.peerName!==a.peerName||b.peerPort!==a.peerPort) ? 'chg' : 'same';
+    if(k!=='same') changed++;
+    return '<tr class="bb-'+k+'"><td class="tx">'+esc(p)+'</td><td class="tx">'+t(b)+'</td><td class="tx">'+t(a)+'</td></tr>';
+  });
+  return {changed, html: ports.length
+    ? '<table class="bb"><tr><th>Local port</th><th>Before</th><th>After</th></tr>'+rows.join('')+'</table>'
+    : '<p class="note">No neighbours before or after.</p>'};
+}
+function sideBySidePolicy(dev){
+  const beforeSrc = dev.beforePolicySource!==undefined ? dev.beforePolicySource : dev.policySource;
+  const rulesOf=(src, fallbackText)=>{
+    if(src && src.text) return rulesFromPolicyFile(src.text, src.file||'policy').rules;
+    return (parseConfig(fallbackText||'', dev.file).rules)||[];
+  };
+  const before=rulesOf(beforeSrc, dev.originalText!=null?dev.originalText:dev.rawText);
+  const after=(dev.rules||[]);
+  const key=(r)=>(r.vsys||'vsys1')+'|'+(r.stage||'rulebase')+'|'+r.name;
+  const B=new Map(before.map(r=>[key(r),r])), A=new Map(after.map(r=>[key(r),r]));
+  const order=[...after.map(key), ...before.map(key).filter(k=>!A.has(k))];
+  const f=(r)=>r?[r.from,r.to,r.source,r.destination].map(x=>[].concat(x||['any']).join(', ')).join(' \u2192 ').replace(/^(.*?) \u2192 (.*?) \u2192 /,'$1 \u2192 $2 \u00b7 ')+' \u00b7 '+r.action+(r.disabled?' (disabled)':''):'';
+  let changed=0;
+  const bIdx=new Map(before.map((r,i)=>[key(r),i])), aIdx=new Map(after.map((r,i)=>[key(r),i]));
+  const rows=[...new Set(order)].map(k=>{
+    const b=B.get(k), a=A.get(k);
+    let kind = !b ? 'add' : !a ? 'del' : f(b)!==f(a) ? 'chg' : 'same';
+    const moved = b && a && kind==='same' && bIdx.get(k)!==aIdx.get(k);
+    if(kind!=='same' || moved) changed++;
+    const nm=esc((a||b).name)+((a||b).vsys&&(a||b).vsys!=='vsys1'?' <span class="muted">'+esc((a||b).vsys)+'</span>':'');
+    return '<tr class="bb-'+(moved?'chg':kind)+'"><td class="tx">'+nm+(moved?' <span class="muted">moved</span>':'')+'</td>'+
+      '<td class="tx">'+esc(f(b))+'</td><td class="tx">'+esc(f(a))+'</td></tr>';
+  });
+  return {changed, html: rows.length
+    ? '<table class="bb"><tr><th>Rule</th><th>Before</th><th>After</th></tr>'+rows.join('')+'</table>'
+    : '<p class="note">No security rules before or after.</p>'};
+}
+function showBeforeAfter(d){
+  const ch=changesOf(d);
+  const back=document.createElement('div'); back.className='pick-back'; back.style.background='rgba(0,0,0,.12)';
+  const box=document.createElement('div'); box.className='pick bb-box';
+  let tab = ch.cfg?'cfg': ch.nbr?'nbr': ch.pol?'pol':'cfg';
+  let onlyChanges=true;
+  const paint=()=>{
+    const cfg=sideBySideConfig(d.originalText!=null?d.originalText:d.rawText, d.rawText, onlyChanges);
+    const nbr=sideBySideNeighbors(d.beforeNeighbors!==undefined?d.beforeNeighbors:d.neighbors, d.neighbors);
+    const pol=sideBySidePolicy(d);
+    const tabBtn=(id,label,n)=>'<button class="tabbtn'+(tab===id?' on':'')+'" data-bbtab="'+id+'">'+label+
+      (n?' <span class="bb-count">'+n+'</span>':'')+'</button>';
+    const body = tab==='cfg'?cfg.html : tab==='nbr'?nbr.html : pol.html;
+    box.innerHTML=
+      '<header style="cursor:move"><h2>'+esc(d.name)+' \u2014 before and after</h2><span class="sp"></span>'+
+      '<button class="btn" id="bb-close">Close</button></header>'+
+      '<div class="tabs" style="padding:8px 14px 0">'+
+        tabBtn('cfg','Config',cfg.changed)+tabBtn('nbr','CDP / LLDP',nbr.changed)+tabBtn('pol','Policy',pol.changed)+
+        (tab==='cfg'?'<label class="toggle" style="margin-left:auto;font-size:12px"><input type="checkbox" id="bb-only"'+(onlyChanges?' checked':'')+'> Only changes</label>':'')+
+      '</div>'+
+      '<div class="bb-body">'+body+'</div>'+
+      '<footer><span class="bb-legend"><i class="bb-del"></i>removed <i class="bb-add"></i>added <i class="bb-chg"></i>changed</span>'+
+        '<button class="btn" id="bb-revert">Revert to Before</button>'+
+        '<button class="btn btn-go" id="bb-accept">Accept changes</button></footer>';
+    box.querySelectorAll('[data-bbtab]').forEach(b=>b.onclick=()=>{ tab=b.dataset.bbtab; paint(); });
+    const only=box.querySelector('#bb-only'); if(only) only.onchange=()=>{ onlyChanges=only.checked; paint(); };
+    box.querySelector('#bb-close').onclick=close;
+    box.querySelector('#bb-accept').onclick=()=>{
+      if(!confirm('Make what '+d.name+' has now its new Before? The current Before is discarded.')) return;
+      pushUndo(); acceptChanges(d); rebuild(); autosave(); close(); showDevice(d);
+    };
+    box.querySelector('#bb-revert').onclick=()=>{
+      if(!confirm('Put '+d.name+' back to its Before config, neighbours and policy?')) return;
+      pushUndo(); revertChanges(d); rebuild(); autosave(); close(); showDevice(d);
+    };
+    const hdr=box.querySelector('header');
+    hdr.onmousedown=(e)=>{
+      if(e.target.closest('button,input')) return;
+      const r=box.getBoundingClientRect(), ox=e.clientX-r.left, oy=e.clientY-r.top;
+      box.style.transform='none'; box.style.left=r.left+'px'; box.style.top=r.top+'px';
+      const mv=(m)=>{ box.style.left=Math.max(0,m.clientX-ox)+'px'; box.style.top=Math.max(0,m.clientY-oy)+'px'; };
+      const up=()=>{ document.removeEventListener('mousemove',mv); document.removeEventListener('mouseup',up); };
+      document.addEventListener('mousemove',mv); document.addEventListener('mouseup',up); e.preventDefault();
+    };
+  };
+  const close=()=>{ back.remove(); box.remove(); document.removeEventListener('keydown',esck); };
+  const esck=(e)=>{ if(e.key==='Escape') close(); };
+  back.onclick=close; document.addEventListener('keydown',esck);
+  document.body.appendChild(back); document.body.appendChild(box);
+  paint();
 }
 
 /* ---------- picking several devices at once ---------- */
@@ -8090,8 +8341,21 @@ function baselineDevices(){
     const b = parseConfig(text, d.file);
     b.id = d.id;
     if(b.usedFallbackName) b.name = d.name;
-    b.manualRoutes = d.manualRoutes;
+    b.manualRoutes = d.manualRoutes;            // routing tables have no Before
     b.tableAuthoritative = d.tableAuthoritative;
+    b.bgpTable = d.bgpTable;
+    // everything the trace needs to place and judge the device, as it is now
+    b.groupId = d.groupId; b.noPolicy = d.noPolicy; b.sourceStem = d.sourceStem;
+    b.name = d.name;
+    // neighbours and policy as they were before the last refresh
+    b.neighbors = d.beforeNeighbors!==undefined ? d.beforeNeighbors : d.neighbors;
+    const ps = d.beforePolicySource!==undefined ? d.beforePolicySource : d.policySource;
+    if(ps && ps.text){
+      const frag=rulesFromPolicyFile(ps.text, ps.file||'policy');
+      if(frag.rules.length) b.rules=frag.rules;
+      if(Object.keys(frag.addrObjects).length) b.addrObjects=Object.assign(b.addrObjects||{}, frag.addrObjects);
+      if(Object.keys(frag.acls).length) b.acls=Object.assign(b.acls||{}, frag.acls);
+    }
     return b;
   });
 }
@@ -8252,6 +8516,7 @@ function modelOpts(){
   };
 }
 function rebuild(){
+  setTimeout(()=>{ try{ syncBeforeAfterUI(); }catch(e){} },0);
   STATE.model = buildModel(STATE.devices, modelOpts());
   renderDevList();
   renderGroups();
@@ -8272,7 +8537,7 @@ function rebuild(){
   autosave();
 }
 
-function isModified(d){ return (d.rawText||'') !== (d.originalText==null ? d.rawText : d.originalText); }
+function isModified(d){ return changesOf(d).any; }
 
 function renderDevList(){
   const ul=document.getElementById('devlist'); ul.innerHTML='';
@@ -8466,22 +8731,77 @@ function esc(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;',
 /* ============================================================
    Config diff — original baseline vs candidate (current) text
    ============================================================ */
+/* Line diff that scales to real configs.
+
+   The old version filled an n x m table and gave up past 800,000 cells — about
+   900 lines each side — so real switch configs were nearly always "too large
+   to diff". This one trims what is common at both ends, anchors on lines that
+   occur exactly once in each version (hostnames, interface headers, most
+   config lines), keeps the anchors that stay in order, and diffs only the
+   gaps between them — with the exact table method only where a gap is small.
+   Output is the same list of same / del / add operations. */
 function diffLines(a,b){
-  const n=a.length, m=b.length;
-  if(n*m>800000) return null;   // too large to diff cheaply — caller falls back to plain listing
-  const dp=new Array(n+1);
-  for(let i=0;i<=n;i++) dp[i]=new Int32Array(m+1);
-  for(let i=n-1;i>=0;i--)
-    for(let j=m-1;j>=0;j--)
-      dp[i][j] = a[i]===b[j] ? dp[i+1][j+1]+1 : Math.max(dp[i+1][j], dp[i][j+1]);
-  const ops=[]; let i=0,j=0;
-  while(i<n && j<m){
-    if(a[i]===b[j]){ ops.push({type:'same', text:a[i], o:i+1, c:j+1}); i++; j++; }
-    else if(dp[i+1][j] >= dp[i][j+1]){ ops.push({type:'del', text:a[i], o:i+1}); i++; }
-    else { ops.push({type:'add', text:b[j], c:j+1}); j++; }
-  }
-  while(i<n){ ops.push({type:'del', text:a[i], o:i+1}); i++; }
-  while(j<m){ ops.push({type:'add', text:b[j], c:j+1}); j++; }
+  const ops=[];
+  const exact=(a0,a1,b0,b1)=>{               // small gap: exact LCS
+    const n=a1-a0, m=b1-b0;
+    if(n===0){ for(let j=b0;j<b1;j++) ops.push({type:'add', text:b[j], c:j+1}); return; }
+    if(m===0){ for(let i=a0;i<a1;i++) ops.push({type:'del', text:a[i], o:i+1}); return; }
+    if(n*m>250000){                           // still large: show as removed then added
+      for(let i=a0;i<a1;i++) ops.push({type:'del', text:a[i], o:i+1});
+      for(let j=b0;j<b1;j++) ops.push({type:'add', text:b[j], c:j+1});
+      return;
+    }
+    const dp=new Array(n+1); for(let i=0;i<=n;i++) dp[i]=new Int32Array(m+1);
+    for(let i=n-1;i>=0;i--) for(let j=m-1;j>=0;j--)
+      dp[i][j] = a[a0+i]===b[b0+j] ? dp[i+1][j+1]+1 : Math.max(dp[i+1][j], dp[i][j+1]);
+    let i=0,j=0;
+    while(i<n && j<m){
+      if(a[a0+i]===b[b0+j]){ ops.push({type:'same', text:a[a0+i], o:a0+i+1, c:b0+j+1}); i++; j++; }
+      else if(dp[i+1][j] >= dp[i][j+1]){ ops.push({type:'del', text:a[a0+i], o:a0+i+1}); i++; }
+      else { ops.push({type:'add', text:b[b0+j], c:b0+j+1}); j++; }
+    }
+    while(i<n){ ops.push({type:'del', text:a[a0+i], o:a0+i+1}); i++; }
+    while(j<m){ ops.push({type:'add', text:b[b0+j], c:b0+j+1}); j++; }
+  };
+  const rec=(a0,a1,b0,b1,depth)=>{
+    // common ends
+    while(a0<a1 && b0<b1 && a[a0]===b[b0]){ ops.push({type:'same', text:a[a0], o:a0+1, c:b0+1}); a0++; b0++; }
+    const suffix=[];
+    while(a1>a0 && b1>b0 && a[a1-1]===b[b1-1]){ a1--; b1--; suffix.push({type:'same', text:a[a1], o:a1+1, c:b1+1}); }
+    if(a0<a1 || b0<b1){
+      // lines unique on both sides of this gap
+      const ca=new Map(), cb=new Map();
+      for(let i=a0;i<a1;i++){ const t=a[i]; const e=ca.get(t); ca.set(t, e===undefined?i:-1); }
+      for(let j=b0;j<b1;j++){ const t=b[j]; const e=cb.get(t); cb.set(t, e===undefined?j:-1); }
+      const pairs=[];
+      for(let i=a0;i<a1;i++){ const ia=ca.get(a[i]); if(ia!==i) continue; const jb=cb.get(a[i]); if(jb!==undefined && jb>=0) pairs.push([i,jb]); }
+      // longest run of anchors in order on both sides (patience LIS)
+      let anchors=[];
+      if(pairs.length && depth<64){
+        const tails=[], prev=new Array(pairs.length);
+        for(let k=0;k<pairs.length;k++){
+          const y=pairs[k][1]; let lo=0, hi=tails.length;
+          while(lo<hi){ const mid=(lo+hi)>>1; if(pairs[tails[mid]][1]<y) lo=mid+1; else hi=mid; }
+          prev[k]= lo>0 ? tails[lo-1] : -1; tails[lo]=k;
+        }
+        let k=tails.length?tails[tails.length-1]:-1;
+        while(k>=0){ anchors.push(pairs[k]); k=prev[k]; }
+        anchors.reverse();
+      }
+      if(!anchors.length) exact(a0,a1,b0,b1);
+      else {
+        let pa=a0, pb=b0;
+        for(const [i,j] of anchors){
+          rec(pa,i,pb,j,depth+1);
+          ops.push({type:'same', text:a[i], o:i+1, c:j+1});
+          pa=i+1; pb=j+1;
+        }
+        rec(pa,a1,pb,b1,depth+1);
+      }
+    }
+    for(let k=suffix.length-1;k>=0;k--) ops.push(suffix[k]);
+  };
+  rec(0,a.length,0,b.length,0);
   return ops;
 }
 function buildDiffPanes(origText, candText){
@@ -9237,7 +9557,13 @@ function showDevice(d, opts){
                     : STATE.devSubTab==='wan'      ? wanHtml
                     :                                ifTabHtml;
 
-  const overviewHtml =
+  const ch=changesOf(d);
+  const bbBanner = ch.any
+    ? '<div class="bb-banner"><span>Changed since Before: <b>'+
+        [ch.cfg?'config':'', ch.nbr?'CDP / LLDP':'', ch.pol?'policy':''].filter(Boolean).join(', ')+
+      '</b></span><span class="sp"></span><button class="btn btn-go" id="bb-open">Compare before / after</button></div>'
+    : '';
+  const overviewHtml = bbBanner+
     '<div class="tabs" style="margin-top:-4px">'+
       subTabs.map(([id,label])=>'<button class="tabbtn'+(STATE.devSubTab===id?' on':'')+'" data-subtab="'+id+'">'+
         esc(label)+'</button>').join('')+
@@ -9429,8 +9755,8 @@ function showDevice(d, opts){
   };
   const promoteBtn=document.getElementById('cfg-promote');
   if(promoteBtn) promoteBtn.onclick=()=>{
-    if(!confirm('Make the current candidate config the new original baseline for '+d.name+'? This can\u2019t be undone.')) return;
-    d.originalText = d.rawText;
+    if(!confirm('Make the current config, neighbours and policy the new Before for '+d.name+'? This can\u2019t be undone.')) return;
+    acceptChanges(d);
     rebuild(); showDevice(d,{tab:'config'});
   };
   const cfgDel=document.getElementById('cfg-delete');
@@ -9530,6 +9856,8 @@ function showDevice(d, opts){
   r.querySelectorAll('[data-nbdel]').forEach(b=>b.onclick=()=>{
     d.neighbors.splice(parseInt(b.dataset.nbdel,10),1); refresh();
   });
+  const bbOpen=document.getElementById('bb-open');
+  if(bbOpen) bbOpen.onclick=()=>showBeforeAfter(d);
   const polSearch=document.getElementById('pol-search');
   if(polSearch){
     polSearch.oninput=()=>{
@@ -9824,7 +10152,7 @@ async function ingestFiles(list){
         const probe=parseConfig(text, f.name);
         dev=STATE.devices.find(d=>d.name.toLowerCase()===String(probe.name).toLowerCase()) || null;
       }
-      if(dev){ reparseInto(dev, text); dev.originalText=text; }
+      if(dev){ refreshConfig(dev, text); }
       else { addText(text, f.name); dev=STATE.devices[STATE.devices.length-1]; made++; }
       if(dev) dev.sourceStem=host;
       continue;
@@ -9836,7 +10164,7 @@ async function ingestFiles(list){
       if(got.length){ dev.manualRoutes=got; dev.tableAuthoritative=true; attached++; }
     } else if(kind==='cdp'){
       const got=parseNeighbors(text);
-      if(got.length){ dev.neighbors=got; attached++; }
+      if(got.length){ refreshNeighbors(dev, got); attached++; }
     } else if(kind==='bgp'){
       const got=parseBgpTable(text);
       if(got.length){ dev.bgpTable=got; attached++; }
@@ -9844,7 +10172,7 @@ async function ingestFiles(list){
       /* Rules on their own: parse them as a config fragment and take just the
          policy out of it, so the device keeps its real interfaces. */
       const frag=rulesFromPolicyFile(text, f.name);
-      if(frag.rules.length){ dev.rules=frag.rules; dev.policySource={text, file:f.name}; attached++; }
+      if(frag.rules.length){ refreshPolicy(dev, text, f.name); attached++; }
       else noRules.push(f.name);
       if(Object.keys(frag.addrObjects).length) dev.addrObjects=Object.assign(dev.addrObjects||{}, frag.addrObjects);
       if(Object.keys(frag.acls).length) dev.acls=Object.assign(dev.acls||{}, frag.acls);
@@ -10815,6 +11143,8 @@ function serializeDevice(d){
       boxW: d.boxW||null, boxH: d.boxH||null,
       fontSize: d.fontSize||null, bold: d.bold!=null?d.bold:null, font: d.font||null,
       stem: d.sourceStem||null,
+      bnbrs: d.beforeNeighbors!==undefined ? d.beforeNeighbors : undefined,
+      bpol: d.beforePolicySource!==undefined ? (d.beforePolicySource||'none') : undefined,
       pol: d.policySource||null,
       nbrs: d.neighbors||[],
       bgp: d.bgpTable||[],
@@ -10834,6 +11164,8 @@ function deviceFromRecord(pd){
   d.noPolicy = !!pd.nopol;
   if(pd.boxW) d.boxW=pd.boxW;
   if(pd.stem) d.sourceStem=pd.stem;
+  if(pd.bnbrs!==undefined) d.beforeNeighbors=pd.bnbrs;
+  if(pd.bpol!==undefined) d.beforePolicySource = pd.bpol==='none' ? null : pd.bpol;
   if(pd.pol){ d.policySource=pd.pol; applyPolicySource(d); }
   if(pd.boxH) d.boxH=pd.boxH;
   if(pd.fontSize) d.fontSize=pd.fontSize;
