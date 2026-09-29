@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Dynagram 0.41 — dynamic network diagrams from device configs</title>
+<title>Dynagram 0.42 — dynamic network diagrams from device configs</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -3712,7 +3712,7 @@ function applyBends(els){
 /* A small stable hash, so a link always starts from the same channel. */
 /* Still pre-1.0: the diagram, tracing and reports are solid, but the file
    format and the routing behaviour are both still moving. */
-const APP_VERSION='0.41';
+const APP_VERSION='0.42';
 function hashStr(t){ let h=0; for(let i=0;i<t.length;i++){ h=(h*31 + t.charCodeAt(i))|0; } return h; }
 function zoneAncestors(node){
   const out=new Set();
@@ -13143,8 +13143,16 @@ function initTheme(){
     el.checked=!!STATE.theme[k];
     el.onchange=()=>{ STATE.theme[k]=el.checked; applyTheme(); autosave(); };
   }
-  const applyPreset=(t)=>{
-    STATE.theme=Object.assign({}, t);
+  /* A preset is a colour scheme: canvas, grid, boxes, zones and links. It
+     used to replace the whole appearance, so switching to the white (Visio)
+     canvas also threw away the typeface, text size, weight, text fill, box
+     size, name wrapping and line widths you had set. Those are kept now; only
+     Reset puts everything back to the defaults. */
+  const PRESET_KEYS=['canvasBg','canvasGrid','gridStyle','devBg','devText','roleRouter','roleSwitch','roleFirewall',
+                     'zoneBg','zoneText','zoneBorder','zoneGrid','zoneTabColor','linkIntra','linkInter','linkDown','netText','linkText'];
+  const applyPreset=(t, everything)=>{
+    if(everything) STATE.theme=Object.assign({}, t, {fontV:2});
+    else { STATE.theme=Object.assign({}, STATE.theme); for(const k of PRESET_KEYS){ if(k in t) STATE.theme[k]=t[k]; else delete STATE.theme[k]; } }
     for(const k in map) if(document.getElementById(map[k])) document.getElementById(map[k]).value=STATE.theme[k];
     for(const k in boolMap) if(document.getElementById(boolMap[k])) document.getElementById(boolMap[k]).checked=!!STATE.theme[k];
     if(bw) bw.value=STATE.theme.boxBorderW||2;
@@ -13175,7 +13183,7 @@ function initTheme(){
       delete d.boxW; delete d.boxH;
     }
     for(const g of groups()){ delete g.bg; delete g.fg; delete g.font; delete g.fontSize; delete g.bold; }
-    applyPreset(THEME_DEFAULT);
+    applyPreset(THEME_DEFAULT, true);
     renderGroups();
   };
 }
