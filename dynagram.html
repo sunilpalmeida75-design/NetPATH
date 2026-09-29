@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Dynagram 0.34 — dynamic network diagrams from device configs</title>
+<title>Dynagram 0.35 — dynamic network diagrams from device configs</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -916,6 +916,11 @@ td.mig-ok{color:var(--green,#58c48c)} td.mig-bad{color:var(--red,#e0625f)}
       <div class="rt-form">
         <input type="number" id="th-devFontSize" placeholder="device text size" min="9" max="48">
         <input type="number" id="th-zoneFontSize" placeholder="zone text size" min="9" max="48">
+      </div>
+      <div class="rt-form" style="align-items:center">
+        <label style="font-size:12px;color:var(--ink-dim)">Smallest name on screen</label>
+        <input type="number" id="th-minScreenFont" min="0" max="24" style="width:60px" title="Device names are never drawn smaller than this many pixels, however far you zoom out. 0 turns it off.">
+        <span style="font-size:12px;color:var(--ink-dim)">px (0 = off)</span>
       </div>
       <div class="rt-form" style="align-items:center">
         <label style="font-size:12px;color:var(--ink-dim)">Zone name-tab text</label>
@@ -3670,7 +3675,7 @@ function applyBends(els){
 /* A small stable hash, so a link always starts from the same channel. */
 /* Still pre-1.0: the diagram, tracing and reports are solid, but the file
    format and the routing behaviour are both still moving. */
-const APP_VERSION='0.34';
+const APP_VERSION='0.35';
 function hashStr(t){ let h=0; for(let i=0;i<t.length;i++){ h=(h*31 + t.charCodeAt(i))|0; } return h; }
 function zoneAncestors(node){
   const out=new Set();
@@ -3746,7 +3751,8 @@ function assignEndpoints(cy){
 }
 
 function autoRouteEdges(cy, mode){
-  if(!cy || STATE.noAutoRoute || STATE.linksLocked) return;
+  // a delayed call can arrive after the diagram was redrawn and this one destroyed
+  if(!cy || (cy.destroyed && cy.destroyed()) || STATE.noAutoRoute || STATE.linksLocked) return;
   STATE.bends = STATE.bends || {};
   assignEndpoints(cy);
 
@@ -7426,6 +7432,7 @@ const THEME_DEFAULT={
   linkDown:'#e0625f',                         // an end is administratively down
   boxBorderW:2, boxW:null, boxH:null,          // null = auto-sized from the label
   devFontSize:15, devBold:false, devWeight:'600', zoneFontSize:13, zoneBold:false,
+  minScreenFont:12,                            // names never drawn smaller than this on screen (0 = off)
   devFont:'Arial, Helvetica, sans-serif', zoneFont:'Arial, Helvetica, sans-serif',
   linkWidth:1.4,
   netText:'#4fc3d9', linkText:'#61799a'
@@ -7437,7 +7444,7 @@ const THEME_VISIO={
   devBg:'#ffffff', devText:'#14304a',
   roleRouter:'#1f7a4d', roleSwitch:'#1f7a4d', roleFirewall:'#1f7a4d',
   zoneBg:'#ffffff', zoneText:'#4a6b80', zoneBorder:'#1f7a4d', zoneGrid:false,
-  textFill:0.8, showRole:true,
+  textFill:0.8, showRole:true, minScreenFont:12,
   linkIntra:'#8496a6', linkInter:'#c07a22', linkDown:'#c8453f',
   boxBorderW:3, boxW:null, boxH:null,
   devFontSize:15, devBold:false, devWeight:'600', zoneFontSize:13, zoneBold:false,
@@ -7587,6 +7594,46 @@ function applyTheme(){
   render();   // device/zone colours and the zone grid are baked into element data
 }
 
+/* Names stay readable however far out you zoom. A diagram fitted to the
+   screen is drawn small, and a bigger text size did not help: it made the
+   boxes bigger too, so the fit zoomed out further and the names came out the
+   same size on screen. Below the smallest on-screen size, a name is drawn at
+   that size on a chip in its box colour, so it reads even where it spills
+   past the box. */
+function readableLabels(cy){
+  if(!cy || cy._readable) return;
+  cy._readable=true;
+  const clear='font-size text-background-color text-background-opacity text-background-padding text-background-shape z-index text-max-width text-overflow-wrap';
+  const apply=()=>{
+    cy._rl=null;
+    if(cy.destroyed && cy.destroyed()) return;
+    const min=+TH('minScreenFont')||0, z=cy.zoom();
+    const devs=cy.nodes('[kind="device"]');
+    const pts=[]; devs.forEach(n=>{ const p=n.position(); pts.push({n, x:p.x, y:p.y, h:n.height()}); });
+    cy.batch(()=>{
+      for(const a of pts){
+        const n=a.n, fs=+n.data('fs')||13;
+        if(!min || fs*z>=min){ if(n._big){ n.removeStyle(clear); n._big=false; } continue; }
+        /* A name may be as wide as the gap to the nearest box in its row
+           (each neighbour's name takes its own half), and wraps inside that
+           rather than running over the next one. */
+        const lab=String(n.data('label')||'').split('\n').length*min*1.35/z;
+        let dx=Infinity;
+        for(const b of pts){ if(b===a) continue;
+          if(Math.abs(b.y-a.y) < (Math.max(a.h,lab)+Math.max(b.h,lab))/2){ const d=Math.abs(b.x-a.x); if(d<dx) dx=d; } }
+        const st={'font-size':min/z, 'text-background-color':n.data('bg')||TH('devBg'), 'text-background-opacity':0.95,
+                  'text-background-padding':3/z, 'text-background-shape':'roundrectangle', 'z-index':30};
+        if(dx<Infinity){ st['text-max-width']=Math.max(n.width(), dx-10/z); st['text-overflow-wrap']='anywhere'; }
+        n.style(st); n._big=true;
+      }
+    });
+  };
+  cy._readableApply=apply;
+  cy.on('zoom', ()=>{ if(!cy._rl) cy._rl=requestAnimationFrame(apply); });
+  cy.on('add', 'node', ()=>{ if(!cy._rl) cy._rl=requestAnimationFrame(apply); });
+  cy.on('dragfree', 'node', ()=>{ if(!cy._rl) cy._rl=requestAnimationFrame(apply); });
+  apply();
+}
 function graphStyle(){
   return [
       {selector:'node[kind="device"]', style:{
@@ -7883,6 +7930,7 @@ function render(){
            spacingFactor:1.15, nodeDimensionsIncludeLabels:true}
     });
     if(anchoredPath && vpP){ cyp.zoom(vpP.zoom); cyp.pan(vpP.pan); }
+    readableLabels(cyp);
     cyp.on('tap','node[kind="device"]', evt=>{
       const d=STATE.model.devices.find(x=>x.id===evt.target.id());
       if(d) showDevice(d);
@@ -8056,6 +8104,7 @@ function render(){
       layout:{name:'preset', padding:60, fit: !(anchored && vpL)}
     });
     if(anchored && vpL){ cyl.zoom(vpL.zoom); cyl.pan(vpL.pan); }
+    readableLabels(cyl);
     // link detail shows a handful of connections in columns: straight lines
     setTimeout(()=>autoRouteEdges(cyl,'straight'),0);
     cyl.on('position','node', ()=>{ if(cyl._rt) return; cyl._rt=setTimeout(()=>{ cyl._rt=null; autoRouteEdges(cyl,'straight'); },60); });
@@ -8373,7 +8422,9 @@ function render(){
     motionBlur:false,
     textureOnViewport:bigGraph,
     hideEdgesOnViewport:bigGraph,
-    pixelRatio:bigGraph?1:'auto',
+    /* resolution 1 on a high-DPI screen blurred every name; only very large
+       diagrams give up sharpness for speed now */
+    pixelRatio:nodes.length>400?1:'auto',
     style: graphStyle(),
     layout: usePreset ? {name:'preset', padding:40, fit:!vp}
       : bigGraph
@@ -8382,6 +8433,7 @@ function render(){
         : {name:'cose', animate:false, nodeRepulsion:12000, idealEdgeLength:110,
            padding:40, numIter:400, nodeDimensionsIncludeLabels:true}
   });
+  readableLabels(cy);
 
   cy.on('tap','node[kind="device"]', evt=>{
     const d = STATE.model.devices.find(x=>x.id===evt.target.id());
@@ -8579,6 +8631,7 @@ function render(){
   };
   let routedSig=null;              // one per diagram instance; a redraw starts afresh
   const reroute=()=>{
+    if(cy.destroyed && cy.destroyed()) return;   // a later redraw replaced this diagram
     const sig=geomSig();
     if(sig===routedSig) return;
     routedSig=sig;
@@ -12793,6 +12846,10 @@ function initTheme(){
     ztc.oninput=()=>{ STATE.theme.zoneTabColor=ztc.value; render(); renderGroups(); autosave(); };
   }
   const dfs=document.getElementById('th-devFontSize'), zfs=document.getElementById('th-zoneFontSize');
+  const msf=document.getElementById('th-minScreenFont');
+  if(msf){ msf.value=STATE.theme.minScreenFont!=null?STATE.theme.minScreenFont:12;
+    msf.onchange=()=>{ const v=parseInt(msf.value,10); STATE.theme.minScreenFont=isNaN(v)?12:Math.max(0,Math.min(24,v)); msf.value=STATE.theme.minScreenFont;
+      if(STATE.cy && STATE.cy._readableApply) STATE.cy._readableApply(); autosave(); }; }
   if(dfs){ dfs.value=STATE.theme.devFontSize||13;
     dfs.onchange=()=>{ const v=parseInt(dfs.value,10); STATE.theme.devFontSize=v?Math.max(9,Math.min(48,v)):13; dfs.value=STATE.theme.devFontSize; applyTheme(); autosave(); }; }
   if(zfs){ zfs.value=STATE.theme.zoneFontSize||12;
@@ -12823,6 +12880,7 @@ function initTheme(){
     if(zff) fontOpts(zff, STATE.theme.zoneFont);
     if(dfs) dfs.value=STATE.theme.devFontSize||13;
     if(zfs) zfs.value=STATE.theme.zoneFontSize||12;
+    { const m=document.getElementById('th-minScreenFont'); if(m) m.value=TH('minScreenFont'); }
     if(dBold) dBold.checked=!!STATE.theme.devBold;
     if(zBold) zBold.checked=!!STATE.theme.zoneBold;
     applyTheme(); autosave();
