@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Dynagram 0.38 — dynamic network diagrams from device configs</title>
+<title>Dynagram 0.39 — dynamic network diagrams from device configs</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -600,6 +600,10 @@ table.bb tr.bb-gap td{color:var(--ink-faint);text-align:center;font:italic 11.5p
 
 .mig-box{display:flex;flex-direction:column}
 .zoom-group{display:inline-flex;align-items:center;gap:6px;flex:none}
+.toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(8px);z-index:200;opacity:0;pointer-events:none;
+  background:rgba(27,34,42,.96);color:var(--ink);border:1px solid var(--rule);border-radius:8px;padding:9px 16px;font-size:13px;
+  box-shadow:0 8px 24px rgba(0,0,0,.35);transition:opacity .2s, transform .2s}
+.toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
 .zoom-slider{width:110px;accent-color:var(--cyan,#4fc3d9);cursor:pointer;margin:0 2px}
 .btn.zoom-pct{min-width:54px;font-variant-numeric:tabular-nums;padding-left:6px;padding-right:6px}
 .mig-top{display:flex;align-items:center;gap:14px;padding:12px 16px;border-bottom:1px solid var(--rule);flex-wrap:wrap}
@@ -763,6 +767,7 @@ td.mig-ok{color:var(--green,#58c48c)} td.mig-bad{color:var(--red,#e0625f)}
       <button class="btn" id="zoom-in" title="Zoom in">+</button>
       <button class="btn zoom-pct" id="zoom-pct" title="Back to 100% (the whole diagram)">100%</button>
       <button class="btn" id="fit">Fit</button>
+      <button class="btn" id="compact" title="Compact layout: close up empty space between boxes and zones, keeping every row and column in order. Undo with ↶.">Compact</button>
       </span>
       <button class="btn" id="undo" title="Undo layout change">↶</button>
       <button class="btn" id="redo" title="Redo layout change">↷</button>
@@ -3685,7 +3690,7 @@ function applyBends(els){
 /* A small stable hash, so a link always starts from the same channel. */
 /* Still pre-1.0: the diagram, tracing and reports are solid, but the file
    format and the routing behaviour are both still moving. */
-const APP_VERSION='0.38';
+const APP_VERSION='0.39';
 function hashStr(t){ let h=0; for(let i=0;i<t.length;i++){ h=(h*31 + t.charCodeAt(i))|0; } return h; }
 function zoneAncestors(node){
   const out=new Set();
@@ -11588,6 +11593,109 @@ function fitBase(cy){
   return cy._fitBase;
 }
 window.addEventListener('resize', ()=>{ if(STATE.cy) STATE.cy._fitBase=null; });
+/* A short message at the bottom of the screen that fades by itself. */
+function toast(msg){
+  let t=document.getElementById('toast');
+  if(!t){ t=document.createElement('div'); t.id='toast'; t.className='toast'; document.body.appendChild(t); }
+  t.textContent=msg; t.classList.add('on');
+  clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove('on'), 4000);
+}
+/* Compact layout: squeeze out empty space without rearranging anything.
+   On each axis the boxes' extents are merged into occupied bands; the empty
+   band between two occupied ones shrinks to what it needs: room for the zone
+   borders that fall in it (their padding, and the name tab under a zone),
+   clearance either side, and a lane for every link that crosses it. Nothing
+   ever moves past anything else, so rows, columns and alignments stay as they
+   were — only the gaps get smaller. */
+function compactLayout(){
+  const cy=STATE.cy;
+  if(!cy || STATE.viewIsPath){ alert('Compact works on the topology view.'); return; }
+  const leaves=cy.nodes().filter(n=>n.data('kind')!=='group' && !n.hasClass('tmp') && n.visible());
+  if(leaves.length<2) return;
+  pushUndo();
+  const groups=cy.nodes('[kind="group"]').filter(g=>g.visible());
+  const LANE=ROUTE_GRID, CLEAR=ROUTE_M*2, SEP=28;   // the router keeps parallel runs a grid step apart
+  const edges=cy.edges().filter(e=>e.visible());
+  const plan=(axis)=>{
+    const lo=axis==='x'?'x1':'y1', hi=axis==='x'?'x2':'y2';
+    const items=leaves.map(n=>{ const b=n.boundingBox({includeLabels:false}); return {a:b[lo], b:b[hi]}; }).sort((p,q)=>p.a-q.a);
+    const bands=[];
+    for(const it of items){ const L=bands[bands.length-1]; if(L && it.a<=L.b) L.b=Math.max(L.b,it.b); else bands.push({a:it.a,b:it.b}); }
+    const gaps=[];
+    for(let i=1;i<bands.length;i++) gaps.push({s:bands[i-1].b, e:bands[i].a, need:0});
+    const gapBefore=(v)=>{ for(let i=0;i<bands.length;i++) if(v>=bands[i].a && v<=bands[i].b) return i>0?gaps[i-1]:null; return null; };
+    const gapAfter=(v)=>{ for(let i=0;i<bands.length;i++) if(v>=bands[i].a && v<=bands[i].b) return i<gaps.length?gaps[i]:null; return null; };
+    /* Zone borders: each zone's real margin around its contents is measured
+       from the drawn box (padding, border, name tab and label all included;
+       an outer zone's margin already contains the inner ones). A gap needs
+       the widest margin closing before it plus the widest opening after it,
+       and a little air between the two boxes. Zones side by side do not add
+       up, and nested ones are counted once through the outer zone. */
+    for(const g of gaps){ g.open=0; g.close=0; }
+    groups.forEach(g=>{
+      const kids=g.descendants().filter(n=>n.data('kind')!=='group' && n.visible());
+      if(!kids.length) return;
+      const kb=kids.boundingBox({includeLabels:false}), gb=g.boundingBox({includeLabels:true});
+      const before=gapBefore(kb[lo]), after=gapAfter(kb[hi]);
+      if(before) before.open=Math.max(before.open, kb[lo]-gb[lo]);
+      if(after) after.close=Math.max(after.close, gb[hi]-kb[hi]);
+    });
+    /* A link crossing several gaps runs its cross segment near the midpoint
+       of its ends, so it takes a lane in one gap only: the one at, or
+       nearest to, that midpoint. */
+    const other=axis==='x'?'y':'x';
+    const pos=(n)=>n.position()[axis], opos=(n)=>n.position()[other];
+    for(const g of gaps) g.runs=[];
+    edges.forEach(e=>{
+      const u=pos(e.source()), v=pos(e.target()), a=Math.min(u,v), b=Math.max(u,v), mid=(u+v)/2;
+      let best=null, bd=Infinity;
+      for(const g of gaps){ if(g.s<a || g.e>b) continue;
+        const d = (mid>=g.s && mid<=g.e) ? 0 : Math.min(Math.abs(mid-g.s), Math.abs(mid-g.e));
+        if(d<bd){ bd=d; best=g; } }
+      if(best){ const p=opos(e.source()), q=opos(e.target()); best.runs.push([Math.min(p,q), Math.max(p,q)]); }
+    });
+    /* Runs only need separate lanes where they overlap, so a gap needs as
+       many lanes as the most runs stacked over any one point. */
+    for(const g of gaps){
+      const ev=[]; for(const [p,q] of g.runs){ ev.push([p,1]); ev.push([q+0.5,-1]); }
+      ev.sort((m,n)=>m[0]-n[0] || n[1]-m[1]);
+      let cur=0; g.lanes=0; for(const [,d] of ev){ cur+=d; g.lanes=Math.max(g.lanes,cur); }
+      // links may run through zone margins, so lanes and margins overlap
+      g.need=Math.max(CLEAR+Math.max(1,g.lanes)*LANE, g.close+g.open+SEP);
+      g.ng=Math.min(g.e-g.s, Math.ceil(g.need));
+    }
+    const map=(v)=>{
+      let shift=0;
+      for(const g of gaps){
+        const w=g.e-g.s;
+        if(v>=g.e) shift+=w-g.ng;
+        else if(v>g.s) return v-shift-(v-g.s)*(1-g.ng/w);
+        else break;
+      }
+      return v-shift;
+    };
+    map.gaps=gaps;
+    return map;
+  };
+  const mx=plan('x'), my=plan('y');
+  compactLayout.last={x:mx.gaps, y:my.gaps};          // for checking what held a gap open
+  const before=cy.elements(':visible').boundingBox();
+  cy.batch(()=>{ leaves.forEach(n=>{ const p=n.position(); n.position({x:mx(p.x), y:my(p.y)}); }); });
+  for(const k in (STATE.waypoints||{})) STATE.waypoints[k]=STATE.waypoints[k].map(w=>Object.assign({},w,{x:mx(w.x), y:my(w.y)}));
+  // zones sized by hand keep that size otherwise, and would hold the space open
+  for(const g of (STATE.groups||[])){ delete g.minW; delete g.minH; }
+  groups.forEach(g=>{ g.data('minw','0px'); g.data('minh','0px'); });
+  capturePositions(cy);
+  const after=cy.elements(':visible').boundingBox();
+  autoRouteEdges(cy,'ortho');
+  fitDiagram(cy);
+  updateUndoButtons(); autosave();
+  const pct=(a,b)=>Math.round(100-100*b/a);
+  const msg='Compacted: '+pct(before.w,after.w)+'% narrower, '+pct(before.h,after.h)+'% shorter. Undo with \u21b6.';
+  toast(msg);
+  return {before:{w:before.w,h:before.h}, after:{w:after.w,h:after.h}};
+}
+document.getElementById('compact').onclick=()=>compactLayout();
 document.getElementById('fit').onclick=()=>{
   if(!STATE.cy) return;
   fitDiagram(STATE.cy);
@@ -11943,7 +12051,7 @@ function layoutSnapshot(){
     freeLinks: STATE.freeLinks||{},
     lineWidths: STATE.lineWidths||{},
     boxes: (STATE.devices||[]).map(d=>({n:d.name, w:d.boxW||null, h:d.boxH||null})),
-    pads: (STATE.groups||[]).map(g=>({id:g.id, p:g.padding||null}))
+    pads: (STATE.groups||[]).map(g=>({id:g.id, p:g.padding||null, mw:g.minW||null, mh:g.minH||null}))
   });
 }
 function applySnapshot(json){
@@ -11959,8 +12067,12 @@ function applySnapshot(json){
     const b=byName[d.name];
     if(b){ if(b.w) d.boxW=b.w; else delete d.boxW; if(b.h) d.boxH=b.h; else delete d.boxH; }
   }
-  const byId={}; for(const g of (o.pads||[])) byId[g.id]=g.p;
-  for(const g of (STATE.groups||[])) { if(byId[g.id]) g.padding=byId[g.id]; else delete g.padding; }
+  const byId={}; for(const g of (o.pads||[])) byId[g.id]=g;
+  for(const g of (STATE.groups||[])) {
+    const r=byId[g.id]||{};
+    if(r.p) g.padding=r.p; else delete g.padding;
+    if('mw' in r){ if(r.mw) g.minW=r.mw; else delete g.minW; if(r.mh) g.minH=r.mh; else delete g.minH; }
+  }
   render();
   updateUndoButtons();
 }
