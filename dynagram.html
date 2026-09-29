@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Dynagram 0.37 — dynamic network diagrams from device configs</title>
+<title>Dynagram 0.38 — dynamic network diagrams from device configs</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -758,10 +758,10 @@ td.mig-ok{color:var(--green,#58c48c)} td.mig-bad{color:var(--red,#e0625f)}
       <span class="sb-gap"></span>
       <span class="zoom-group">
       <button class="btn" id="zoom-out" title="Zoom out">−</button>
-      <input type="range" id="zoom-slider" class="zoom-slider" min="-432" max="200" step="1" value="0"
-             title="Zoom. 100% draws names at their real size; below that the whole diagram shrinks, boxes and text together.">
+      <input type="range" id="zoom-slider" class="zoom-slider" min="-200" max="400" step="1" value="0"
+             title="Zoom. 100% is the whole diagram fitted to the canvas; up to 1600% closer, down to 25%.">
       <button class="btn" id="zoom-in" title="Zoom in">+</button>
-      <button class="btn zoom-pct" id="zoom-pct" title="Back to 100%">100%</button>
+      <button class="btn zoom-pct" id="zoom-pct" title="Back to 100% (the whole diagram)">100%</button>
       <button class="btn" id="fit">Fit</button>
       </span>
       <button class="btn" id="undo" title="Undo layout change">↶</button>
@@ -931,6 +931,7 @@ td.mig-ok{color:var(--green,#58c48c)} td.mig-bad{color:var(--red,#e0625f)}
         <input type="number" id="th-minNamePx" min="0" max="24" style="width:60px" title="Off (0): zooming out shrinks everything evenly and keeps the layout. On: names stay this many pixels on screen, on a chip, even past their box.">
         <span style="font-size:12px;color:var(--ink-dim)">px (0 = off)</span>
       </div>
+      <label class="toggle" style="margin:4px 0 6px"><input type="checkbox" id="th-wrapNames"> Wrap long device names over two lines</label>
       <div class="rt-form" style="align-items:center">
         <label style="font-size:12px;color:var(--ink-dim)">Zone name-tab text</label>
         <input type="color" id="th-zoneTabColor" title="Name-tab text colour for every zone">
@@ -3684,7 +3685,7 @@ function applyBends(els){
 /* A small stable hash, so a link always starts from the same channel. */
 /* Still pre-1.0: the diagram, tracing and reports are solid, but the file
    format and the routing behaviour are both still moving. */
-const APP_VERSION='0.37';
+const APP_VERSION='0.38';
 function hashStr(t){ let h=0; for(let i=0;i<t.length;i++){ h=(h*31 + t.charCodeAt(i))|0; } return h; }
 function zoneAncestors(node){
   const out=new Set();
@@ -7442,6 +7443,7 @@ const THEME_DEFAULT={
   boxBorderW:2, boxW:null, boxH:null,          // null = auto-sized from the label
   devFontSize:15, devBold:false, devWeight:'600', zoneFontSize:13, zoneBold:false,
   minNamePx:0,                                 // if set, names are never drawn smaller than this on screen
+  wrapNames:true,                              // long names over two lines
   devFont:'Arial, Helvetica, sans-serif', zoneFont:'Arial, Helvetica, sans-serif',
   linkWidth:1.4,
   netText:'#4fc3d9', linkText:'#61799a'
@@ -7453,7 +7455,7 @@ const THEME_VISIO={
   devBg:'#ffffff', devText:'#14304a',
   roleRouter:'#1f7a4d', roleSwitch:'#1f7a4d', roleFirewall:'#1f7a4d',
   zoneBg:'#ffffff', zoneText:'#4a6b80', zoneBorder:'#1f7a4d', zoneGrid:false,
-  textFill:0.8, showRole:true, minNamePx:0,
+  textFill:0.8, showRole:true, minNamePx:0, wrapNames:true,
   linkIntra:'#8496a6', linkInter:'#c07a22', linkDown:'#c8453f',
   boxBorderW:3, boxW:null, boxH:null,
   devFontSize:15, devBold:false, devWeight:'600', zoneFontSize:13, zoneBold:false,
@@ -7643,6 +7645,24 @@ function readableLabels(cy){
   cy.on('add', 'node', ()=>{ if(!cy._rl) cy._rl=requestAnimationFrame(apply); });
   cy.on('dragfree', 'node', ()=>{ if(!cy._rl) cy._rl=requestAnimationFrame(apply); });
   apply();
+}
+/* Long names wrap over two lines (three past 30 characters), broken after a
+   separator (- _ . / :) so the lines come out as even as possible:
+   FRA-DC1-FW-EXT-01 becomes FRA-DC1- / FW-EXT-01. A box sized around its
+   name is then narrower and taller, and a box of fixed size fits bigger text. */
+function wrapName(name){
+  const s=String(name||'');
+  if(TH('wrapNames')===false || s.length<=12) return s;
+  const toks=s.match(/[^-_./:\s]+[-_./:\s]*/g)||[s];
+  if(toks.length<2) return s;
+  const join=(a)=>a.join('').replace(/\s+$/,'');
+  let best=null;
+  const consider=(parts)=>{ const m=Math.max(...parts.map(x=>x.length)); if(!best||m<best.m) best={m,parts}; };
+  for(let i=1;i<toks.length;i++) consider([join(toks.slice(0,i)), join(toks.slice(i))]);
+  if(s.length>30) for(let i=1;i<toks.length-1;i++) for(let j=i+1;j<toks.length;j++)
+    consider([join(toks.slice(0,i)), join(toks.slice(i,j)), join(toks.slice(j))]);
+  if(!best || best.m>s.length*0.8) return s;             // no even break: leave it on one line
+  return best.parts.join('\n');
 }
 function graphStyle(){
   return [
@@ -7932,7 +7952,7 @@ function render(){
     const cyp = cytoscape({
       container: document.getElementById('cy'),
       elements: els, motionBlur:false,
-      wheelSensitivity:0.06, minZoom:0.05, maxZoom:4,
+      wheelSensitivity:0.06, minZoom:0.02, maxZoom:4,
       style: graphStyle(),
       layout: anchoredPath
         ? {name:'preset', padding:44, fit: !vpP}
@@ -8109,7 +8129,7 @@ function render(){
     const cyl = cytoscape({
       container: document.getElementById('cy'),
       elements: els, motionBlur:false,
-      wheelSensitivity:0.06, minZoom:0.05, maxZoom:4,
+      wheelSensitivity:0.06, minZoom:0.02, maxZoom:4,
       style: graphStyle(),
       layout:{name:'preset', padding:60, fit: !(anchored && vpL)}
     });
@@ -8210,7 +8230,7 @@ function render(){
     const roleLine = TH('showRole')===false ? '' :
       (role==='firewall' ? 'Firewall' : role==='switch' ? 'Switch' : 'Router');
     const devLabel = (selMode?(sel.has(d.id)?'☑ ':'☐ '):'') +
-                     (roleLine ? roleLine+'\n' : '') + d.name;
+                     (roleLine ? roleLine+'\n' : '') + wrapName(d.name);
     els.push({data:{id:d.id, label:devLabel, kind:'device',
                     vendor:d.vendor, role, picked: sel.has(d.id)?1:0, pkey:'dev:'+d.name,
                     bg:dc.bg, fg:dc.fg, bd:dc.bd, fs:df.size, fw:df.weight, ff:df.fam, dotUri:statusDot(d),
@@ -8431,7 +8451,7 @@ function render(){
   const cy = cytoscape({
     container: document.getElementById('cy'),
     elements: els,
-    wheelSensitivity:0.06, minZoom:0.05, maxZoom:4,
+    wheelSensitivity:0.06, minZoom:0.02, maxZoom:4,
     motionBlur:false,
     textureOnViewport:bigGraph,
     hideEdgesOnViewport:bigGraph,
@@ -11433,24 +11453,25 @@ document.getElementById('prov-name').addEventListener('keydown',e=>{
 document.getElementById('opt-igp').onchange=()=>{ STATE.lastTrace=null; rebuild(); };
 /* A fixed step from the centre of the view, for crossing a big range quickly
    without the wheel. */
-/* The zoom slider: logarithmic, so each step is the same proportion at any
-   zoom; 0 on the slider is 100%, where names are drawn at their real size. */
+/* The zoom slider and percentage are measured against the fitted view:
+   100% shows the whole diagram, 200% twice as close, 50% half. Logarithmic,
+   so each step is the same proportion at any zoom. */
 function syncZoomUI(cy){
-  if(!cy || cy!==STATE.cy) return;
-  const z=cy.zoom(), sl=document.getElementById('zoom-slider'), pc=document.getElementById('zoom-pct');
-  if(sl && document.activeElement!==sl) sl.value=String(Math.round(Math.log2(z)*100));
-  if(pc) pc.textContent=Math.round(z*100)+'%';
+  if(!cy || cy!==STATE.cy || (cy.destroyed && cy.destroyed())) return;
+  const r=cy.zoom()/fitBase(cy), sl=document.getElementById('zoom-slider'), pc=document.getElementById('zoom-pct');
+  if(sl && document.activeElement!==sl) sl.value=String(Math.round(Math.log2(r)*100));
+  if(pc) pc.textContent=Math.round(r*100)+'%';
 }
 function zoomTo(z){
   const cy=STATE.cy; if(!cy) return;
-  z=Math.max(0.05, Math.min(4, z));
+  z=Math.max(cy.minZoom(), Math.min(cy.maxZoom(), z));
   cy.zoom({level:z, renderedPosition:{x:cy.width()/2, y:cy.height()/2}});
   syncZoomUI(cy);
 }
 function zoomBy(factor){
   const cy=STATE.cy;
   if(!cy) return;
-  const z=Math.max(0.05, Math.min(4, cy.zoom()*factor));
+  const z=Math.max(cy.minZoom(), Math.min(cy.maxZoom(), cy.zoom()*factor));
   cy.zoom({level:z, renderedPosition:{x:cy.width()/2, y:cy.height()/2}});
 }
 /* Full screen hides the panels and leaves the view row floating over the map,
@@ -11512,9 +11533,10 @@ document.getElementById('reroute').onclick=()=>{
 };
 document.getElementById('zoom-in').onclick=()=>zoomBy(1.25);
 { const sl=document.getElementById('zoom-slider');
-  sl.oninput=()=>{ zoomTo(Math.pow(2, (+sl.value)/100)); const pc=document.getElementById('zoom-pct'); if(pc && STATE.cy) pc.textContent=Math.round(STATE.cy.zoom()*100)+'%'; };
+  sl.oninput=()=>{ if(!STATE.cy) return; zoomTo(fitBase(STATE.cy)*Math.pow(2, (+sl.value)/100));
+    const pc=document.getElementById('zoom-pct'); if(pc) pc.textContent=Math.round(STATE.cy.zoom()/fitBase(STATE.cy)*100)+'%'; };
   sl.onchange=()=>{ sl.blur(); if(STATE.cy) syncZoomUI(STATE.cy); };
-  document.getElementById('zoom-pct').onclick=()=>zoomTo(1); }
+  document.getElementById('zoom-pct').onclick=()=>{ if(STATE.cy){ fitDiagram(STATE.cy); autoRouteEdges(STATE.cy,'ortho'); } }; }
 document.getElementById('zoom-out').onclick=()=>zoomBy(1/1.25);
 document.getElementById('exp-report').onclick=()=>exportChangeReport();
 document.getElementById('exp-svg').onclick=()=>exportSvg();
@@ -11532,10 +11554,9 @@ window.addEventListener('keydown', (ev)=>{
    see: below the floating control bar and clear of the legend. (It used to
    restore the last saved view; a project now opens at that view instead.)
    Enlarges up to 200% for a small diagram. */
-function fitDiagram(cy){
-  cy=cy||STATE.cy; if(!cy || (cy.destroyed && cy.destroyed())) return;
-  const els=cy.elements(':visible'); if(!els.length) return;
-  const bb=els.boundingBox(); if(!(bb.w>0 && bb.h>0)) return;
+function fitTarget(cy){
+  const els=cy.elements(':visible'); if(!els.length) return null;
+  const bb=els.boundingBox(); if(!(bb.w>0 && bb.h>0)) return null;
   const c=cy.container().getBoundingClientRect();
   let top=18, bottom=18, left=18, right=18;
   const bar=document.getElementById('stage-bar');
@@ -11549,11 +11570,24 @@ function fitDiagram(cy){
     if(r.height && r.top<c.bottom && r.top>c.top+c.height/2) bottom=Math.max(bottom, c.bottom-r.top+10);
   }
   const W=c.width-left-right, H=c.height-top-bottom;
-  if(W<60 || H<60){ cy.fit(undefined,20); syncZoomUI(cy); return; }
+  if(W<60 || H<60) return null;
   const z=Math.max(cy.minZoom(), Math.min(2, cy.maxZoom(), W/bb.w, H/bb.h));
-  cy.viewport({zoom:z, pan:{x:left+(W-bb.w*z)/2-bb.x1*z, y:top+(H-bb.h*z)/2-bb.y1*z}});
+  return {zoom:z, pan:{x:left+(W-bb.w*z)/2-bb.x1*z, y:top+(H-bb.h*z)/2-bb.y1*z}};
+}
+function fitDiagram(cy){
+  cy=cy||STATE.cy; if(!cy || (cy.destroyed && cy.destroyed())) return;
+  const t=fitTarget(cy);
+  if(t){ cy.viewport(t); cy._fitBase=t.zoom; } else { cy.fit(undefined,20); cy._fitBase=cy.zoom(); }
   syncZoomUI(cy);
 }
+/* The zoom that frames the whole diagram: shown as 100%. Worked out again
+   when boxes move, appear or go, or the window changes size. */
+function fitBase(cy){
+  if(!cy._fitBase){ const t=fitTarget(cy); cy._fitBase=t?t.zoom:(cy.zoom()||1); }
+  if(!cy._fitHooked){ cy._fitHooked=true; cy.on('add remove position', ()=>{ cy._fitBase=null; }); }
+  return cy._fitBase;
+}
+window.addEventListener('resize', ()=>{ if(STATE.cy) STATE.cy._fitBase=null; });
 document.getElementById('fit').onclick=()=>{
   if(!STATE.cy) return;
   fitDiagram(STATE.cy);
@@ -12916,6 +12950,9 @@ function initTheme(){
     ztc.oninput=()=>{ STATE.theme.zoneTabColor=ztc.value; render(); renderGroups(); autosave(); };
   }
   const dfs=document.getElementById('th-devFontSize'), zfs=document.getElementById('th-zoneFontSize');
+  const wrn=document.getElementById('th-wrapNames');
+  if(wrn){ wrn.checked=TH('wrapNames')!==false;
+    wrn.onchange=()=>{ STATE.theme.wrapNames=wrn.checked; applyTheme(); if(typeof rebuild==='function') rebuild(); autosave(); }; }
   const msf=document.getElementById('th-minNamePx');
   if(msf){ msf.value=TH('minNamePx');
     msf.onchange=()=>{ const v=parseInt(msf.value,10); STATE.theme.minNamePx=isNaN(v)?0:Math.max(0,Math.min(24,v)); msf.value=STATE.theme.minNamePx;
@@ -12950,7 +12987,7 @@ function initTheme(){
     if(zff) fontOpts(zff, STATE.theme.zoneFont);
     if(dfs) dfs.value=STATE.theme.devFontSize||13;
     if(zfs) zfs.value=STATE.theme.zoneFontSize||12;
-    { const m=document.getElementById('th-minNamePx'); if(m) m.value=TH('minNamePx'); }
+    { const m=document.getElementById('th-minNamePx'); if(m) m.value=TH('minNamePx'); const w=document.getElementById('th-wrapNames'); if(w) w.checked=TH('wrapNames')!==false; }
     if(dBold) dBold.checked=!!STATE.theme.devBold;
     if(zBold) zBold.checked=!!STATE.theme.zoneBold;
     applyTheme(); autosave();
