@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Dynagram 0.32 — dynamic network diagrams from device configs</title>
+<title>Dynagram 0.33 — dynamic network diagrams from device configs</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -617,6 +617,13 @@ table.bb tr.bb-gap td{color:var(--ink-faint);text-align:center;font:italic 11.5p
 .mig-devh{font-size:13px}
 pre.mig-cfg{background:var(--bg);border:1px solid var(--rule);border-radius:4px;padding:8px 10px;margin:0;font:12px var(--mono);white-space:pre-wrap}
 td.mig-ok{color:var(--green,#58c48c)} td.mig-bad{color:var(--red,#e0625f)}
+.mig-new{margin:8px;padding:10px 12px;border:1px dashed var(--accent,#4fc3d9);border-radius:6px;font-size:12.5px}
+.mig-nvrow{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:8px;align-items:center}
+.mig-nvrow input,.mig-nvrow select{margin-left:4px;background:var(--bg);color:var(--ink);border:1px solid var(--rule);border-radius:3px;padding:3px 5px;font:12.5px var(--mono)}
+.mig-nvopt{display:block;margin:4px 0;cursor:pointer}
+.mig-badge{display:inline-block;font-size:10.5px;font-weight:600;letter-spacing:.03em;padding:0 6px;border-radius:8px;background:rgba(88,196,140,.16);color:var(--green,#58c48c);vertical-align:1px}
+.mig-err{color:var(--red,#e0625f);margin-top:6px}
+.mig-newvrf{border-color:rgba(88,196,140,.45)}
 </style>
 </head>
 <body>
@@ -1105,6 +1112,10 @@ function parseCisco(text, fname){
   dev.isAsa = /^\s*ASA Version\b/mi.test(text);
   const lines = text.split(/\r?\n/);
   let cur=null, ctx=null, lastVlans=[], curAcl=null;
+  /* NX-OS keeps a VRF's static routes inside its "vrf context NAME" block,
+     indented and without a vrf keyword. Without tracking the block they all
+     landed in the default VRF. */
+  let nxVrf=null;
 
   lines.forEach((raw, idx) => {
     const lineNo = idx + 1;
@@ -1119,6 +1130,9 @@ function parseCisco(text, fname){
       if(/^(remark|exit)\b/i.test(t)) return;
     }
     if(!indented){
+      nxVrf=null;
+      const vc=t.match(/^vrf\s+context\s+(\S+)\s*$/i);
+      if(vc){ nxVrf=vc[1]; cur=null; curAcl=null; ctx='vrfctx'; return; }
       let am;
       /* ip access-list extended NAME  — entries follow, indented */
       /* IOS:   ip access-list extended NAME
@@ -1332,9 +1346,10 @@ function parseCisco(text, fname){
         const n=nb(m[1]); if(n){ n.routeMaps=n.routeMaps||[]; n.routeMaps.push(m[2]+' '+m[3]); } return;
       }
       if((m=t.match(/^neighbor\s+(\d+\.\d+\.\d+\.\d+)\s+activate/i))){ nb(m[1]); return; }
-      if((m=t.match(/^network\s+(\d+\.\d+\.\d+\.\d+)(?:\s+mask\s+(\d+\.\d+\.\d+\.\d+))?/i))){
+      /* IOS: network A mask M (classful without a mask); NX-OS: network A/len */
+      if((m=t.match(/^network\s+(\d+\.\d+\.\d+\.\d+)(?:\/(\d{1,2})|\s+mask\s+(\d+\.\d+\.\d+\.\d+))?/i))){
         const ip=ip2int(m[1]);
-        const len=m[2]?mask2len(m[2]):classfulLen(ip);
+        const len=m[2]!=null?Math.min(32,parseInt(m[2],10)):m[3]?mask2len(m[3]):classfulLen(ip);
         if(ip!==null && len!=null && dev.bgp) dev.bgp.networks.push({net:netOf(ip,len), len, line:lineNo});
         return;
       }
@@ -1342,11 +1357,11 @@ function parseCisco(text, fname){
 
     // Static routes — IOS, NX-OS and ASA forms
     if((m=t.match(/^ip\s+route\s+(?:vrf\s+(\S+)\s+)?(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+)\s+(.+)$/i))){
-      addCiscoStatic(dev, m[1]||'default', ip2int(m[2]), mask2len(m[3]), m[4], lineNo);
+      addCiscoStatic(dev, m[1]||(indented&&nxVrf)||'default', ip2int(m[2]), mask2len(m[3]), m[4], lineNo);
       return;
     }
     if((m=t.match(/^ip\s+route\s+(?:vrf\s+(\S+)\s+)?(\d+\.\d+\.\d+\.\d+)\/(\d{1,2})\s+(.+)$/i))){
-      addCiscoStatic(dev, m[1]||'default', ip2int(m[2]), parseInt(m[3],10), m[4], lineNo);
+      addCiscoStatic(dev, m[1]||(indented&&nxVrf)||'default', ip2int(m[2]), parseInt(m[3],10), m[4], lineNo);
       return;
     }
     if((m=t.match(/^route\s+(\S+)\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+)/i))){
@@ -2602,32 +2617,49 @@ function buildModel(devices, opts){
   igpChecks(devices, subnets, warn);
 
   if(opts.igp){
+    /* The walk is over (device, VRF) pairs, not devices. Arriving at a
+       neighbour over a subnet in VRF A says nothing about its VRF B: walking
+       whole devices copied every VRF's subnets into A, so a switch "learned"
+       its peer's DR or new VRF subnets over the production transit. A packet
+       still crosses between VRFs where a device really joins them (a
+       firewall with one leg in each), because that device's other legs are
+       further edges of the walk. */
+    const vrfOf=(i)=>i.vrf||'default';
+    const connBy=new Map();                        // "devId|vrf" -> connected nets
+    for(const x of devices) for(const r of x._conn){
+      const k=x.id+'|'+(r.vrf||'default'); let a=connBy.get(k); if(!a){ a=[]; connBy.set(k,a); } a.push(r);
+    }
     for(const d of devices){
       if(d.tableAuthoritative) continue;   // a real table was imported; do not invent routes
-      const first={}; const seen={[d.id]:true}; let frontier=[{dev:d, via:null}];
-      let guard=0;
-      while(frontier.length && guard++<64){
-        const next=[];
-        for(const f of frontier){
-          for(const e of (adj[f.dev.id]||[])){
-            if(seen[e.to.id]) continue;
-            seen[e.to.id]=true;
-            const via = f.via || {iface:e.viaIface.name, nextHop:e.nextHopIp, vrf:e.viaIface.vrf};
-            first[e.to.id]=via;
-            next.push({dev:e.to, via});
+      const startVrfs=[...new Set((adj[d.id]||[]).map(e=>vrfOf(e.viaIface)))];
+      for(const sv of startVrfs){
+        const startKey=d.id+'|'+sv;
+        const seen=new Set([startKey]), first=new Map();
+        let frontier=[{dev:d, vrf:sv, via:null}], guard=0;
+        while(frontier.length && guard++<64){
+          const next=[];
+          for(const f of frontier){
+            for(const e of (adj[f.dev.id]||[])){
+              if(vrfOf(e.viaIface)!==f.vrf) continue;          // leave only by an interface in this VRF
+              const tv=vrfOf(e.peerIface), tk=e.to.id+'|'+tv;
+              if(seen.has(tk)) continue;
+              seen.add(tk);
+              const via = f.via || {iface:e.viaIface.name, nextHop:e.nextHopIp, vrf:sv};
+              first.set(tk, via);
+              next.push({dev:e.to, vrf:tv, via});   // on from its legs in that VRF (a firewall's share one VR)
+            }
           }
+          frontier=next;
         }
-        frontier=next;
-      }
-      for(const other of devices){
-        if(other===d || !first[other.id]) continue;
-        const via=first[other.id];
-        const suffix='|'+via.vrf;
-        for(const n of other._nets){
-          const key=n.net+'/'+n.len+suffix;
-          if(d._keys.has(key)) continue;
-          d._keys.add(key);
-          d.fib.push({net:n.net, len:n.len, type:'igp', ad:200, iface:via.iface, nextHop:via.nextHop, vrf:via.vrf});
+        for(const [tk, via] of first){
+          if(tk===startKey) continue;
+          const nets=connBy.get(tk)||[];
+          for(const n of nets){
+            const key=n.net+'/'+n.len+'|'+sv;
+            if(d._keys.has(key)) continue;
+            d._keys.add(key);
+            d.fib.push({net:n.net, len:n.len, type:'igp', ad:200, iface:via.iface, nextHop:via.nextHop, vrf:sv});
+          }
         }
       }
     }
@@ -3627,7 +3659,7 @@ function applyBends(els){
 /* A small stable hash, so a link always starts from the same channel. */
 /* Still pre-1.0: the diagram, tracing and reports are solid, but the file
    format and the routing behaviour are both still moving. */
-const APP_VERSION='0.32';
+const APP_VERSION='0.33';
 function hashStr(t){ let h=0; for(let i=0;i<t.length;i++){ h=(h*31 + t.charCodeAt(i))|0; } return h; }
 function zoneAncestors(node){
   const out=new Set();
@@ -6071,16 +6103,339 @@ function migOpts(){
           cloudOpts:STATE.cloudOpts||{}};
 }
 
-/* The plan for one VLAN. */
-function migPlanOne(item, srcSite, dstSite, targetVrf){
-  const plan={item, target:targetVrf, conflicts:[], notes:[], devices:new Map(), mods:[]};
-  const add=(d, section, lines, why)=>{
-    let e=plan.devices.get(d); if(!e){ e={dev:d, site:(()=>{ try{ return siteOf(d).name; }catch(x){ return ''; } })(), blocks:[]}; plan.devices.set(d,e); }
+/* ---------- a new VRF at the destination ----------
+   The new VRF is built like an existing one there (the pattern): same
+   gateways, same definition syntax, same way up to the firewall. Nothing
+   about RD, route targets or the transit addressing can be derived, so those
+   come from the user or are left as <PLACEHOLDERS> in the report. */
+const reEsc=(s)=>String(s).replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+const migVrfLineRe=/^(\s*)(ip vrf forwarding|vrf forwarding|vrf member)\s+(\S+)/i;
+const migNameOk=(n)=>/^[A-Za-z0-9_.:-]{1,32}$/.test(String(n||''));
+function vrfDefBlock(d, vrf){
+  const L=String(d.rawText||'').split(/\r?\n/);
+  const re=new RegExp('^(ip vrf|vrf definition|vrf context)\\s+'+reEsc(vrf)+'\\s*$','i');
+  for(let i=0;i<L.length;i++) if(re.test(L[i])) return configBlock(d,i+1);
+  return null;
+}
+function vrfStyle(d){
+  if(isNxos(d)) return 'nxos';
+  return /^vrf definition /m.test(d.rawText||'') ? 'def' : 'ipvrf';
+}
+/* The per-VRF section of router bgp: IOS "address-family ipv4 vrf X",
+   NX-OS "vrf X" under router bgp. */
+function bgpVrfBlock(d, vrf){
+  const L=String(d.rawText||'').split(/\r?\n/);
+  for(let i=0;i<L.length;i++){
+    const t=L[i];
+    const m=t.match(/^\s+address-family\s+ipv4\s+(?:unicast\s+)?vrf\s+(\S+)/i) || t.match(/^\s+vrf\s+(\S+)\s*$/i);
+    if(!m || m[1]!==vrf) continue;
+    let j=i-1; while(j>=0 && /^\s/.test(L[j])) j--;
+    if(j<0 || !/^router bgp\b/i.test(L[j])) continue;
+    const ind=t.match(/^\s*/)[0].length, out=[t];
+    for(let k=i+1;k<L.length;k++){
+      const u=L[k]; if(!u.trim()) break;
+      const q=u.match(/^\s*/)[0].length;
+      if(q>ind) out.push(u); else { if(/^\s*exit-address-family/i.test(u)) out.push(u); break; }
+    }
+    return {header:L[j], lines:out};
+  }
+  return null;
+}
+/* Which VRF section of router bgp a config line sits in; null for global. */
+function bgpVrfOfLine(d, line){
+  const L=String(d.rawText||'').split(/\r?\n/);
+  let ind=((L[(line||0)-1]||'').match(/^\s*/)||[''])[0].length;
+  for(let i=(line||0)-2;i>=0;i--){
+    const t=L[i]; if(!t.trim()) continue;
+    const k=t.match(/^\s*/)[0].length;
+    if(k>=ind) continue;
+    const m=t.match(/^\s*address-family\s+ipv4\s+(?:unicast\s+)?vrf\s+(\S+)/i) || t.match(/^\s+vrf\s+(\S+)\s*$/i);
+    if(m) return m[1];
+    if(k===0) return null;
+    ind=k;
+  }
+  return null;
+}
+/* Put a cloned interface block into another VRF. */
+function sviInVrf(lines, d, name){
+  if(lines.some(l=>migVrfLineRe.test(l))) return lines.map(l=>l.replace(migVrfLineRe,(m,ind,kw)=>ind+kw+' '+name));
+  const ind=((lines[1]||' ').match(/^\s*/)||[' '])[0]||' ';
+  const kw=isNxos(d)?'vrf member':(vrfStyle(d)==='def'?'vrf forwarding':'ip vrf forwarding');
+  return [lines[0], ind+kw+' '+name, ...lines.slice(1)];
+}
+/* A static route line, re-pointed: another destination, next hop or VRF. */
+function cloneStatic(d, st, vrf, net, len, nhTxt){
+  const orig=lineAt(d, st.line);
+  let txt=orig.trim();
+  if(nhTxt!=null && st.nextHop!=null) txt=txt.replace(new RegExp('(\\s)'+reEsc(int2ip(st.nextHop))+'(?=\\s|$)'), '$1'+nhTxt);
+  if(net!=null) txt = /^\S+\s+\S+\s+(vrf\s+\S+\s+)?\d+\.\d+\.\d+\.\d+\/\d+/.test(txt)
+      ? txt.replace(/\d+\.\d+\.\d+\.\d+\/\d+/, int2ip(net)+'/'+len)
+      : txt.replace(/(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+)/, int2ip(net)+' '+maskOf(len));
+  const sv=st.vrf||'default';
+  if(vrf && sv!==vrf && sv!=='default') txt=txt.replace(new RegExp('(\\bvrf\\s+)'+reEsc(sv)+'(?=\\s)'),'$1'+vrf);
+  else if(vrf && vrf!=='default' && sv==='default' && !isNxos(d)) txt=txt.replace(/^ip route\s+/i,'ip route vrf '+vrf+' ');
+  if(isNxos(d) && vrf && vrf!=='default') return 'vrf context '+vrf+'\n  '+txt;
+  return txt;
+}
+/* The pattern VRF's way out: an SVI whose subnet also has a firewall on it.
+   Where there are several, the one its default route points into. */
+function migTransitOf(vrfInfo){
+  if(!vrfInfo) return null;
+  const byVlan=new Map();
+  for(const s of vrfInfo.svis){
+    const seg=STATE.model && STATE.model.subnets[cidr(s.net,s.len)];
+    if(!seg) continue;
+    const fws=seg.members.filter(m=>isFirewall(m.dev));
+    if(!fws.length) continue;
+    let e=byVlan.get(s.vlan);
+    if(!e){ e={vlan:s.vlan, net:s.net, len:s.len, svis:[], fws}; byVlan.set(s.vlan,e); }
+    e.svis.push(s);
+  }
+  const list=[...byVlan.values()];
+  if(!list.length) return null;
+  const dflt=(e)=>e.svis.some(s=>(s.dev.statics||[]).some(r=>(r.vrf||'default')===vrfInfo.vrf && r.len===0 && r.nextHop!=null && inNet(r.nextHop,e.net,e.len)))?1:0;
+  return list.sort((a,b)=>(dflt(b)-dflt(a)) || (b.svis.length-a.svis.length) || a.vlan-b.vlan)[0];
+}
+/* Addresses in the new transit, one for each address in the pattern's:
+   the same host numbers where they fit, otherwise numbered from the bottom. */
+function migTransitMap(tr, nv){
+  const map=new Map(), label=new Map();
+  if(!tr) return {map, label, tooSmall:false};
+  const order=[];
+  const put=(ip, lab)=>{ if(ip==null || label.has(ip)) return; label.set(ip,'<'+lab+'>'); order.push(ip); };
+  for(const s of tr.svis){
+    for(const v of (s.iface.vips||[])) put(v.ip,'TRANSIT-VIP');
+    const a=(s.iface.addrs||[]).find(x=>x.len<32 && inNet(x.ip,tr.net,tr.len)); if(a) put(a.ip,'TRANSIT-IP-'+s.dev.name);
+  }
+  for(const f of tr.fws){ const a=(f.iface.addrs||[]).find(x=>inNet(x.ip,tr.net,tr.len)); if(a) put(a.ip,'FIREWALL-IP-'+f.dev.name); }
+  if(nv.tNet==null){ for(const ip of order) map.set(ip,null); return {map, label, tooSmall:false}; }
+  const size=Math.pow(2,32-nv.tLen);
+  const offs=order.map(ip=>(ip-tr.net)>>>0);
+  if(offs.every(o=>o>0 && o<size-1)){ order.forEach((ip,k)=>map.set(ip,(nv.tNet+offs[k])>>>0)); return {map, label, tooSmall:false}; }
+  if(order.length>size-2){ for(const ip of order) map.set(ip,null); return {map, label, tooSmall:true}; }
+  order.slice().sort((a,b)=>a-b).forEach((ip,k)=>map.set(ip,(nv.tNet+1+k)>>>0));
+  return {map, label, tooSmall:false};
+}
+/* The pattern VRF to suggest for a new name: the one sharing most name parts
+   (FRA_DR is built like LON_DR, DMZ2 like DMZ); failing that, the
+   destination's VRF of the same name as the one the VLANs are in now; then
+   the biggest. */
+function migBestTemplate(name, vrfs, srcVrf){
+  const tok=(s)=>String(s||'').toLowerCase().split(/[_\-.:\s]+/).filter(Boolean);
+  const score=(a,b)=>{ let sc=0; for(const x of tok(a)) for(const y of tok(b)){
+    if(x===y) sc+=2; else if(Math.min(x.length,y.length)>=3 && (x.startsWith(y)||y.startsWith(x))) sc+=1; } return sc; };
+  const pick=(nm)=>{ let best=null, bs=0; for(const v of vrfs){ const sc=score(nm, v.vrf); if(sc>bs){ bs=sc; best=v; } } return best; };
+  const byName=pick(name); if(byName) return byName.vrf;
+  if(srcVrf && vrfs.some(v=>v.vrf===srcVrf)) return srcVrf;
+  const bySrc=srcVrf?pick(srcVrf):null; if(bySrc) return bySrc.vrf;
+  return (vrfs[0]||{}).vrf||null;
+}
+/* The header lines that enter a VRF's section of router bgp, renamed. */
+function migBgpSection(d, vrf, asName){
+  const bb=bgpVrfBlock(d, vrf);
+  if(!bb) return [isNxos(d) ? '  vrf '+asName : ' address-family ipv4 vrf '+asName].concat(isNxos(d)?['    address-family ipv4 unicast']:[]);
+  const hdr=bb.lines[0].replace(new RegExp('(vrf\\s+)'+reEsc(vrf)),'$1'+asName);
+  const nest=bb.lines.slice(1).filter(l=>/^\s*address-family\b/i.test(l)).slice(0,1);
+  return [hdr, ...nest];
+}
+/* NX-OS lines arrive wrapped one by one in "vrf context X"; show one wrapper
+   for a run of them. */
+function mergeVrfContext(lines){
+  const flat=[].concat(...lines.map(l=>String(l).split('\n')));
+  const out=[]; let open=null;
+  for(const l of flat){
+    if(/^vrf context \S+$/.test(l)){ if(l===open) continue; open=l; out.push(l); continue; }
+    if(!/^\s/.test(l)) open=null;
+    out.push(l);
+  }
+  return out;
+}
+function migAdder(plan){
+  return (d, section, lines, why)=>{
+    lines=mergeVrfContext(lines);
+    let e=plan.devices.get(d);
+    if(!e){ e={dev:d, site:(()=>{ try{ return siteOf(d).name; }catch(x){ return ''; } })(), blocks:[]}; plan.devices.set(d,e); }
     e.blocks.push({section, lines, why});
   };
+}
+const panQ=(s)=>/[\s"]/.test(String(s))?'"'+String(s).replace(/"/g,'')+'"':String(s);
+
+/* Everything the new VRF needs once, whatever moves into it. Also leaves
+   nv.ctx for the VLAN plans: the pattern, its transit and the address map. */
+function migNewVrfPlan(nv, dstSite, movingVlans){
+  const plan={kind:'vrf', nv, target:nv.name, conflicts:[], notes:[], devices:new Map(), mods:[]};
+  const add=migAdder(plan);
+  const inv=migVrfInventory(dstSite);
+  const tpl=inv.find(v=>v.vrf===nv.template);
+  nv.ctx={tpl:null, tr:null, map:new Map(), label:new Map(), T:'<TRANSIT-VLAN>', concrete:false, fwIf:new Map(), zoneNote:false};
+  if(!tpl){ plan.conflicts.push('The pattern VRF '+nv.template+' has no gateways in '+dstSite.name+'.'); return plan; }
+  if(inv.some(v=>v.vrf===nv.name)) plan.conflicts.push('VRF '+nv.name+' already has gateways in '+dstSite.name+'. Move into it as an existing VRF instead.');
+  const tr = nv.upstream==='firewall' ? migTransitOf(tpl) : null;
+  if(nv.upstream==='firewall' && !tr)
+    plan.notes.push('VRF '+nv.template+' has no transit to a firewall in '+dstSite.name+', so there is no upstream to copy. '+nv.name+' is built isolated; design how it is reached before moving hosts.');
+  const tm=migTransitMap(tr, nv);
+  const T = nv.transitVlan!=null ? String(nv.transitVlan) : '<TRANSIT-VLAN>';
+  const concrete = !!tr && nv.transitVlan!=null && nv.tNet!=null && !tm.tooSmall;
+  nv.ctx={tpl, tr, map:tm.map, label:tm.label, T, concrete, fwIf:new Map(), zone:null};
+  const ipTxt=(ip)=>{ const m=tm.map.get(ip); return m!=null ? int2ip(m) : (tm.label.get(ip)||'<ADDRESS>'); };
+  plan.pattern={vrf:tpl.vrf, transit: tr ? {vlan:tr.vlan, cidr:cidr(tr.net,tr.len), fws:tr.fws.map(f=>f.dev.name+' '+f.iface.name+(f.iface.zone?' (zone '+f.iface.zone+')':''))} : null};
+
+  // --- checks ---
+  if(tr){
+    if(tm.tooSmall) plan.conflicts.push(cidr(nv.tNet,nv.tLen)+' is too small for the transit: it needs '+tm.label.size+' addresses (gateways, virtual gateway, firewalls).');
+    if(nv.transitVlan!=null){
+      if((movingVlans||[]).includes(nv.transitVlan)) plan.conflicts.push('Transit VLAN '+nv.transitVlan+' is also one of the VLANs being moved.');
+      for(const d of dstSite.devices){
+        if((d.vlans||{})[nv.transitVlan] || d.interfaces.some(i=>svIdOf(i.name)===nv.transitVlan || (isFirewall(d) && new RegExp('\\.'+nv.transitVlan+'$').test(i.name))))
+          plan.conflicts.push('VLAN '+nv.transitVlan+' is already in use on '+d.name+'; choose another transit VLAN.');
+      }
+    } else plan.notes.push('No transit VLAN given: '+T+' in the configuration below is a placeholder.');
+    if(nv.tNet!=null){
+      for(const d of STATE.devices) for(const i of d.interfaces) for(const a of (i.addrs||[]))
+        if(a.len<32 && (inNet(a.ip,nv.tNet,nv.tLen) || inNet(nv.tNet,netOf(a.ip,a.len),a.len)) && !(a.len===0))
+          plan.conflicts.push('Transit '+cidr(nv.tNet,nv.tLen)+' overlaps '+cidr(netOf(a.ip,a.len),a.len)+' on '+d.name+' '+i.name+'.');
+    } else plan.notes.push('No transit subnet given: the addresses in angle brackets are placeholders, and the path check below treats '+nv.name+' as unreachable until they are filled in.');
+  }
+  let rdSeen=false, bgpGlobal=false;
+
+  // --- the gateways: definition, BGP, transit, routes ---
+  for(const d of tpl.devices){
+    const lines=[];
+    if(vrfDefBlock(d, nv.name)) plan.notes.push(d.name+' already defines VRF '+nv.name+'; that definition is kept as it is.');
+    else {
+      const blk=vrfDefBlock(d, tpl.vrf);
+      if(blk){
+        lines.push(...blk.filter((ln,k)=>k===0 || !/^\s*ipv?6?\s+route\s/i.test(ln)).map((ln,k)=>{
+          if(k===0) return ln.replace(new RegExp('\\s'+reEsc(tpl.vrf)+'\\s*$'),' '+nv.name);
+          if(/^\s*rd\s/i.test(ln)){ rdSeen=true; return ln.replace(/^(\s*rd\s+).*/i,'$1<RD-'+nv.name+'>'); }
+          if(/^\s*route-target\s/i.test(ln)){ rdSeen=true; return ln.replace(/^(\s*route-target\s+(?:both|import|export)\s+)\S+(.*)$/i,'$1<RT-'+nv.name+'>$2'); }
+          if(/^\s*description\s/i.test(ln)) return ln.replace(/description.*/i,'description Created for migration from pattern '+tpl.vrf);
+          return ln;
+        }));
+      } else {
+        const st=vrfStyle(d);
+        lines.push(st==='nxos' ? 'vrf context '+nv.name : st==='def' ? 'vrf definition '+nv.name+'\n address-family ipv4\n exit-address-family' : 'ip vrf '+nv.name);
+      }
+    }
+    const bb=bgpVrfBlock(d, tpl.vrf);
+    if(bb && !bgpVrfBlock(d, nv.name)){
+      lines.push(bb.header);
+      bb.lines.forEach((ln,k)=>{
+        if(k===0){ lines.push(ln.replace(new RegExp('(vrf\\s+)'+reEsc(tpl.vrf)),'$1'+nv.name)); return; }
+        if(/^\s*network\s/i.test(ln)) return;              // each VLAN adds its own
+        if(/^\s*rd\s/i.test(ln)){ rdSeen=true; lines.push(ln.replace(/^(\s*rd\s+).*/i,'$1<RD-'+nv.name+'>')); return; }
+        lines.push(ln);
+      });
+    } else if(!bb && (d.bgp&&d.bgp.networks||[]).some(n=>tpl.svis.some(s=>s.dev===d && s.net===n.net && s.len===n.len))) bgpGlobal=true;
+
+    let why='Defines VRF '+nv.name+' like '+tpl.vrf+'.';
+    if(tr){
+      const s=tr.svis.find(x=>x.dev===d);
+      if(s){
+        const blk=configBlock(d, s.iface.line);
+        const sAddr=(s.iface.addrs||[]).find(x=>x.len<32);
+        const sVip=s.iface.vips&&s.iface.vips[0];
+        const newIp = sAddr ? tm.map.get(sAddr.ip) : null;
+        const newVip = sVip ? tm.map.get(sVip.ip) : null;
+        const tLen = nv.tNet!=null ? nv.tLen : tr.len;
+        let out=blk.map((ln,k)=>{
+          if(k===0) return ln.replace(/vlan\s*\d+/i,'Vlan'+T);
+          if(/^\s*description\b/i.test(ln)) return ln.replace(/description.*/i,'description Transit to firewall for VRF '+nv.name);
+          if(/^\s*ip address\b/i.test(ln) && sAddr){
+            const a=ipTxt(sAddr.ip);
+            if(/\/\d+/.test(ln)) return ln.replace(/ip address\s+\S+\/\d+/i,'ip address '+a+'/'+tLen);
+            return ln.replace(/ip address\s+\S+\s+\S+/i,'ip address '+a+' '+(nv.tNet!=null?maskOf(tLen):maskOf(tr.len)));
+          }
+          if(sVip){
+            if(/^\s*standby\s+\d+/i.test(ln)){
+              let t=ln.replace(/standby\s+\d+/i,'standby '+T);
+              if(/standby\s+\S+\s+ip\s+\S+/i.test(t)) t=t.replace(/(standby\s+\S+\s+ip\s+)\S+/i,'$1'+ipTxt(sVip.ip));
+              return t;
+            }
+            if(/^\s*hsrp\s+\d+/i.test(ln)) return ln.replace(/hsrp\s+\d+/i,'hsrp '+T);
+            if(/^\s+ip\s+\d+\.\d+\.\d+\.\d+\s*$/i.test(ln)) return ln.replace(/ip\s+\S+/i,'ip '+ipTxt(sVip.ip));
+          }
+          return ln;
+        });
+        out=sviInVrf(out, d, nv.name);
+        lines.push('vlan '+T, '  name '+nv.name+'-TRANSIT', ...out);
+        for(const i of d.interfaces)
+          if(Array.isArray(i.allowed) && i.allowed.includes(tr.vlan) && !(nv.transitVlan!=null && i.allowed.includes(nv.transitVlan)))
+            lines.push('interface '+i.name, '  switchport trunk allowed vlan add '+T);
+        const mod={dev:d, addIfaces:[], addRoutes:[]};
+        if(concrete && newIp!=null)
+          mod.addIfaces.push({name:'Vlan'+T, vrf:nv.name, addrs:[{ip:newIp, len:nv.tLen}], shutdown:false,
+            vips: (sVip && newVip!=null) ? [{group:T, ip:newVip, proto:'HSRP', prio:sVip.prio||100}] : []});
+        // the pattern's routes toward the firewall come across; others are listed
+        let skipped=0;
+        for(const st of (d.statics||[])){
+          if((st.vrf||'default')!==tpl.vrf) continue;
+          if(st.nextHop!=null && inNet(st.nextHop, tr.net, tr.len)){
+            lines.push(cloneStatic(d, st, nv.name, null, null, ipTxt(st.nextHop)));
+            const nh=tm.map.get(st.nextHop);
+            if(concrete && nh!=null) mod.addRoutes.push({net:st.net, len:st.len, vrf:nv.name, nextHop:nh, iface:null, ad:st.ad||1});
+          } else skipped++;
+        }
+        if(skipped) plan.notes.push(d.name+': '+skipped+' route'+(skipped===1?'':'s')+' in '+tpl.vrf+' leave'+(skipped===1?'s':'')+' by other paths (DCI, WAN), which '+nv.name+' does not have. Not copied.');
+        plan.mods.push(mod);
+        why='Defines VRF '+nv.name+' like '+tpl.vrf+', with a transit to the firewall like VLAN '+tr.vlan+' ('+cidr(tr.net,tr.len)+').';
+      }
+    }
+    add(d, 'New VRF', lines, why);
+  }
+
+  // --- the firewalls on the pattern's transit ---
+  if(tr){
+    const seen=new Set();
+    for(const f of tr.fws){
+      const d=f.dev; if(seen.has(d.id)) continue; seen.add(d.id);
+      const parent=f.iface.name.split('.')[0];
+      const kind=/^ae/i.test(parent)?'aggregate-ethernet':/^ethernet/i.test(parent)?'ethernet':null;
+      const ifn=parent+'.'+T;
+      const vs=f.iface.vsys||'vsys1';
+      const multi=/^set vsys /m.test(d.rawText||'') || Object.keys(d.vsysVr||{}).length>1;
+      const pre=multi?'set vsys '+vs+' ':'set ';
+      const zone=nv.zone || f.iface.zone || '<ZONE>';
+      const vr=f.iface.vrf && f.iface.vrf!=='default' ? f.iface.vrf : '<VIRTUAL-ROUTER>';
+      const a=(f.iface.addrs||[]).find(x=>inNet(x.ip,tr.net,tr.len));
+      const fwIp=a?tm.map.get(a.ip):null;
+      const tLen=nv.tNet!=null?nv.tLen:tr.len;
+      const lines=[];
+      if(d.vendor==='palo-alto' && kind){
+        lines.push('set network interface '+kind+' '+parent+' layer3 units '+ifn+' tag '+T);
+        lines.push('set network interface '+kind+' '+parent+' layer3 units '+ifn+' ip '+(a?ipTxt(a.ip):'<FIREWALL-IP>')+'/'+tLen);
+        if(Object.keys(d.vsysVr||{}).length>1 || /import network interface/.test(d.rawText||'')) lines.push('set vsys '+vs+' import network interface '+ifn);
+        lines.push(pre+'zone '+panQ(zone)+' network layer3 '+ifn);
+        lines.push('set network virtual-router '+panQ(vr)+' interface '+ifn);
+      } else lines.push('! add a sub-interface for VLAN '+T+' in the same way as '+f.iface.name+', in zone '+zone+' and virtual router '+vr);
+      const zones=new Set([].concat(d.zones?[...d.zones]:[]));
+      let why='Joins the new transit like '+f.iface.name+' joins VLAN '+tr.vlan+(f.iface.zone?' (zone '+f.iface.zone+')':'')+'.';
+      if(nv.zone && nv.zone!==f.iface.zone){
+        why+=' Zone '+nv.zone+(zones.has(nv.zone)?'':' is new on this firewall')+': security rules to and from it are needed, or its traffic is dropped.';
+        nv.ctx.zoneNote=true;
+      }
+      add(d, 'New VRF — firewall', lines, why);
+      if(concrete && fwIp!=null){
+        plan.mods.push({dev:d, addIfaces:[{name:ifn, vrf:f.iface.vrf, zone:nv.zone||f.iface.zone, vsys:f.iface.vsys, addrs:[{ip:fwIp, len:nv.tLen}], shutdown:false}]});
+        nv.ctx.fwIf.set(d.id, ifn);
+      }
+    }
+  }
+  if(rdSeen) plan.notes.push('Route distinguisher and route targets are placeholders (<RD-'+nv.name+'>, <RT-'+nv.name+'>): take them from your RD/RT plan.');
+  if(bgpGlobal) plan.notes.push(tpl.vrf+' subnets are advertised from global BGP on these gateways, which does not carry a VRF. '+nv.name+' is not put into BGP'+(tr?'; it is reached through the firewall.':'.'));
+  if(nv.upstream!=='firewall') plan.notes.push(nv.name+' is isolated: no transit, no default route. Only hosts inside it reach its subnets.');
+  return plan;
+}
+
+/* The plan for one VLAN. newVrf: move into a VRF created by migNewVrfPlan. */
+function migPlanOne(item, srcSite, dstSite, targetVrf, newVrf){
+  const plan={item, target:targetVrf, conflicts:[], notes:[], devices:new Map(), mods:[], newVrf:newVrf?newVrf.name:null};
+  const add=migAdder(plan);
   const S={net:item.net, len:item.len}, sCidr=cidr(item.net,item.len);
-  const vrfInfo=migVrfInventory(dstSite).find(v=>v.vrf===targetVrf);
-  if(!vrfInfo){ plan.conflicts.push('The VRF '+targetVrf+' has no gateways in '+dstSite.name+'.'); return plan; }
+  const ctx=newVrf?newVrf.ctx:null;
+  const vrfInfo = newVrf ? (ctx&&ctx.tpl) : migVrfInventory(dstSite).find(v=>v.vrf===targetVrf);
+  if(!vrfInfo){ plan.conflicts.push(newVrf ? 'The pattern VRF '+newVrf.template+' has no gateways in '+dstSite.name+'.' : 'The VRF '+targetVrf+' has no gateways in '+dstSite.name+'.'); return plan; }
+  const isolated = !!newVrf && !(ctx && ctx.tr);
 
   // --- checks in the destination ---
   for(const d of dstSite.devices){
@@ -6156,7 +6511,7 @@ function migPlanOne(item, srcSite, dstSite, targetVrf){
       }
       return ln;
     });
-    lines.push(...out);
+    lines.push(...(newVrf ? sviInVrf(out, d, newVrf.name) : out));
     if(ip==null) plan.notes.push(d.name+': the source had fewer gateways than the destination pair \u2014 choose an address in '+sCidr+' for its Vlan'+item.vlan+'.');
     // trunks that carry the reference VLAN carry this one too
     for(const i of d.interfaces)
@@ -6168,14 +6523,34 @@ function migPlanOne(item, srcSite, dstSite, targetVrf){
       const orig=lineAt(d, net.line);
       const repl = /\/\d+/.test(orig) ? orig.replace(/\S+\/\d+/, sCidr)
                  : orig.replace(/network\s+\S+\s+mask\s+\S+/i,'network '+int2ip(item.net)+' mask '+maskOf(item.len));
-      lines.push('router bgp '+d.bgp.asn, repl.replace(/^\s*/,'  '));
+      /* in the same BGP section as the reference: global, or its VRF's
+         (address-family ipv4 vrf X on IOS, vrf X on NX-OS) — for a new VRF,
+         the new VRF's section, which the VRF plan creates */
+      const sec=bgpVrfOfLine(d, net.line);
+      if(sec) lines.push('router bgp '+d.bgp.asn, ...migBgpSection(d, sec, newVrf?newVrf.name:sec), repl);
+      else if(!newVrf) lines.push('router bgp '+d.bgp.asn, repl.replace(/^\s*/,'  '));
     }
     // a static route this gateway had for the subnet is now wrong: it is connected
     for(const st of (d.statics||[])) if(st.net===item.net && st.len===item.len)
-      lines.push('no '+lineAt(d, st.line).trim());
-    add(d,'Destination gateway', lines, 'Becomes a gateway for '+sCidr+' in VRF '+targetVrf+', like '+sib.iface.name+' ('+cidr(sib.net,sib.len)+').');
+      lines.push((/^\s/.test(lineAt(d,st.line)) && isNxos(d) && (st.vrf||'default')!=='default' ? 'vrf context '+st.vrf+'\n  ' : '')+'no '+lineAt(d, st.line).trim());
+    /* Into a new VRF behind the firewall: the pattern VRF on this switch must
+       now send the subnet to the firewall, which routes it into the new VRF.
+       Its default route usually does that already once the old static is gone. */
+    const tplAdds=[];
+    if(newVrf && ctx && ctx.tr){
+      const tv=vrfInfo.vrf;
+      const toFw=(d.statics||[]).filter(st=>(st.vrf||'default')===tv && st.nextHop!=null && inNet(st.nextHop, ctx.tr.net, ctx.tr.len)).sort((a,b)=>a.len-b.len)[0];
+      const cover=(d.statics||[]).filter(st=>(st.vrf||'default')===tv && inNet(item.net, st.net, st.len) && st.len<=item.len && !(st.net===item.net&&st.len===item.len))
+        .sort((a,b)=>b.len-a.len)[0];
+      if(toFw && !(cover && cover.nextHop!=null && inNet(cover.nextHop, ctx.tr.net, ctx.tr.len))){
+        lines.push(cloneStatic(d, toFw, tv, item.net, item.len, null));
+        tplAdds.push({net:item.net, len:item.len, vrf:tv, nextHop:toFw.nextHop, iface:null});
+      }
+    }
+    add(d,'Destination gateway', lines, 'Becomes a gateway for '+sCidr+' in '+(newVrf?'the new ':'')+'VRF '+targetVrf+', like '+sib.iface.name+' ('+cidr(sib.net,sib.len)+(newVrf?' in '+vrfInfo.vrf:'')+').'+
+      (tplAdds.length?' VRF '+vrfInfo.vrf+' here reaches the subnet through the firewall.':''));
     plan.mods.push({dev:d, addSvi:{name:'Vlan'+item.vlan, vrf:targetVrf, ip, len:item.len, vip:item.vip, group, prio:(sibVip&&sibVip.prio)||100},
-                    delStatics:(d.statics||[]).filter(st=>st.net===item.net&&st.len===item.len)});
+                    delStatics:(d.statics||[]).filter(st=>st.net===item.net&&st.len===item.len), addRoutes:tplAdds});
   });
 
   // --- source gateways: interface, VLAN, trunks, advertisement come out ---
@@ -6184,7 +6559,10 @@ function migPlanOne(item, srcSite, dstSite, targetVrf){
     for(const i of d.interfaces)
       if(Array.isArray(i.allowed) && i.allowed.includes(item.vlan)) lines.push('interface '+i.name, '  switchport trunk allowed vlan remove '+item.vlan);
     const net=(d.bgp&&d.bgp.networks||[]).find(n=>n.net===item.net && n.len===item.len);
-    if(net) lines.push('router bgp '+d.bgp.asn, '  no '+lineAt(d, net.line).trim());
+    if(net){
+      const sec=bgpVrfOfLine(d, net.line), ind=(lineAt(d, net.line).match(/^\s*/)||['  '])[0]||'  ';
+      lines.push('router bgp '+d.bgp.asn, ...(sec?migBgpSection(d, sec, sec):[]), (sec?ind:'  ')+'no '+lineAt(d, net.line).trim());
+    }
     add(d,'Source gateway', lines, 'No longer a gateway for '+sCidr+'.');
     plan.mods.push({dev:d, delSvi:'Vlan'+item.vlan});
   }
@@ -6201,12 +6579,22 @@ function migPlanOne(item, srcSite, dstSite, targetVrf){
       const rR=lookup(d, refHost, v); if(!rR || rR.type==='connected') continue;
       if(rR.type==='igp') continue;          // inferred, not configured: no route to copy
       const rS=lookup(d, sHost, v);
-      const same = rS && rS.type!=='connected' && rS.nextHop===rR.nextHop && String(rS.iface||'')===String(rR.iface||'');
+      /* Into a new VRF: a route that reaches the pattern through its transit
+         must reach the moved subnet through the new transit instead. */
+      let nhInt=rR.nextHop, nhTxt=rR.nextHop!=null?int2ip(rR.nextHop):null, nhIf=rR.iface, applyAdd=true, intoNew=false;
+      if(ctx && ctx.tr && rR.nextHop!=null && inNet(rR.nextHop, ctx.tr.net, ctx.tr.len)){
+        intoNew=true;
+        const m=ctx.map.get(rR.nextHop);
+        if(ctx.concrete && m!=null){ nhInt=m; nhTxt=int2ip(m); nhIf=ctx.fwIf.get(d.id)||null; }
+        else { nhTxt=ctx.label.get(rR.nextHop)||'<TRANSIT-VIP>'; applyAdd=false; }
+      }
+      const same = !intoNew && rS && rS.type!=='connected' && rS.nextHop===rR.nextHop && String(rS.iface||'')===String(rR.iface||'');
       if(same) continue;
       const lines=[], why=[];
-      const rRcoversS = inNet(item.net, rR.net, rR.len) && rR.len<=item.len;
+      const rRcoversS = inNet(item.net, rR.net, rR.len) && rR.len<=item.len && !intoNew;
       const exactS = rS && rS.type!=='connected' && rS.net===item.net && rS.len===item.len;
       const dynamic = /bgp|ospf|eigrp/.test(rR.type);
+      const wantAdd = !isolated && !dynamic && !rRcoversS && rR.len>0;
       // a route that exists only for this subnet, pointing the old way, comes out
       if(exactS && (rS.type==='static' || rS.type==='table')){
         if(rS.type==='static'){
@@ -6218,30 +6606,32 @@ function migPlanOne(item, srcSite, dstSite, targetVrf){
       }
       // then route it the way the reference is routed, unless that already covers it
       if(dynamic){
-        if(!exactS) { why.push('learns '+plan.reference.cidr+' dynamically ('+rR.type+'); it will learn '+sCidr+' once the destination advertises it'); }
-      } else if(!rRcoversS && rR.len>0){
-        const nh=rR.nextHop!=null?int2ip(rR.nextHop):null;
+        if(!exactS && !isolated) { why.push('learns '+plan.reference.cidr+' dynamically ('+rR.type+'); it will learn '+sCidr+' once the destination advertises it'); }
+      } else if(wantAdd){
+        const nh=nhTxt;
         if(d.vendor==='palo-alto'){
           const nm='MIG-'+int2ip(item.net)+'-'+item.len;
           lines.push('set network virtual-router "'+v+'" routing-table ip static-route '+nm+' destination '+sCidr);
           lines.push('set network virtual-router "'+v+'" routing-table ip static-route '+nm+' nexthop ip-address '+nh);
         } else if(rR.type==='static' && rR.line){
           const orig=lineAt(d, rR.line);
-          const txt = /\/\d+/.test(orig) ? orig.replace(/\d+\.\d+\.\d+\.\d+\/\d+/, sCidr)
+          let txt = /\/\d+/.test(orig) ? orig.replace(/\d+\.\d+\.\d+\.\d+\/\d+/, sCidr)
                     : orig.replace(/(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+)/, int2ip(item.net)+' '+maskOf(item.len));
+          if(intoNew && rR.nextHop!=null) txt=txt.replace(new RegExp('(\\s)'+reEsc(int2ip(rR.nextHop))+'(?=\\s|$)'),'$1'+nh);
           lines.push((/^\s/.test(orig)&&isNxos(d)?'vrf context '+v+'\n':'')+txt);
         } else {
           lines.push(isNxos(d) ? (v!=='default'?'vrf context '+v+'\n  ':'')+'ip route '+sCidr+' '+nh
                                : 'ip route '+(v!=='default'?'vrf '+v+' ':'')+int2ip(item.net)+' '+maskOf(item.len)+' '+nh);
         }
-        why.push('reaches '+plan.reference.cidr+' via '+(nh||rR.iface)+'; '+sCidr+' must go the same way');
+        why.push(intoNew ? 'reaches '+plan.reference.cidr+' through the transit of '+vrfInfo.vrf+'; '+sCidr+' goes through the new transit of '+targetVrf
+                         : 'reaches '+plan.reference.cidr+' via '+(nh||rR.iface)+'; '+sCidr+' must go the same way');
       }
       if(!lines.length && !why.length) continue;
-      if(!lines.length && dynamic && !exactS){ add(d,'Routing (no change)', [], why.join('; ')+'.'); continue; }
+      if(!lines.length && dynamic && !exactS && !isolated){ add(d,'Routing (no change)', [], why.join('; ')+'.'); continue; }
       if(!lines.length) continue;
       add(d, srcGwSet.has(d.id)?'Source gateway \u2014 routing':'Routing', lines, why.join('; ')+'.');
       plan.mods.push({dev:d, vrf:v, delRoute: exactS?{net:rS.net,len:rS.len,vrf:v}:null,
-                      addRoute: (!dynamic && !rRcoversS && rR.len>0) ? {net:item.net,len:item.len,vrf:v,nextHop:rR.nextHop,iface:rR.iface} : null});
+                      addRoute: (wantAdd && applyAdd) ? {net:item.net,len:item.len,vrf:v,nextHop:nhInt,iface:nhIf} : null});
     }
   }
 
@@ -6251,8 +6641,10 @@ function migPlanOne(item, srcSite, dstSite, targetVrf){
      For every rule that names the reference through something narrower than
      "any", add an address object for the moved subnet on the same side. */
   const objName='MIG-'+int2ip(item.net)+'-'+item.len;
+  if(newVrf && ctx && ctx.zoneNote)
+    plan.notes.push(sCidr+' sits behind zone '+newVrf.zone+' on the firewall. The rule changes below cover addresses only; rules naming that zone have to be written.');
   for(const d of model.devices){
-    if(!isFirewall(d) || d.vendor!=='palo-alto') continue;
+    if(isolated || !isFirewall(d) || d.vendor!=='palo-alto') continue;
     const multi=new Set((d.rules||[]).map(r=>r.vsys||'vsys1')).size>1;
     const adds=[];
     for(const r of (d.rules||[])){
@@ -6314,8 +6706,10 @@ function migAfterModel(plans){
         if(r) r[a.side]=[].concat(r[a.side]||[], [m.policyAdd.obj]);
       }
     }
-    if(m.addRoute){
-      const r={net:m.addRoute.net, len:m.addRoute.len, vrf:m.addRoute.vrf, nextHop:m.addRoute.nextHop, iface:m.addRoute.iface||null, ad:1};
+    for(const ni of (m.addIfaces||[])) if(!c.interfaces.some(i=>i.name.toLowerCase()===ni.name.toLowerCase()))
+      c.interfaces.push(Object.assign({desc:'', ospf:false, vips:[]}, ni, {addrs:ni.addrs.map(a=>Object.assign({},a))}));
+    for(const ar of [].concat(m.addRoute?[m.addRoute]:[], m.addRoutes||[])){
+      const r={net:ar.net, len:ar.len, vrf:ar.vrf, nextHop:ar.nextHop, iface:ar.iface||null, ad:ar.ad||1};
       if(c.tableAuthoritative) c.manualRoutes.push(r); else (c.statics=c.statics||[]).push(r);
     }
   }
@@ -6340,9 +6734,25 @@ function migReportMarkdown(plans, srcSite, dstSite, verify){
   L.push('# DC migration plan: '+srcSite.name+' \u2192 '+dstSite.name, '');
   L.push('Generated '+new Date().toLocaleString()+' by Dynagram v'+APP_VERSION+'.', '');
   for(const p of plans){
+    if(p.kind==='vrf'){
+      L.push('## New VRF '+p.nv.name+' in '+dstSite.name, '');
+      L.push('- Built like VRF `'+p.nv.template+'`');
+      L.push('- Upstream: '+(p.pattern&&p.pattern.transit
+        ? 'through the firewall, like VLAN '+p.pattern.transit.vlan+' ('+p.pattern.transit.cidr+') to '+p.pattern.transit.fws.join(', ')+
+          ' \u2014 transit VLAN '+(p.nv.transitVlan!=null?p.nv.transitVlan:'not set')+', subnet '+(p.nv.tNet!=null?cidr(p.nv.tNet,p.nv.tLen):'not set')+(p.nv.zone?', zone '+p.nv.zone:'')
+        : 'none (isolated)'), '');
+      if(p.conflicts.length){ L.push('### Must be resolved first',''); for(const c of p.conflicts) L.push('- '+c); L.push(''); }
+      if(p.notes.length){ L.push('### Notes',''); for(const n of p.notes) L.push('- '+n); L.push(''); }
+      L.push('### Changes per device','');
+      for(const e of p.devices.values()) for(const b of e.blocks){
+        L.push('**'+e.dev.name+'** \u2014 '+(e.site||'')+' \u2014 '+b.section, '', b.why, '');
+        if(b.lines.length){ L.push('```'); L.push(...b.lines.join('\n').split('\n')); L.push('```',''); }
+      }
+      continue;
+    }
     const it=p.item;
     L.push('## VLAN '+it.vlan+(it.name?' ('+it.name+')':'')+' \u2014 '+cidr(it.net,it.len), '');
-    L.push('- From VRF `'+it.vrf+'` in '+srcSite.name+' to VRF `'+p.target+'` in '+dstSite.name);
+    L.push('- From VRF `'+it.vrf+'` in '+srcSite.name+' to '+(p.newVrf?'the new ':'')+'VRF `'+p.target+'` in '+dstSite.name);
     if(p.reference) L.push('- Modelled on '+p.reference.cidr+' ('+p.reference.dev+' '+p.reference.iface+')');
     L.push('');
     if(p.conflicts.length){ L.push('### Must be resolved first',''); for(const c of p.conflicts) L.push('- '+c); L.push(''); }
@@ -6370,6 +6780,10 @@ function showMigration(){
   const sites=migSites();
   let src=sites[0]?sites[0].id:null, dst=sites[1]?sites[1].id:(sites[0]?sites[0].id:null);
   let q='', picked=new Set(), targetVrf=null, perRow={}, view='pick', planState=null;
+  /* VRFs to create at the destination. They exist only in this screen until
+     the plan is built; each is {name, template, upstream, transitVlan, tNet, tLen, zone}. */
+  let newVrfs=[], nvOpen=false, nvErr='';
+  const nvForm={name:'', template:null, tplManual:false, upstream:'firewall', tvlan:'', tnet:'', zone:''};
   const siteBy=(id)=>sites.find(x=>x.id===id);
   const close=()=>{ back.remove(); box.remove(); document.removeEventListener('keydown',esck); };
   const esck=(e)=>{ if(e.key==='Escape') close(); };
@@ -6384,8 +6798,41 @@ function showMigration(){
     if(view==='plan') return paintPlan();
     const S=siteBy(src), D=siteBy(dst);
     const vlans=migVlanInventory(S), vrfs=migVrfInventory(D);
-    if(!targetVrf || !vrfs.some(v=>v.vrf===targetVrf)) targetVrf=vrfs[0]?vrfs[0].vrf:null;
+    const allNames=[...vrfs.map(v=>v.vrf), ...newVrfs.map(n=>n.name)];
+    if(!targetVrf || !allNames.includes(targetVrf)) targetVrf=allNames[0]||null;
     const key=(it)=>it.vlan+'|'+it.net+'/'+it.len;
+    const rowOpts=(k)=>vrfs.map(v=>'<option value="'+esc(v.vrf)+'"'+(((perRow[k]||targetVrf)===v.vrf)?' selected':'')+'>'+esc(v.vrf)+'</option>').join('')+
+      newVrfs.map(n=>'<option value="'+esc(n.name)+'"'+(((perRow[k]||targetVrf)===n.name)?' selected':'')+'>'+esc(n.name)+' (new)</option>').join('');
+    // the create form: default name is the VRF the selected VLANs are in now
+    const pickedItems=vlans.filter(it=>picked.has(key(it)));
+    if(!nvForm.name && pickedItems[0] && !allNames.includes(pickedItems[0].vrf)) nvForm.name=pickedItems[0].vrf;
+    if(!nvForm.tplManual || !vrfs.some(v=>v.vrf===nvForm.template)) nvForm.template=migBestTemplate(nvForm.name, vrfs, pickedItems[0]&&pickedItems[0].vrf);
+    const tplInfo=vrfs.find(v=>v.vrf===nvForm.template);
+    const tplTr=migTransitOf(tplInfo);
+    const trDesc=tplTr ? 'VLAN '+tplTr.vlan+' ('+cidr(tplTr.net,tplTr.len)+') to '+
+      [...new Set(tplTr.fws.map(f=>f.dev.name+' '+f.iface.name))].join(', ')+(tplTr.fws[0]&&tplTr.fws[0].iface.zone?', zone '+tplTr.fws[0].iface.zone:'') : '';
+    const nvDesc=(n)=>'built like '+n.template+' · '+(n.upstream==='firewall'
+      ? 'via firewall'+(n.transitVlan!=null?', transit VLAN '+n.transitVlan:'')+(n.tNet!=null?' '+cidr(n.tNet,n.tLen):'')+(n.zone?', zone '+n.zone:'')+
+        (n.transitVlan==null||n.tNet==null?' — transit to fill in':'')
+      : 'isolated');
+    const nvPanel = !nvOpen
+      ? '<button class="btn" id="nv-open" style="margin:8px">+ Create a new VRF in '+esc(D.name)+'</button>'+
+        '<button class="btn" id="nv-same" style="margin:8px 8px 8px 0" title="For each selected VLAN, a VRF with the name it has now, where '+esc(D.name)+' has none"'+(pickedItems.length?'':' disabled')+'>Same names as source</button>'
+      : '<div class="mig-new"><b>New VRF in '+esc(D.name)+'</b>'+
+          '<div class="mig-nvrow"><label>Name <input id="nv-name" value="'+esc(nvForm.name)+'" placeholder="e.g. '+esc((pickedItems[0]&&pickedItems[0].vrf)||'APP_VRF')+'"></label>'+
+            '<label>Build it like <select id="nv-tpl">'+vrfs.map(v=>'<option'+(v.vrf===nvForm.template?' selected':'')+'>'+esc(v.vrf)+'</option>').join('')+'</select></label></div>'+
+          '<div class="muted" style="font-size:11.5px;margin:2px 0 6px">Same gateways, definition syntax and interface style as the VRF it is built like.</div>'+
+          '<label class="mig-nvopt"><input type="radio" name="nv-up" value="firewall"'+(nvForm.upstream==='firewall'&&tplTr?' checked':'')+(tplTr?'':' disabled')+'> '+
+            (tplTr ? 'Through the firewall, like '+esc(nvForm.template)+': '+esc(trDesc) : '<span class="muted">Through the firewall — '+esc(nvForm.template||'')+' has no transit to a firewall to copy</span>')+'</label>'+
+          (nvForm.upstream==='firewall' && tplTr
+            ? '<div class="mig-nvrow" style="padding-left:22px"><label>Transit VLAN <input id="nv-tv" size="5" value="'+esc(nvForm.tvlan)+'"></label>'+
+              '<label>subnet <input id="nv-tn" size="16" value="'+esc(nvForm.tnet)+'" placeholder="e.g. 10.20.5.0/24"></label>'+
+              '<label>zone <input id="nv-zone" size="10" value="'+esc(nvForm.zone)+'" placeholder="'+esc((tplTr.fws[0]&&tplTr.fws[0].iface.zone)||'')+'"></label></div>'+
+              '<div class="muted" style="font-size:11.5px;padding-left:22px;margin-bottom:4px">Optional. Blank fields stay as placeholders in the report, and the path check treats the VRF as unreachable until they are set.</div>'
+            : '')+
+          '<label class="mig-nvopt"><input type="radio" name="nv-up" value="isolated"'+(nvForm.upstream==='isolated'||!tplTr?' checked':'')+'> Isolated — no route in or out</label>'+
+          (nvErr?'<div class="mig-err">'+esc(nvErr)+'</div>':'')+
+          '<div style="margin-top:8px"><button class="btn btn-go" id="nv-add">Add VRF</button> <button class="btn" id="nv-cancel">Cancel</button></div></div>';
     const vis=vlans.filter(it=>!q || [it.vlan, it.name, cidr(it.net,it.len), it.vrf, ...it.gateways.map(g=>g.dev.name)].join(' ').toLowerCase().includes(q.toLowerCase()));
     const opt=(sel)=>sites.map(x=>'<option value="'+esc(x.id)+'"'+(x.id===sel?' selected':'')+'>'+esc(x.name)+' ('+x.devices.length+')</option>').join('');
     const nPicked=vlans.filter(it=>picked.has(key(it))).length;
@@ -6406,7 +6853,7 @@ function showMigration(){
             return '<tr class="'+(on?'mig-on':'')+'"><td><input type="checkbox" data-k="'+esc(k)+'"'+(on?' checked':'')+'></td>'+
               '<td><b>'+it.vlan+'</b></td><td>'+esc(it.name)+'</td><td>'+cidr(it.net,it.len)+'</td><td>'+esc(it.vrf)+'</td>'+
               '<td class="muted">'+esc(it.gateways.map(g=>g.dev.name).join(', '))+'</td>'+
-              '<td>'+(on?'<select data-row="'+esc(k)+'">'+vrfs.map(v=>'<option'+(((perRow[k]||targetVrf)===v.vrf)?' selected':'')+'>'+esc(v.vrf)+'</option>').join('')+'</select>':'<span class="muted">\u2014</span>')+'</td></tr>';
+              '<td>'+(on?'<select data-row="'+esc(k)+'">'+rowOpts(k)+'</select>':'<span class="muted">\u2014</span>')+'</td></tr>';
           }).join(''):'<tr><td colspan="7" class="muted">No routed VLANs in this site.</td></tr>')+
           '</table></div></section>'+
         '<section><h3 class="sub">VRFs in '+esc(D.name)+'</h3>'+
@@ -6414,13 +6861,76 @@ function showMigration(){
           '<div class="mig-list">'+(vrfs.length?vrfs.map(v=>'<label class="mig-vrf'+(v.vrf===targetVrf?' on':'')+'"><input type="radio" name="mg-vrf" value="'+esc(v.vrf)+'"'+(v.vrf===targetVrf?' checked':'')+'> <b>'+esc(v.vrf)+'</b>'+
             ' <span class="muted">'+v.svis.length+' subnet'+(v.svis.length===1?'':'s')+' on '+esc(v.devices.map(d=>d.name).join(', '))+'</span><br>'+
             '<span class="muted" style="font-size:11.5px">'+esc(v.svis.slice(0,4).map(x=>'VLAN '+x.vlan+' '+cidr(x.net,x.len)).join(' \u00b7 '))+(v.svis.length>4?' \u2026':'')+'</span></label>').join('')
-            :'<p class="note">No VRFs with gateways in this site.</p>')+'</div></section>'+
+            :'<p class="note">No VRFs with gateways in this site.</p>')+
+          newVrfs.map((n,ix)=>'<label class="mig-vrf'+(n.name===targetVrf?' on':'')+'"><input type="radio" name="mg-vrf" value="'+esc(n.name)+'"'+(n.name===targetVrf?' checked':'')+'> <b>'+esc(n.name)+'</b> <span class="mig-badge">new</span>'+
+            '<button class="dev-x" data-nvdel="'+ix+'" title="Remove this new VRF" style="float:right">\u00d7</button><br>'+
+            '<span class="muted" style="font-size:11.5px">'+esc(nvDesc(n))+'</span></label>').join('')+
+          (vrfs.length?nvPanel:'')+'</div></section>'+
       '</div>'+
       '<footer><span class="muted" style="margin-right:auto">'+nPicked+' VLAN'+(nPicked===1?'':'s')+' selected</span>'+
         '<button class="btn btn-go" id="mg-build"'+(nPicked&&src!==dst&&vrfs.length?'':' disabled')+'>Build migration plan</button></footer>';
     box.querySelector('#mg-x').onclick=close;
     box.querySelector('#mg-src').onchange=(e)=>{ src=e.target.value; picked.clear(); perRow={}; paint(); };
-    box.querySelector('#mg-dst').onchange=(e)=>{ dst=e.target.value; perRow={}; targetVrf=null; paint(); };
+    box.querySelector('#mg-dst').onchange=(e)=>{ dst=e.target.value; perRow={}; targetVrf=null; newVrfs=[]; nvOpen=false; nvErr=''; nvForm.template=null; paint(); };
+    // --- new VRFs ---
+    const nvIn=(id,f)=>{ const el=box.querySelector(id); if(el) el.oninput=()=>{ nvForm[f]=el.value; }; };
+    nvIn('#nv-name','name'); nvIn('#nv-tv','tvlan'); nvIn('#nv-tn','tnet'); nvIn('#nv-zone','zone');
+    // the suggested pattern follows the name until one is chosen by hand
+    const nvn=box.querySelector('#nv-name'); if(nvn) nvn.onchange=()=>{ nvForm.name=nvn.value; if(!nvForm.tplManual) paint(); };
+    const nvo=box.querySelector('#nv-open'); if(nvo) nvo.onclick=()=>{ nvOpen=true; nvErr=''; paint(); const n=box.querySelector('#nv-name'); if(n) n.focus(); };
+    const nvc=box.querySelector('#nv-cancel'); if(nvc) nvc.onclick=()=>{ nvOpen=false; nvErr=''; nvForm.tplManual=false; paint(); };
+    const nvt=box.querySelector('#nv-tpl'); if(nvt) nvt.onchange=()=>{ nvForm.template=nvt.value; nvForm.tplManual=true; paint(); };
+    box.querySelectorAll('input[name="nv-up"]').forEach(r=>r.onchange=()=>{ nvForm.upstream=r.value; paint(); });
+    const nva=box.querySelector('#nv-add');
+    if(nva) nva.onclick=()=>{
+      const name=String(nvForm.name||'').trim();
+      const fail=(m)=>{ nvErr=m; paint(); };
+      if(!name) return fail('Give the new VRF a name.');
+      if(!migNameOk(name)) return fail('A VRF name is letters, digits, _ . : - and at most 32 characters.');
+      if(vrfs.some(v=>v.vrf===name)) return fail(name+' already exists in '+D.name+' — choose it from the list above.');
+      if(newVrfs.some(n=>n.name===name)) return fail(name+' is already in the list.');
+      const up = tplTr ? nvForm.upstream : 'isolated';
+      let tv=null, tn=null;
+      if(up==='firewall'){
+        if(String(nvForm.tvlan).trim()){
+          tv=+String(nvForm.tvlan).trim();
+          if(!Number.isInteger(tv) || tv<1 || tv>4094) return fail('Transit VLAN is a number from 1 to 4094.');
+        }
+        if(String(nvForm.tnet).trim()){
+          tn=parseCidr(String(nvForm.tnet).trim());
+          if(!tn || tn.len<8 || tn.len>30) return fail('Transit subnet is written like 10.20.5.0/24 (from /8 to /30).');
+          if(tn.ip!==tn.net) return fail('Transit subnet: '+String(nvForm.tnet).trim()+' is not a network address — did you mean '+cidr(tn.net,tn.len)+'?');
+        }
+      }
+      newVrfs.push({name, template:nvForm.template, upstream:up, transitVlan:tv, tNet:tn?tn.net:null, tLen:tn?tn.len:null,
+                    zone:(up==='firewall' && String(nvForm.zone||'').trim()) ? String(nvForm.zone).trim() : null});
+      targetVrf=name; for(const k of picked) delete perRow[k];
+      Object.assign(nvForm,{name:'', tvlan:'', tnet:'', zone:'', template:null, tplManual:false}); nvOpen=false; nvErr='';
+      paint();
+    };
+    box.querySelectorAll('[data-nvdel]').forEach(b=>b.onclick=(e)=>{
+      e.preventDefault(); e.stopPropagation();
+      const n=newVrfs[+b.dataset.nvdel]; if(!n) return;
+      newVrfs.splice(+b.dataset.nvdel,1);
+      for(const k in perRow) if(perRow[k]===n.name) delete perRow[k];
+      if(targetVrf===n.name) targetVrf=null;
+      paint();
+    });
+    const nvs=box.querySelector('#nv-same');
+    if(nvs) nvs.onclick=()=>{
+      /* One VRF per source VRF name, each VLAN into the one named like its own.
+         Where the destination already has that name, the VLAN just goes there. */
+      for(const it of pickedItems){
+        const k=key(it), nm=it.vrf;
+        if(vrfs.some(v=>v.vrf===nm) || newVrfs.some(n=>n.name===nm)){ perRow[k]=nm; continue; }
+        if(!migNameOk(nm)) continue;
+        const tpl=migBestTemplate(nm, vrfs, nm);
+        newVrfs.push({name:nm, template:tpl, upstream: migTransitOf(vrfs.find(v=>v.vrf===tpl)) ? 'firewall' : 'isolated',
+                      transitVlan:null, tNet:null, tLen:null, zone:null});
+        perRow[k]=nm;
+      }
+      paint();
+    };
     const qi=box.querySelector('#mg-q'); qi.oninput=()=>{ q=qi.value; const pos=qi.selectionStart; paint(); const n=box.querySelector('#mg-q'); n.focus(); n.setSelectionRange(pos,pos); };
     box.querySelectorAll('[data-k]').forEach(cb=>cb.onchange=()=>{ cb.checked?picked.add(cb.dataset.k):picked.delete(cb.dataset.k); paint(); });
     box.querySelector('#mg-all').onchange=(e)=>{ for(const it of vis){ e.target.checked?picked.add(key(it)):picked.delete(key(it)); } paint(); };
@@ -6429,7 +6939,12 @@ function showMigration(){
     const b=box.querySelector('#mg-build');
     if(b) b.onclick=()=>{
       const items=vlans.filter(it=>picked.has(key(it)));
-      const plans=items.map(it=>migPlanOne(it, S, D, perRow[key(it)]||targetVrf));
+      const tgt=(it)=>perRow[key(it)]||targetVrf;
+      // new VRFs first, once each: the VLAN plans build on what they set up
+      const used=newVrfs.filter(n=>items.some(it=>tgt(it)===n.name));
+      const vrfPlans=used.map(n=>migNewVrfPlan(n, D, items.map(it=>it.vlan)));
+      const vlanPlans=items.map(it=>{ const n=used.find(x=>x.name===tgt(it)); return migPlanOne(it, S, D, tgt(it), n||null); });
+      const plans=[...vrfPlans, ...vlanPlans];
       const after=migAfterModel(plans);
       const sources=migSources(plans);
       const verify=new Map();
@@ -6439,7 +6954,7 @@ function showMigration(){
         const where = last ? last.dev.name : '';
         return (t.verdict&&t.verdict.ok?'\u2713 ':'\u2717 ')+(t.verdict?t.verdict.title:'')+(where?' at '+where:'');
       };
-      for(const p of plans){
+      for(const p of vlanPlans){
         const host=int2ip((p.item.net+10)>>>0);
         const rows=sources.filter(x=>x.ip!==host).map(x=>({label:x.label,
           before:fmt(trace(STATE.model, x.ip, host, '')), after:fmt(trace(after, x.ip, host, ''))}));
@@ -6456,17 +6971,30 @@ function showMigration(){
     const md=migReportMarkdown(plans, S, D, verify);
     const totalDev=new Set(); for(const p of plans) for(const d of p.devices.keys()) totalDev.add(d);
     const conflicts=plans.reduce((a,p)=>a+p.conflicts.length,0);
+    const nNew=plans.filter(p=>p.kind==='vrf').length, nVlan=plans.length-nNew;
     box.innerHTML=
       '<header><h2>Migration plan: '+esc(S.name)+' \u2192 '+esc(D.name)+'</h2><span class="sp"></span>'+
         '<button class="btn" id="mg-back">\u2190 Back</button><button class="btn" id="mg-copy">Copy report</button>'+
         '<button class="btn btn-go" id="mg-dl">Download report (.md)</button><button class="btn" id="mg-x">Close</button></header>'+
       '<div class="bb-body">'+
-        '<p class="note" style="margin-top:0">'+plans.length+' VLAN'+(plans.length===1?'':'s')+' \u00b7 '+totalDev.size+' device'+(totalDev.size===1?'':'s')+' to change'+
+        '<p class="note" style="margin-top:0">'+nVlan+' VLAN'+(nVlan===1?'':'s')+(nNew?' \u00b7 '+nNew+' new VRF'+(nNew===1?'':'s'):'')+' \u00b7 '+totalDev.size+' device'+(totalDev.size===1?'':'s')+' to change'+
           (conflicts?' \u00b7 <b style="color:var(--red,#e0625f)">'+conflicts+' issue'+(conflicts===1?'':'s')+' to resolve first</b>':'')+'</p>'+
         plans.map(p=>{
+          const blocks=()=>[...p.devices.values()].map(e=>e.blocks.map(b=>
+              '<div class="mig-dev"><div class="mig-devh"><b>'+esc(e.dev.name)+'</b> <span class="muted">'+esc(e.site)+' \u00b7 '+esc(b.section)+'</span></div>'+
+              '<div class="muted" style="font-size:12px;margin:2px 0 4px">'+esc(b.why)+'</div>'+
+              (b.lines.length?'<pre class="mig-cfg">'+esc(b.lines.join('\n'))+'</pre>':'')+'</div>').join('')).join('');
+          if(p.kind==='vrf'){
+            const tr=p.pattern&&p.pattern.transit;
+            return '<section class="mig-plan mig-newvrf"><h3 class="sub">New VRF '+esc(p.nv.name)+' <span class="mig-badge">new</span> <span class="muted">built like '+esc(p.nv.template)+'</span></h3>'+
+              '<p class="note">'+(tr ? 'Upstream through the firewall, like VLAN '+tr.vlan+' ('+esc(tr.cidr)+') to '+esc(tr.fws.join(', '))+'.' : 'Isolated \u2014 no upstream.')+'</p>'+
+              (p.conflicts.length?'<div class="mig-conflict"><b>Resolve first</b><ul>'+p.conflicts.map(c=>'<li>'+esc(c)+'</li>').join('')+'</ul></div>':'')+
+              (p.notes.length?'<div class="mig-notes"><ul>'+p.notes.map(c=>'<li>'+esc(c)+'</li>').join('')+'</ul></div>':'')+
+              blocks()+'</section>';
+          }
           const it=p.item, v=verify.get(p)||[];
           return '<section class="mig-plan"><h3 class="sub">VLAN '+it.vlan+(it.name?' \u2014 '+esc(it.name):'')+' \u00b7 '+cidr(it.net,it.len)+
-            ' <span class="muted">'+esc(it.vrf)+' \u2192 '+esc(p.target)+'</span></h3>'+
+            ' <span class="muted">'+esc(it.vrf)+' \u2192 '+esc(p.target)+(p.newVrf?' (new)':'')+'</span></h3>'+
             (p.reference?'<p class="note">Modelled on '+esc(p.reference.cidr)+' ('+esc(p.reference.dev)+' '+esc(p.reference.iface)+').</p>':'')+
             (p.conflicts.length?'<div class="mig-conflict"><b>Resolve first</b><ul>'+p.conflicts.map(c=>'<li>'+esc(c)+'</li>').join('')+'</ul></div>':'')+
             (p.notes.length?'<div class="mig-notes"><ul>'+p.notes.map(c=>'<li>'+esc(c)+'</li>').join('')+'</ul></div>':'')+
