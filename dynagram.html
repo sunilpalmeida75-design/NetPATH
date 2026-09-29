@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Dynagram 0.35 — dynamic network diagrams from device configs</title>
+<title>Dynagram 0.37 — dynamic network diagrams from device configs</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -210,8 +210,8 @@ ul.devs li.off .dev-name, ul.devs li.off .chip{opacity:.42}
 #cy{position:absolute; inset:0}
 .stage-bar{
   position:absolute; top:10px; right:10px; left:auto; z-index:6;
-  display:flex; gap:6px; align-items:center; flex-wrap:nowrap;
-  max-width:calc(100% - 20px); overflow:visible;
+  display:flex; gap:6px; align-items:center; flex-wrap:wrap; justify-content:flex-end;
+  max-width:calc(100% - 20px); overflow:visible;   /* wraps to a second row rather than running under the side panel */
   background:rgba(27,34,42,.92); border:1px solid var(--rule); border-radius:9px;
   padding:5px 6px; box-shadow:0 6px 20px rgba(0,0,0,.32);
   pointer-events:none;
@@ -509,7 +509,8 @@ body.zen #gut-t, body.zen #gut-b{display:none !important}
 body.zen .shell{grid-template-columns:0 0 minmax(0,1fr) 0 0;
   grid-template-rows:0 0 minmax(0,1fr) 0 0}
 body.zen .stage{grid-column:1/-1;grid-row:1/-1}
-body.zen .stage-bar{position:fixed;left:50%;right:auto;top:10px;transform:translateX(-50%);z-index:50}
+body.zen .stage-bar{position:fixed;left:50%;right:auto;top:10px;transform:translateX(-50%);z-index:50;
+  width:max-content;max-width:calc(100vw - 24px)}   /* centred at 50%, it only had half the screen to lay out in */
 body.zen .sb-show{position:fixed;right:14px;top:10px}
 
 /* one-row control bar, collapsible into a corner button */
@@ -598,6 +599,9 @@ table.bb tr.bb-gap td{color:var(--ink-faint);text-align:center;font:italic 11.5p
 .pick.bb-full{left:0 !important;top:0 !important;transform:none !important;width:100vw !important;height:100vh !important;max-height:none !important;border-radius:0}
 
 .mig-box{display:flex;flex-direction:column}
+.zoom-group{display:inline-flex;align-items:center;gap:6px;flex:none}
+.zoom-slider{width:110px;accent-color:var(--cyan,#4fc3d9);cursor:pointer;margin:0 2px}
+.btn.zoom-pct{min-width:54px;font-variant-numeric:tabular-nums;padding-left:6px;padding-right:6px}
 .mig-top{display:flex;align-items:center;gap:14px;padding:12px 16px;border-bottom:1px solid var(--rule);flex-wrap:wrap}
 .mig-top select{margin-left:6px;background:var(--bg);color:var(--ink);border:1px solid var(--rule);border-radius:4px;padding:4px 6px}
 .mig-arrow{font-size:18px;color:var(--ink-faint)}
@@ -752,9 +756,14 @@ td.mig-ok{color:var(--green,#58c48c)} td.mig-bad{color:var(--red,#e0625f)}
       <button class="btn" id="viewback" style="display:none">← Back</button>
       <button class="btn" id="analyse" style="display:none">Analyse selected</button>
       <span class="sb-gap"></span>
+      <span class="zoom-group">
       <button class="btn" id="zoom-out" title="Zoom out">−</button>
+      <input type="range" id="zoom-slider" class="zoom-slider" min="-432" max="200" step="1" value="0"
+             title="Zoom. 100% draws names at their real size; below that the whole diagram shrinks, boxes and text together.">
       <button class="btn" id="zoom-in" title="Zoom in">+</button>
+      <button class="btn zoom-pct" id="zoom-pct" title="Back to 100%">100%</button>
       <button class="btn" id="fit">Fit</button>
+      </span>
       <button class="btn" id="undo" title="Undo layout change">↶</button>
       <button class="btn" id="redo" title="Redo layout change">↷</button>
       <button class="btn" id="zen" title="Full screen — hide every panel (F, or Esc to leave)">⛶</button>
@@ -918,8 +927,8 @@ td.mig-ok{color:var(--green,#58c48c)} td.mig-bad{color:var(--red,#e0625f)}
         <input type="number" id="th-zoneFontSize" placeholder="zone text size" min="9" max="48">
       </div>
       <div class="rt-form" style="align-items:center">
-        <label style="font-size:12px;color:var(--ink-dim)">Smallest name on screen</label>
-        <input type="number" id="th-minScreenFont" min="0" max="24" style="width:60px" title="Device names are never drawn smaller than this many pixels, however far you zoom out. 0 turns it off.">
+        <label style="font-size:12px;color:var(--ink-dim)">Keep names readable when zoomed out, at least</label>
+        <input type="number" id="th-minNamePx" min="0" max="24" style="width:60px" title="Off (0): zooming out shrinks everything evenly and keeps the layout. On: names stay this many pixels on screen, on a chip, even past their box.">
         <span style="font-size:12px;color:var(--ink-dim)">px (0 = off)</span>
       </div>
       <div class="rt-form" style="align-items:center">
@@ -3675,7 +3684,7 @@ function applyBends(els){
 /* A small stable hash, so a link always starts from the same channel. */
 /* Still pre-1.0: the diagram, tracing and reports are solid, but the file
    format and the routing behaviour are both still moving. */
-const APP_VERSION='0.35';
+const APP_VERSION='0.37';
 function hashStr(t){ let h=0; for(let i=0;i<t.length;i++){ h=(h*31 + t.charCodeAt(i))|0; } return h; }
 function zoneAncestors(node){
   const out=new Set();
@@ -7432,7 +7441,7 @@ const THEME_DEFAULT={
   linkDown:'#e0625f',                         // an end is administratively down
   boxBorderW:2, boxW:null, boxH:null,          // null = auto-sized from the label
   devFontSize:15, devBold:false, devWeight:'600', zoneFontSize:13, zoneBold:false,
-  minScreenFont:12,                            // names never drawn smaller than this on screen (0 = off)
+  minNamePx:0,                                 // if set, names are never drawn smaller than this on screen
   devFont:'Arial, Helvetica, sans-serif', zoneFont:'Arial, Helvetica, sans-serif',
   linkWidth:1.4,
   netText:'#4fc3d9', linkText:'#61799a'
@@ -7444,7 +7453,7 @@ const THEME_VISIO={
   devBg:'#ffffff', devText:'#14304a',
   roleRouter:'#1f7a4d', roleSwitch:'#1f7a4d', roleFirewall:'#1f7a4d',
   zoneBg:'#ffffff', zoneText:'#4a6b80', zoneBorder:'#1f7a4d', zoneGrid:false,
-  textFill:0.8, showRole:true, minScreenFont:12,
+  textFill:0.8, showRole:true, minNamePx:0,
   linkIntra:'#8496a6', linkInter:'#c07a22', linkDown:'#c8453f',
   boxBorderW:3, boxW:null, boxH:null,
   devFontSize:15, devBold:false, devWeight:'600', zoneFontSize:13, zoneBold:false,
@@ -7607,7 +7616,7 @@ function readableLabels(cy){
   const apply=()=>{
     cy._rl=null;
     if(cy.destroyed && cy.destroyed()) return;
-    const min=+TH('minScreenFont')||0, z=cy.zoom();
+    const min=+TH('minNamePx')||0, z=cy.zoom();
     const devs=cy.nodes('[kind="device"]');
     const pts=[]; devs.forEach(n=>{ const p=n.position(); pts.push({n, x:p.x, y:p.y, h:n.height()}); });
     cy.batch(()=>{
@@ -7629,7 +7638,8 @@ function readableLabels(cy){
     });
   };
   cy._readableApply=apply;
-  cy.on('zoom', ()=>{ if(!cy._rl) cy._rl=requestAnimationFrame(apply); });
+  syncZoomUI(cy);
+  cy.on('zoom', ()=>{ syncZoomUI(cy); if(!cy._rl) cy._rl=requestAnimationFrame(apply); });
   cy.on('add', 'node', ()=>{ if(!cy._rl) cy._rl=requestAnimationFrame(apply); });
   cy.on('dragfree', 'node', ()=>{ if(!cy._rl) cy._rl=requestAnimationFrame(apply); });
   apply();
@@ -7940,7 +7950,7 @@ function render(){
     cyp.on('position','node', ()=>{ if(cyp._rt) return; cyp._rt=setTimeout(()=>{ cyp._rt=null; autoRouteEdges(cyp,'ortho'); },60); });
     setTimeout(()=>autoRouteEdges(cyp,'ortho'),0);
     cyp.on('dbltap','edge', evt=>onEdgeTap(cyp, evt.target));
-    STATE.cy=cyp; STATE.edgeFor=edgeFor; STATE.edgePair={}; STATE.viewIsPath=true;
+    STATE.cy=cyp; STATE.edgeFor=edgeFor; STATE.edgePair={}; STATE.viewIsPath=true; syncZoomUI(STATE.cy);
     paintTrace(res);
     return;
   }
@@ -8119,7 +8129,7 @@ function render(){
       STATE.linkOnly = (STATE.linkOnly===it) ? null : it;   // tap again to bring the rest back
       render(); showLink(a,b);
     });
-    STATE.cy=cyl; STATE.edgeFor=edgeFor; STATE.edgePair={}; STATE.viewIsPath=true;
+    STATE.cy=cyl; STATE.edgeFor=edgeFor; STATE.edgePair={}; STATE.viewIsPath=true; syncZoomUI(STATE.cy);
     return;
   }
 
@@ -8408,7 +8418,10 @@ function render(){
   }
 
   const bigGraph = nodes.length>120;
-  const vp = (STATE.cy && !STATE.viewIsPath)
+  // a project just opened comes back at the view it was saved with
+  const openV=STATE._openView; STATE._openView=null;
+  const vp = openV ? {zoom:openV.zoom, pan:Object.assign({}, openV.pan)}
+    : (STATE.cy && !STATE.viewIsPath)
     ? {zoom:STATE.cy.zoom(), pan:Object.assign({}, STATE.cy.pan())} : null;
   if(STATE.cy) STATE.cy.destroy();
   if((document.getElementById('opt-nolinks')||{}).checked){
@@ -8648,9 +8661,18 @@ function render(){
   });
   cy.one('layoutstop', ()=>{ capturePositions(cy, writeNS); autosave(); });
 
-  STATE.cy=cy; STATE.edgeFor=edgeFor; STATE.edgePair=edgePair; STATE.viewIsPath=false;
+  STATE.cy=cy; STATE.edgeFor=edgeFor; STATE.edgePair=edgePair; STATE.viewIsPath=false; syncZoomUI(STATE.cy);
   updateSelBtn();
   if(usePreset && vp){ cy.zoom(vp.zoom); cy.pan(vp.pan); }
+  /* Nothing to keep: frame it clear of the control bar. Opening a project
+     redraws several times in a row, each keeping the previous view, so the
+     fit waits for the redraws to settle and frames whichever is current. */
+  if(!(usePreset && vp)) STATE._needFit=true;
+  if(STATE._needFit && !STATE._fitTimer){
+    STATE._fitTimer=setTimeout(()=>{ STATE._fitTimer=null;
+      if(!STATE._needFit || !STATE.cy || STATE.viewIsPath) return;
+      STATE._needFit=false; fitDiagram(STATE.cy); }, 250);
+  }
   if(usePreset) capturePositions(cy, writeNS);   // preset is immediate; others wait for layoutstop
   if(STATE.lastTrace) paintTrace(STATE.lastTrace);
 }
@@ -11411,6 +11433,20 @@ document.getElementById('prov-name').addEventListener('keydown',e=>{
 document.getElementById('opt-igp').onchange=()=>{ STATE.lastTrace=null; rebuild(); };
 /* A fixed step from the centre of the view, for crossing a big range quickly
    without the wheel. */
+/* The zoom slider: logarithmic, so each step is the same proportion at any
+   zoom; 0 on the slider is 100%, where names are drawn at their real size. */
+function syncZoomUI(cy){
+  if(!cy || cy!==STATE.cy) return;
+  const z=cy.zoom(), sl=document.getElementById('zoom-slider'), pc=document.getElementById('zoom-pct');
+  if(sl && document.activeElement!==sl) sl.value=String(Math.round(Math.log2(z)*100));
+  if(pc) pc.textContent=Math.round(z*100)+'%';
+}
+function zoomTo(z){
+  const cy=STATE.cy; if(!cy) return;
+  z=Math.max(0.05, Math.min(4, z));
+  cy.zoom({level:z, renderedPosition:{x:cy.width()/2, y:cy.height()/2}});
+  syncZoomUI(cy);
+}
 function zoomBy(factor){
   const cy=STATE.cy;
   if(!cy) return;
@@ -11424,9 +11460,17 @@ function setZen(on){
   document.body.classList.toggle('zen', STATE.zen);
   const b=document.getElementById('zen');
   if(b) b.classList.toggle('btn-go', STATE.zen);
-  setTimeout(()=>{ if(STATE.cy){ STATE.cy.resize(); autoRouteEdges(STATE.cy,'ortho'); } }, 60);
+  // full screen, and back: the canvas changed size, so frame the diagram in it
+  setTimeout(()=>{ if(STATE.cy){ STATE.cy.resize(); fitDiagram(STATE.cy); autoRouteEdges(STATE.cy,'ortho'); } }, 80);
   autosave();
 }
+/* In full screen the window is the canvas: keep the diagram framed when it
+   changes size (F11, a second monitor, a resized window). */
+window.addEventListener('resize', ()=>{
+  if(!STATE.zen || !STATE.cy) return;
+  clearTimeout(STATE._zenFit);
+  STATE._zenFit=setTimeout(()=>{ if(STATE.zen && STATE.cy){ STATE.cy.resize(); fitDiagram(STATE.cy); } }, 150);
+});
 document.getElementById('zen').onclick=()=>setZen(!STATE.zen);
 window.addEventListener('keydown',(ev)=>{
   const tag=(ev.target&&ev.target.tagName)||'';
@@ -11467,6 +11511,10 @@ document.getElementById('reroute').onclick=()=>{
   autosave();
 };
 document.getElementById('zoom-in').onclick=()=>zoomBy(1.25);
+{ const sl=document.getElementById('zoom-slider');
+  sl.oninput=()=>{ zoomTo(Math.pow(2, (+sl.value)/100)); const pc=document.getElementById('zoom-pct'); if(pc && STATE.cy) pc.textContent=Math.round(STATE.cy.zoom()*100)+'%'; };
+  sl.onchange=()=>{ sl.blur(); if(STATE.cy) syncZoomUI(STATE.cy); };
+  document.getElementById('zoom-pct').onclick=()=>zoomTo(1); }
 document.getElementById('zoom-out').onclick=()=>zoomBy(1/1.25);
 document.getElementById('exp-report').onclick=()=>exportChangeReport();
 document.getElementById('exp-svg').onclick=()=>exportSvg();
@@ -11480,14 +11528,35 @@ window.addEventListener('keydown', (ev)=>{
   if(ev.key==='z' || ev.key==='Z'){ ev.preventDefault(); ev.shiftKey ? redoLayout() : undoLayout(); }
   if(ev.key==='y' || ev.key==='Y'){ ev.preventDefault(); redoLayout(); }
 });
+/* Fit frames the whole diagram in the part of the canvas you can actually
+   see: below the floating control bar and clear of the legend. (It used to
+   restore the last saved view; a project now opens at that view instead.)
+   Enlarges up to 200% for a small diagram. */
+function fitDiagram(cy){
+  cy=cy||STATE.cy; if(!cy || (cy.destroyed && cy.destroyed())) return;
+  const els=cy.elements(':visible'); if(!els.length) return;
+  const bb=els.boundingBox(); if(!(bb.w>0 && bb.h>0)) return;
+  const c=cy.container().getBoundingClientRect();
+  let top=18, bottom=18, left=18, right=18;
+  const bar=document.getElementById('stage-bar');
+  if(bar && !bar.classList.contains('hidden') && bar.offsetParent!==null){
+    const r=bar.getBoundingClientRect();
+    if(r.height && r.bottom>c.top && r.top<c.top+c.height/2) top=Math.max(top, r.bottom-c.top+12);
+  }
+  const lg=document.querySelector('.stage .legend');
+  if(lg && lg.offsetParent!==null){
+    const r=lg.getBoundingClientRect();
+    if(r.height && r.top<c.bottom && r.top>c.top+c.height/2) bottom=Math.max(bottom, c.bottom-r.top+10);
+  }
+  const W=c.width-left-right, H=c.height-top-bottom;
+  if(W<60 || H<60){ cy.fit(undefined,20); syncZoomUI(cy); return; }
+  const z=Math.max(cy.minZoom(), Math.min(2, cy.maxZoom(), W/bb.w, H/bb.h));
+  cy.viewport({zoom:z, pan:{x:left+(W-bb.w*z)/2-bb.x1*z, y:top+(H-bb.h*z)/2-bb.y1*z}});
+  syncZoomUI(cy);
+}
 document.getElementById('fit').onclick=()=>{
   if(!STATE.cy) return;
-  /* Fit returns to wherever the diagram was when it was last saved, so you
-     always land back on the view you set up. With nothing saved yet it falls
-     back to framing everything. */
-  const v=STATE.savedView;
-  if(v && isFinite(v.zoom)){ STATE.cy.zoom(v.zoom); STATE.cy.pan(v.pan); }
-  else STATE.cy.fit(undefined,40);
+  fitDiagram(STATE.cy);
   autoRouteEdges(STATE.cy,'ortho');     // re-square every link to its boxes
 };
 document.getElementById('viewback').onclick=goBack;
@@ -12325,6 +12394,7 @@ function loadProject(obj){
   if(obj.ui) STATE.ui=Object.assign({left:290,right:400,leftOpen:true,rightOpen:true}, obj.ui);
   if(obj.theme) STATE.theme=Object.assign({}, THEME_DEFAULT, obj.theme);
   STATE.savedView = obj.view || null;
+  STATE._openView = (obj.view && isFinite(obj.view.zoom)) ? obj.view : null;   // applied by the first render
   STATE.anchors = obj.anchors || {};
   STATE.waypoints = obj.waypoints || {};
   STATE.freeLinks = obj.freeLinks || {};
@@ -12846,9 +12916,9 @@ function initTheme(){
     ztc.oninput=()=>{ STATE.theme.zoneTabColor=ztc.value; render(); renderGroups(); autosave(); };
   }
   const dfs=document.getElementById('th-devFontSize'), zfs=document.getElementById('th-zoneFontSize');
-  const msf=document.getElementById('th-minScreenFont');
-  if(msf){ msf.value=STATE.theme.minScreenFont!=null?STATE.theme.minScreenFont:12;
-    msf.onchange=()=>{ const v=parseInt(msf.value,10); STATE.theme.minScreenFont=isNaN(v)?12:Math.max(0,Math.min(24,v)); msf.value=STATE.theme.minScreenFont;
+  const msf=document.getElementById('th-minNamePx');
+  if(msf){ msf.value=TH('minNamePx');
+    msf.onchange=()=>{ const v=parseInt(msf.value,10); STATE.theme.minNamePx=isNaN(v)?0:Math.max(0,Math.min(24,v)); msf.value=STATE.theme.minNamePx;
       if(STATE.cy && STATE.cy._readableApply) STATE.cy._readableApply(); autosave(); }; }
   if(dfs){ dfs.value=STATE.theme.devFontSize||13;
     dfs.onchange=()=>{ const v=parseInt(dfs.value,10); STATE.theme.devFontSize=v?Math.max(9,Math.min(48,v)):13; dfs.value=STATE.theme.devFontSize; applyTheme(); autosave(); }; }
@@ -12880,7 +12950,7 @@ function initTheme(){
     if(zff) fontOpts(zff, STATE.theme.zoneFont);
     if(dfs) dfs.value=STATE.theme.devFontSize||13;
     if(zfs) zfs.value=STATE.theme.zoneFontSize||12;
-    { const m=document.getElementById('th-minScreenFont'); if(m) m.value=TH('minScreenFont'); }
+    { const m=document.getElementById('th-minNamePx'); if(m) m.value=TH('minNamePx'); }
     if(dBold) dBold.checked=!!STATE.theme.devBold;
     if(zBold) zBold.checked=!!STATE.theme.zoneBold;
     applyTheme(); autosave();
