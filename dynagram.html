@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Dynagram 0.33 — dynamic network diagrams from device configs</title>
+<title>Dynagram 0.34 — dynamic network diagrams from device configs</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -914,8 +914,8 @@ td.mig-ok{color:var(--green,#58c48c)} td.mig-bad{color:var(--red,#e0625f)}
       </div>
       <p class="cfg-note" style="margin:2px 0 8px">Applies to every device at once; the text is scaled to fit. Leave blank to size each box around its own name. A device given its own size still wins.</p>
       <div class="rt-form">
-        <input type="number" id="th-devFontSize" placeholder="device text size" min="9" max="24">
-        <input type="number" id="th-zoneFontSize" placeholder="zone text size" min="9" max="36">
+        <input type="number" id="th-devFontSize" placeholder="device text size" min="9" max="48">
+        <input type="number" id="th-zoneFontSize" placeholder="zone text size" min="9" max="48">
       </div>
       <div class="rt-form" style="align-items:center">
         <label style="font-size:12px;color:var(--ink-dim)">Zone name-tab text</label>
@@ -3493,6 +3493,17 @@ function labelSize(label, font, padX, padY, minW){
   const h=Math.max(minH, Math.round(w*0.25), Math.round(font*2.6));
   return {w, h};
 }
+/* A box with a fixed size: the text fills it, but never comes out smaller
+   than the text size chosen in Settings. Fitting alone capped the text at
+   whatever the box allowed, so raising the text size did nothing on a sized
+   box; now the box grows to fit the text instead. */
+function fitOrGrow(el){
+  const want=el.data.fs||13, fit=fittedFont(el.data.label, el.data.w, el.data.h);
+  if(want<=fit){ el.data.fs=fit; return; }
+  el.data.fs=want;
+  const s=labelSize(el.data.label, want, 30, 26, 96);
+  el.data.w=Math.max(el.data.w, s.w); el.data.h=Math.max(el.data.h, s.h);
+}
 /* When a box has a size of its own, the font is scaled to fit it instead —
    same rule, applied the other way round. */
 function fittedFont(label, w, h){
@@ -3659,7 +3670,7 @@ function applyBends(els){
 /* A small stable hash, so a link always starts from the same channel. */
 /* Still pre-1.0: the diagram, tracing and reports are solid, but the file
    format and the routing behaviour are both still moving. */
-const APP_VERSION='0.33';
+const APP_VERSION='0.34';
 function hashStr(t){ let h=0; for(let i=0;i<t.length;i++){ h=(h*31 + t.charCodeAt(i))|0; } return h; }
 function zoneAncestors(node){
   const out=new Set();
@@ -4155,14 +4166,14 @@ function sizeNodes(els){
     }
     if(el.data.overrideW){
       el.data.w=el.data.overrideW; el.data.h=el.data.overrideH;
-      if(k==='device') el.data.fs=fittedFont(el.data.label, el.data.w, el.data.h);
+      if(k==='device') fitOrGrow(el);
       continue;
     }
     if(k==='device' && TH('boxW')){
-      /* A fixed global box size: the font is fitted to it, unless this device
-         was given a size of its own, which then wins. */
+      /* A fixed global box size: the text fills it, unless this device was
+         given a size of its own, which then wins. */
       el.data.w=TH('boxW'); el.data.h=TH('boxH')||48;
-      el.data.fs = el.data.fsFixed || fittedFont(el.data.label, el.data.w, el.data.h);
+      fitOrGrow(el);
       continue;
     }
     /* Size against the font this element will actually be drawn in — a
@@ -9697,14 +9708,14 @@ function renderGroups(){
     tcIn.style.cssText='width:20px;height:18px;padding:0;border:1px solid var(--rule);margin-left:4px;cursor:pointer';
     tcIn.onclick=(ev)=>ev.stopPropagation();
     tcIn.oninput=(ev)=>{ ev.stopPropagation(); g.tabColor=tcIn.value; render(); autosave(); };
-    const tsIn=document.createElement('input'); tsIn.type='number'; tsIn.min=8; tsIn.max=36;
+    const tsIn=document.createElement('input'); tsIn.type='number'; tsIn.min=8; tsIn.max=48;
     tsIn.value=g.tabSize||''; tsIn.placeholder=String(zoneFont(g).size);
     tsIn.title='Name-tab text size';
     tsIn.style.cssText='width:38px;margin-left:4px;background:var(--bg);color:var(--ink);border:1px solid var(--rule);border-radius:3px;font-size:11px;padding:1px 3px';
     tsIn.onclick=(ev)=>ev.stopPropagation();
     tsIn.onchange=(ev)=>{ ev.stopPropagation();
       const v=parseInt(tsIn.value,10);
-      if(v>=8 && v<=36) g.tabSize=v; else delete g.tabSize;
+      if(v>=8) g.tabSize=Math.min(48,v); else delete g.tabSize;
       render(); autosave(); };
     const rs=document.createElement('button');
     rs.className='dev-x'; rs.textContent='↺'; rs.title='Back to defaults: colours, name tab and size';
@@ -12783,9 +12794,9 @@ function initTheme(){
   }
   const dfs=document.getElementById('th-devFontSize'), zfs=document.getElementById('th-zoneFontSize');
   if(dfs){ dfs.value=STATE.theme.devFontSize||13;
-    dfs.onchange=()=>{ STATE.theme.devFontSize=parseInt(dfs.value,10)||13; applyTheme(); autosave(); }; }
+    dfs.onchange=()=>{ const v=parseInt(dfs.value,10); STATE.theme.devFontSize=v?Math.max(9,Math.min(48,v)):13; dfs.value=STATE.theme.devFontSize; applyTheme(); autosave(); }; }
   if(zfs){ zfs.value=STATE.theme.zoneFontSize||12;
-    zfs.onchange=()=>{ STATE.theme.zoneFontSize=parseInt(zfs.value,10)||12; applyTheme(); autosave(); }; }
+    zfs.onchange=()=>{ const v=parseInt(zfs.value,10); STATE.theme.zoneFontSize=v?Math.max(9,Math.min(48,v)):12; zfs.value=STATE.theme.zoneFontSize; applyTheme(); autosave(); }; }
   const dBold=document.getElementById('th-devBold'), zBold=document.getElementById('th-zoneBold');
   if(dBold){ dBold.checked=!!STATE.theme.devBold;
     dBold.onchange=()=>{ STATE.theme.devBold=dBold.checked; applyTheme(); autosave(); }; }
