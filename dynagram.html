@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Dynagram 0.42 — dynamic network diagrams from device configs</title>
+<title>Dynagram 0.44 — dynamic network diagrams from device configs</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -912,6 +912,8 @@ td.mig-ok{color:var(--green,#58c48c)} td.mig-bad{color:var(--red,#e0625f)}
         <label>Router <input type="color" id="th-roleRouter"></label>
         <label>Switch <input type="color" id="th-roleSwitch"></label>
         <label>Firewall <input type="color" id="th-roleFirewall"></label>
+        <label>Provider cloud <input type="color" id="th-cloudBg"></label>
+        <label>Cloud text <input type="color" id="th-cloudText"></label>
       </div>
       <label class="auth" style="margin-top:6px">Border thickness
         <input type="range" id="th-borderW" min="1" max="6" step="1" style="flex:1;accent-color:var(--cyan)"></label>
@@ -3712,7 +3714,7 @@ function applyBends(els){
 /* A small stable hash, so a link always starts from the same channel. */
 /* Still pre-1.0: the diagram, tracing and reports are solid, but the file
    format and the routing behaviour are both still moving. */
-const APP_VERSION='0.42';
+const APP_VERSION='0.44';
 function hashStr(t){ let h=0; for(let i=0;i<t.length;i++){ h=(h*31 + t.charCodeAt(i))|0; } return h; }
 function zoneAncestors(node){
   const out=new Set();
@@ -4203,9 +4205,13 @@ function sizeNodes(els){
     if(el.data.w!=null) continue;
     const k=el.data.kind;
     if(k==='group') continue;
-    if(k==='wan'){
-      const cs=cloudSize(el.data.label);
-      if(cs){ el.data.w=cs.w; el.data.h=cs.h; continue; }
+    if(k==='wan' || k==='cloud'){
+      /* same text size and font as the device boxes */
+      const df=deviceFont(null);
+      el.data.fs=df.size; el.data.tdy=Math.round(df.size*0.35);   // a little below centre, under the bumps
+      const cs=cloudSize(el.data.label), s=cloudBoxSize(el.data.label, df.size, df.weight, df.fam);
+      // a size set by dragging is kept, but never smaller than the name needs
+      el.data.w=cs?Math.max(cs.w,s.w):s.w; el.data.h=cs?Math.max(cs.h,s.h):s.h; continue;
     }
     if(el.data.overrideW){
       el.data.w=el.data.overrideW; el.data.h=el.data.overrideH;
@@ -7474,7 +7480,8 @@ const THEME_DEFAULT={
   wrapNames:true,                              // long names over two lines
   devFont:'"IBM Plex Sans Condensed", system-ui, "Segoe UI", sans-serif', zoneFont:'"IBM Plex Sans Condensed", system-ui, "Segoe UI", sans-serif',
   linkWidth:1.4,
-  netText:'#4fc3d9', linkText:'#61799a'
+  netText:'#4fc3d9', linkText:'#61799a',
+  cloudBg:'#cfe6fa', cloudText:'#12324f'       // provider clouds: light blue, dark text
 };
 /* Visio look: everything white, boxes outlined in green, grid on the canvas
    only — never inside a box. */
@@ -7489,7 +7496,8 @@ const THEME_VISIO={
   devFontSize:15, devBold:false, devWeight:'600', zoneFontSize:13, zoneBold:false,
   devFont:'"IBM Plex Sans Condensed", system-ui, "Segoe UI", sans-serif', zoneFont:'"IBM Plex Sans Condensed", system-ui, "Segoe UI", sans-serif',
   linkWidth:1.4,
-  netText:'#12628f', linkText:'#3d5568'
+  netText:'#12628f', linkText:'#3d5568',
+  cloudBg:'#cfe6fa', cloudText:'#12324f'
 };
 STATE.theme = Object.assign({}, THEME_DEFAULT);
 STATE.theme.fontV=2;
@@ -7716,6 +7724,22 @@ function tabInset(label, gf){
   if(w==null) w=String(label||'').length*gf.size*0.6;
   return Math.round(w+7+8);
 }
+/* A cloud outline as an image, stretched to whatever size the node is. The
+   bumps sit along the top, so the flatter lower part holds the name. */
+function cloudUri(strokeOverride, widthOverride){
+  const fill=TH('cloudBg'), stroke=strokeOverride||shade(fill,-0.28);
+  const svg='<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80" viewBox="0 0 120 80" preserveAspectRatio="none">'+
+    '<path d="M28,74 C12,74 3,63 6,51 C8,41 18,35 28,37 C29,22 43,12 58,15 C68,4 90,6 96,21 '+
+    'C109,20 119,31 116,44 C123,50 120,70 104,74 Z" fill="'+fill+'" stroke="'+stroke+'" stroke-width="'+(widthOverride||2)+'" '+
+    'vector-effect="non-scaling-stroke" stroke-linejoin="round"/></svg>';
+  return 'data:image/svg+xml;utf8,'+encodeURIComponent(svg);
+}
+/* A cloud's size around its name: wider and taller than a box, because the
+   outline's bumps and curves take room around the text. */
+function cloudBoxSize(label, fs, fw, ff){
+  const m=measureLabel(label, fs, fw, ff), th=m.lines*fs*DEV_LINE_H;
+  return {w:Math.round(Math.max(fs*6, m.w*1.45+fs*2.2)), h:Math.round(Math.max(fs*3.4, th*1.9+fs*1.4))};
+}
 function graphStyle(){
   return [
       {selector:'node[kind="device"]', style:{
@@ -7770,19 +7794,20 @@ function graphStyle(){
         'line-style':'dashed','line-dash-pattern':[7,6]}},
       {selector:'edge.fwd', style:{'mid-target-arrow-shape':'triangle','mid-target-arrow-color':'#e8a13a','arrow-scale':0.85}},
       {selector:'edge.rev', style:{'mid-source-arrow-shape':'triangle','mid-source-arrow-color':'#e8a13a','arrow-scale':0.85}},
-      {selector:'node[kind="wan"]', style:{
+      /* Provider connections (Internet, carrier WANs) are drawn as a cloud:
+         an outline image stretched to the node, in the Provider cloud colour,
+         with the name in the same font and size as the device boxes. */
+      {selector:'node[kind="wan"], node[kind="cloud"]', style:{
         'shape':'round-rectangle','width':'data(w)','height':'data(h)',
-        'background-color':'#241c33','border-width':2,'border-color':'#6f5c9e','border-style':'dashed',
-        'label':'data(label)','color':'#b9a6e0','font-family':'IBM Plex Mono, monospace',
-        'font-size':12,'font-weight':600,'text-valign':'center','text-halign':'center'}},
+        'background-opacity':0,'border-width':0,
+        'background-image':cloudUri(),'background-fit':'none','background-width':'100%','background-height':'100%',
+        'background-clip':'none','background-image-opacity':1,
+        'label':'data(label)','color':TH('cloudText'),'font-family':deviceFont(null).fam,
+        'font-size':'data(fs)','font-weight':deviceFont(null).weight,'text-valign':'center','text-halign':'center',
+        'text-wrap':'wrap','line-height':DEV_LINE_H,'text-margin-y':'data(tdy)'}},
       {selector:'edge[kind="wanlink"]', style:{
         'line-color':'#6f5c9e','line-style':'dashed','line-dash-pattern':[5,4],'width':1.8,
         'color':'#9d8ac9','font-size':9}},
-      {selector:'node[kind="cloud"]', style:{
-        'shape':'ellipse','width':94,'height':60,'background-color':'#1b2430',
-        'border-width':1.5,'border-color':'#5c7288','border-style':'dashed',
-        'label':'data(label)','color':'#9db0c6','font-family':'IBM Plex Mono, monospace','font-size':11,
-        'text-valign':'center','text-halign':'center'}},
       {selector:'node[kind="group"]', style:{
         'shape':'round-rectangle','background-color':'data(bg)','background-opacity':TH('zoneGrid')?0.55:1,
         'border-width':TH('boxBorderW'),'border-color':'data(bd)','border-style':'solid','padding':'data(pad)',
@@ -7819,6 +7844,9 @@ function graphStyle(){
       {selector:'node[kind="group"].drop', style:{'border-color':'#33485f','color':'#7f93aa'}},
       {selector:'node[picked = 1]', style:{'border-color':'#4fc3d9','color':'#8fdcec'}},
       {selector:'node.hot', style:{'border-color':'#e8a13a','color':'#f0b256'}},
+      /* a lit cloud keeps its dark text on the light fill; the outline turns
+         the trace colour instead */
+      {selector:'node[kind="wan"].hot, node[kind="cloud"].hot', style:{'color':TH('cloudText'),'background-image':cloudUri('#e8a13a',3)}},
       {selector:'node[kind="subnet"].hot', style:{'border-width':0,'color':'#e8a13a'}},
       {selector:'node[kind="subnet"].drop', style:{'border-width':0,'color':'#e0625f'}},
       {selector:'node.drop', style:{'border-color':'#e0625f','color':'#e0625f'}},
@@ -8845,6 +8873,51 @@ function buildPath(res){
   return {steps,seq};
 }
 
+/* Somewhere near a device to put a cloud where it covers nothing: tried
+   on rings of growing size around the device, sides before diagonals, and
+   clear of every box, cloud and zone (other than the device's own zones,
+   and those only as a last resort). */
+function freeSpotNear(cy, anchor, w, h){
+  const p=anchor.position(), aw=anchor.width(), ah=anchor.height();
+  const own=anchor.ancestors();
+  const boxes=cy.nodes().filter(n=>n.visible() && n.id()!==anchor.id() && !n.hasClass('tmp')).map(n=>({n, b:n.boundingBox({includeLabels:true}), grp:n.data('kind')==='group'}));
+  const M=24;
+  const clear=(x,y,allowOwn)=>{
+    const r={x1:x-w/2-M, x2:x+w/2+M, y1:y-h/2-M, y2:y+h/2+M};
+    const ab=anchor.boundingBox(); if(r.x1<ab.x2 && ab.x1<r.x2 && r.y1<ab.y2 && ab.y1<r.y2) return false;
+    for(const o of boxes){
+      if(o.grp && allowOwn && own.contains(o.n)) continue;
+      const b=o.b; if(r.x1<b.x2 && b.x1<r.x2 && r.y1<b.y2 && b.y1<r.y2) return false;
+    }
+    return true;
+  };
+  const dirs=[[1,0],[0,-1],[-1,0],[0,1],[1,-1],[-1,-1],[1,1],[-1,1]];
+  for(const allowOwn of [false,true]){
+    for(let ring=0; ring<14; ring++){
+      for(const [dx,dy] of dirs){
+        const gx=(aw/2+w/2+60+ring*70)*dx, gy=(ah/2+h/2+50+ring*60)*dy;
+        if(clear(p.x+gx, p.y+gy, allowOwn)) return {x:p.x+gx, y:p.y+gy};
+      }
+    }
+  }
+  return {x:p.x+aw/2+w/2+80, y:p.y};
+}
+/* Keep a set of elements in view, clear of the control bar and legend:
+   pan by as little as needed, and zoom out only if they cannot all fit. */
+function bringIntoView(cy, eles){
+  if(!cy || !eles || !eles.length) return;
+  const t=fitTarget(cy, eles); if(!t) return;
+  const z=cy.zoom(), pan=cy.pan(), bb=eles.boundingBox({includeLabels:true});
+  const r={x1:bb.x1*z+pan.x, x2:bb.x2*z+pan.x, y1:bb.y1*z+pan.y, y2:bb.y2*z+pan.y};
+  const v=t.area;
+  if(r.x1>=v.x1 && r.x2<=v.x2 && r.y1>=v.y1 && r.y2<=v.y2) return;           // already in view
+  if(r.x2-r.x1<=v.x2-v.x1 && r.y2-r.y1<=v.y2-v.y1){                         // fits: just pan
+    const dx = r.x1<v.x1 ? v.x1-r.x1 : (r.x2>v.x2 ? v.x2-r.x2 : 0);
+    const dy = r.y1<v.y1 ? v.y1-r.y1 : (r.y2>v.y2 ? v.y2-r.y2 : 0);
+    cy.animate({pan:{x:pan.x+dx, y:pan.y+dy}}, {duration:250});
+  } else cy.animate({zoom:Math.min(z, t.zoom), pan:t.zoom<z?t.pan:pan}, {duration:250});
+  setTimeout(()=>syncZoomUI(cy), 280);
+}
 function paintTrace(res){
   stopFx();
   const cy=STATE.cy; if(!cy || !res || !res.hops) return;
@@ -8855,15 +8928,26 @@ function paintTrace(res){
   if(res.exitsNetwork && seq.length){
     const anchor=cy.getElementById(seq[seq.length-1]);
     if(anchor.length){
-      const p=anchor.position();
-      cy.add([
-        {group:'nodes', data:{id:'__net', label:'Internet', kind:'cloud'},
-         position:{x:p.x+195, y:p.y}, classes:'tmp', grabbable:true, selectable:false},
-        {group:'edges', data:{id:'__nete', source:seq[seq.length-1], target:'__net', kind:'exit',
-         label: res.exitVia ? 'via '+res.exitVia : 'default route'}, classes:'tmp'}
-      ]);
-      steps.push({eid:'__nete', forward:true});
-      seq.push('__net');
+      /* A provider cloud already on the diagram, linked to this device (the
+         Internet cloud of the site, say), is where the packet goes: light it
+         rather than drawing a second cloud next to it. */
+      const clouds=anchor.connectedEdges().filter(e=>!e.hasClass('tmp')).map(e=>({e, n:e.source().id()===anchor.id()?e.target():e.source()}))
+        .filter(x=>x.n.data('kind')==='wan' || x.n.data('kind')==='cloud');
+      const pick=clouds.find(x=>/internet/i.test(x.n.data('label')||'')) || (clouds.length===1?clouds[0]:null);
+      if(pick){
+        steps.push({eid:pick.e.id(), forward:pick.e.source().id()===anchor.id()});
+        seq.push(pick.n.id());
+      } else {
+        const df=deviceFont(null), cs=cloudBoxSize('Internet', df.size, df.weight, df.fam);
+        cy.add([
+          {group:'nodes', data:{id:'__net', label:'Internet', kind:'cloud', w:cs.w, h:cs.h, fs:df.size, tdy:Math.round(df.size*0.35)},
+           position:freeSpotNear(cy, anchor, cs.w, cs.h), classes:'tmp', grabbable:true, selectable:false},
+          {group:'edges', data:{id:'__nete', source:seq[seq.length-1], target:'__net', kind:'exit',
+           label: res.exitVia ? 'via '+res.exitVia : 'default route'}, classes:'tmp'}
+        ]);
+        steps.push({eid:'__nete', forward:true});
+        seq.push('__net');
+      }
     }
   }
 
@@ -8891,6 +8975,16 @@ function paintTrace(res){
 
   if(res.verdict && !res.verdict.ok && res.hops.length)
     cy.getElementById(res.hops[res.hops.length-1].dev.id).addClass('drop');
+
+  /* The whole path, and the cloud it leaves by with its label, must be on
+     screen: a cloud placed off to the side used to sit under the panel or
+     behind the control bar until it was dragged into view. */
+  if(!STATE.viewIsPath){
+    let show=cy.collection();
+    for(const id of seq){ const n=cy.getElementById(id); if(n.length && n.data('kind')!=='group') show=show.union(n); }
+    for(const st of steps){ const e=cy.getElementById(st.eid); if(e.length) show=show.union(e); }
+    setTimeout(()=>{ if(STATE.cy===cy) bringIntoView(cy, show); }, 60);
+  }
 
   if(reduce){ updateFxBtn(); return; }
 
@@ -11609,8 +11703,8 @@ window.addEventListener('keydown', (ev)=>{
    see: below the floating control bar and clear of the legend. (It used to
    restore the last saved view; a project now opens at that view instead.)
    Enlarges up to 200% for a small diagram. */
-function fitTarget(cy){
-  const els=cy.elements(':visible'); if(!els.length) return null;
+function fitTarget(cy, only){
+  const els=only || cy.elements(':visible'); if(!els.length) return null;
   const bb=els.boundingBox(); if(!(bb.w>0 && bb.h>0)) return null;
   const c=cy.container().getBoundingClientRect();
   let top=18, bottom=18, left=18, right=18;
@@ -11627,12 +11721,13 @@ function fitTarget(cy){
   const W=c.width-left-right, H=c.height-top-bottom;
   if(W<60 || H<60) return null;
   const z=Math.max(cy.minZoom(), Math.min(2, cy.maxZoom(), W/bb.w, H/bb.h));
-  return {zoom:z, pan:{x:left+(W-bb.w*z)/2-bb.x1*z, y:top+(H-bb.h*z)/2-bb.y1*z}};
+  return {zoom:z, pan:{x:left+(W-bb.w*z)/2-bb.x1*z, y:top+(H-bb.h*z)/2-bb.y1*z},
+          area:{x1:left, x2:left+W, y1:top, y2:top+H}};
 }
 function fitDiagram(cy){
   cy=cy||STATE.cy; if(!cy || (cy.destroyed && cy.destroyed())) return;
   const t=fitTarget(cy);
-  if(t){ cy.viewport(t); cy._fitBase=t.zoom; } else { cy.fit(undefined,20); cy._fitBase=cy.zoom(); }
+  if(t){ cy.viewport({zoom:t.zoom, pan:t.pan}); cy._fitBase=t.zoom; } else { cy.fit(undefined,20); cy._fitBase=cy.zoom(); }
   syncZoomUI(cy);
 }
 /* The zoom that frames the whole diagram: shown as 100%. Worked out again
@@ -13034,7 +13129,7 @@ if(typeof cytoscape==='undefined'){
     'Connect to the internet once, or download cytoscape.min.js next to this file and point the script tag at it.</span>';
 }
 function initTheme(){
-  const map={canvasBg:'th-canvasBg', linkText:'th-linkText', devBg:'th-devBg',
+  const map={canvasBg:'th-canvasBg', linkText:'th-linkText', devBg:'th-devBg', cloudBg:'th-cloudBg', cloudText:'th-cloudText',
              devText:'th-devText', zoneBg:'th-zoneBg', zoneText:'th-zoneText',
              zoneBorder:'th-zoneBorder', roleRouter:'th-roleRouter',
              roleSwitch:'th-roleSwitch', roleFirewall:'th-roleFirewall',
