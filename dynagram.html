@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Dynagram 0.39 — dynamic network diagrams from device configs</title>
+<title>Dynagram 0.41 — dynamic network diagrams from device configs</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -3518,21 +3518,43 @@ function labelSize(label, font, padX, padY, minW){
    whatever the box allowed, so raising the text size did nothing on a sized
    box; now the box grows to fit the text instead. */
 function fitOrGrow(el){
-  const want=el.data.fs||13, fit=fittedFont(el.data.label, el.data.w, el.data.h);
-  if(want<=fit){ el.data.fs=fit; return; }
-  el.data.fs=want;
-  const s=labelSize(el.data.label, want, 30, 26, 96);
-  el.data.w=Math.max(el.data.w, s.w); el.data.h=Math.max(el.data.h, s.h);
+  const d=el.data, want=d.fs||13, fit=fittedFont(d.label, d.w, d.h, d.fw, d.ff);
+  if(want<=fit){ d.fs=fit; return; }
+  d.fs=want;
+  const s=deviceBoxSize(d.label, want, d.fw, d.ff);
+  d.w=Math.max(d.w, s.w); d.h=Math.max(d.h, s.h);
+}
+/* Device boxes are sized from the name as it will actually be drawn —
+   measured in its own font, not guessed from a character count, which made
+   every box noticeably bigger than its text. Around the text there is only a
+   small margin: half the text size at the default "text fill" (0.8), less as
+   the fill goes up. Lines are drawn at DEV_LINE_H. */
+const DEV_LINE_H=1.15;
+let _measCanvas=null;
+function measureLabel(label, fs, fw, ff){
+  const lines=String(label||'').split('\n');
+  let w=0, ctx=null;
+  try{ _measCanvas=_measCanvas||document.createElement('canvas'); ctx=_measCanvas.getContext('2d'); }catch(e){}
+  if(ctx){ ctx.font=(fw||'normal')+' '+fs+'px '+(ff||'sans-serif'); for(const l of lines) w=Math.max(w, ctx.measureText(l).width); }
+  else for(const l of lines) w=Math.max(w, l.length*fs*0.6);
+  return {w, lines:lines.length};
+}
+function boxPadFactor(){
+  const fill=Math.max(0.4, Math.min(0.95, TH('textFill')||0.8));
+  return (1-fill)*2.5;                         // 0.8 -> 0.5 of the text size
+}
+function deviceBoxSize(label, fs, fw, ff){
+  const m=measureLabel(label, fs, fw, ff), k=boxPadFactor();
+  const padX=Math.max(5, fs*k), padY=Math.max(4, fs*k*0.75);
+  return {w:Math.round(Math.max(fs*4, m.w+2*padX)), h:Math.round(m.lines*fs*DEV_LINE_H+2*padY)};
 }
 /* When a box has a size of its own, the font is scaled to fit it instead —
    same rule, applied the other way round. */
-function fittedFont(label, w, h){
-  const lines=String(label||'').split('\n');
-  let longest=0;
-  for(const l of lines) if(l.length>longest) longest=l.length;
-  const fill=Math.max(0.4, Math.min(0.95, TH('textFill')||0.8));
-  const byH = (h*fill)/(lines.length*1.3);
-  const byW = longest ? (w*fill)/(longest*0.6) : byH;
+function fittedFont(label, w, h, fw, ff){
+  const m=measureLabel(label, 100, fw, ff), k=boxPadFactor();
+  const perW=m.w/100;                          // text width per pixel of font size
+  const byW = perW>0 ? w/(perW+2*k) : 48;
+  const byH = h/(m.lines*DEV_LINE_H+1.5*k);
   return Math.max(7, Math.min(48, Math.floor(Math.min(byH, byW))));
 }
 /* A stable identity for an edge so a bend the user set survives re-renders. */
@@ -3690,7 +3712,7 @@ function applyBends(els){
 /* A small stable hash, so a link always starts from the same channel. */
 /* Still pre-1.0: the diagram, tracing and reports are solid, but the file
    format and the routing behaviour are both still moving. */
-const APP_VERSION='0.39';
+const APP_VERSION='0.41';
 function hashStr(t){ let h=0; for(let i=0;i<t.length;i++){ h=(h*31 + t.charCodeAt(i))|0; } return h; }
 function zoneAncestors(node){
   const out=new Set();
@@ -4203,6 +4225,7 @@ function sizeNodes(els){
     const fs = el.data.fs || (k==='subnet' ? 11 : k==='wan' ? 12 : 13);
     const s = k==='subnet' ? labelSize(el.data.label,fs,8,6,24)
             : k==='wan'    ? labelSize(el.data.label,fs,34,28,96)
+            : k==='device' ? deviceBoxSize(el.data.label, fs, el.data.fw, el.data.ff)
             :                labelSize(el.data.label,fs,30,26,96);
     el.data.w=s.w; el.data.h=s.h;
   }
@@ -7449,7 +7472,7 @@ const THEME_DEFAULT={
   devFontSize:15, devBold:false, devWeight:'600', zoneFontSize:13, zoneBold:false,
   minNamePx:0,                                 // if set, names are never drawn smaller than this on screen
   wrapNames:true,                              // long names over two lines
-  devFont:'Arial, Helvetica, sans-serif', zoneFont:'Arial, Helvetica, sans-serif',
+  devFont:'"IBM Plex Sans Condensed", system-ui, "Segoe UI", sans-serif', zoneFont:'"IBM Plex Sans Condensed", system-ui, "Segoe UI", sans-serif',
   linkWidth:1.4,
   netText:'#4fc3d9', linkText:'#61799a'
 };
@@ -7464,11 +7487,17 @@ const THEME_VISIO={
   linkIntra:'#8496a6', linkInter:'#c07a22', linkDown:'#c8453f',
   boxBorderW:3, boxW:null, boxH:null,
   devFontSize:15, devBold:false, devWeight:'600', zoneFontSize:13, zoneBold:false,
-  devFont:'Arial, Helvetica, sans-serif', zoneFont:'Arial, Helvetica, sans-serif',
+  devFont:'"IBM Plex Sans Condensed", system-ui, "Segoe UI", sans-serif', zoneFont:'"IBM Plex Sans Condensed", system-ui, "Segoe UI", sans-serif',
   linkWidth:1.4,
   netText:'#12628f', linkText:'#3d5568'
 };
 STATE.theme = Object.assign({}, THEME_DEFAULT);
+STATE.theme.fontV=2;
+/* The boxes are measured and drawn in a web font. If it arrives after the
+   first drawing, draw again so sizes and text use the real font. */
+if(document.fonts && document.fonts.ready) document.fonts.ready.then(()=>{
+  _measCanvas=null; if(STATE.cy && typeof render==='function' && !STATE.viewIsPath) render();
+});
 /* `||` here meant a stored `false` fell through to the default, so no boolean
    setting could ever be switched off. Only an absent value falls back. */
 function TH(k){
@@ -7539,6 +7568,7 @@ function zoneColor(g){
 }
 const FONTS=[
   ['IBM Plex Mono, monospace','Plex Mono'],
+  ['"IBM Plex Sans Condensed", system-ui, "Segoe UI", sans-serif','Plex Sans Cond (same as the controls)'],
   ['IBM Plex Sans Condensed, sans-serif','Plex Sans Cond'],
   ['Inter, system-ui, sans-serif','Inter'],
   ['Georgia, serif','Georgia'],
@@ -7669,6 +7699,23 @@ function wrapName(name){
   if(!best || best.m>s.length*0.8) return s;             // no even break: leave it on one line
   return best.parts.join('\n');
 }
+/* Space between a zone's border and what is inside it. Kept to a small
+   margin so the boxes, and the names in them, get the room. */
+const ZONE_PAD=16;
+function zonePad(g){ return (g && g.padding) || ZONE_PAD; }
+/* How far to push a zone's name tab right so it sits just inside the
+   border: its own measured width plus the tab's padding and a small inset. */
+let _tabCanvas=null;
+function tabInset(label, gf){
+  let w=null;
+  try{
+    _tabCanvas=_tabCanvas||document.createElement('canvas');
+    const ctx=_tabCanvas.getContext('2d');
+    if(ctx){ ctx.font=(gf.weight||'normal')+' '+gf.size+'px '+gf.fam; w=ctx.measureText(String(label||'')).width; }
+  }catch(e){}
+  if(w==null) w=String(label||'').length*gf.size*0.6;
+  return Math.round(w+7+8);
+}
 function graphStyle(){
   return [
       {selector:'node[kind="device"]', style:{
@@ -7676,7 +7723,7 @@ function graphStyle(){
         'background-color':'data(bg)','border-width':TH('boxBorderW'),'border-color':'data(bd)',
         'label':'data(label)','color':'data(fg)','font-family':'data(ff)',
         'font-size':'data(fs)','font-weight':'data(fw)','text-valign':'center','text-halign':'center',
-        'text-wrap':'wrap','text-opacity':1,
+        'text-wrap':'wrap','text-opacity':1,'line-height':DEV_LINE_H,
         /* a hairline stroke in the text's own colour thickens the glyphs a
            touch, which keeps names legible when zoomed out */
         'text-outline-color':'data(fg)','text-outline-width':0.35,'text-outline-opacity':0.9,
@@ -7742,7 +7789,10 @@ function graphStyle(){
         /* the name sits in a solid tab on the bottom edge of the box */
         'label':'data(label)','color':'data(tabfg)','font-family':'data(ff)',
         'font-size':'data(fs)','font-weight':'data(fw)',
-        'text-valign':'bottom','text-halign':'left','text-margin-y':-8,'text-margin-x':10,
+        /* anchored at the left edge, then pushed right by its own width, so
+           the tab sits inside the bottom-left corner instead of hanging off
+           the side and widening the zone around it */
+        'text-valign':'bottom','text-halign':'left','text-margin-y':-4,'text-margin-x':'data(tabdx)',   // straddles the border, clear of the boxes above
         'text-background-color':'data(bd)','text-background-opacity':1,
         'text-background-shape':'roundrectangle','text-background-padding':7,
         // a zone can be made bigger than its contents need, never smaller
@@ -7915,7 +7965,7 @@ function render(){
       const gc=zoneColor(g), gf=zoneFont(g);
       els.unshift({data:{id:'g_'+g.id, label:g.name, kind:'group', minw:(g.minW||0)+'px', minh:(g.minH||0)+'px',
                          gkind:g.parent?'zone':'site', bg:gc.bg, fg:gc.fg, bd:gc.bd, tabfg:gc.tabfg,
-                         fs:gf.size, fw:gf.weight, ff:gf.fam, pad:(g.padding||26)+'px',
+                         fs:gf.size, fw:gf.weight, ff:gf.fam, pad:zonePad(g)+'px', tabdx:tabInset(g.name, gf),
                          parent: g.parent && pathGroups.has(g.parent) ? 'g_'+g.parent : undefined}});
     }
 
@@ -8217,7 +8267,7 @@ function render(){
     const gc=zoneColor(g), gf=zoneFont(g);
     els.push({data:{id:'g_'+g.id, label:g.name, kind:'group',
                     gkind:g.parent?'zone':'site', bg:gc.bg, fg:gc.fg, bd:gc.bd, tabfg:gc.tabfg,
-                    fs:gf.size, fw:gf.weight, ff:gf.fam, pad:(g.padding||26)+'px', minw:(g.minW||0)+'px', minh:(g.minH||0)+'px',
+                    fs:gf.size, fw:gf.weight, ff:gf.fam, pad:zonePad(g)+'px', tabdx:tabInset(g.name, gf), minw:(g.minW||0)+'px', minh:(g.minH||0)+'px',
                     parent: g.parent && usedGroups.has(g.parent) ? 'g_'+g.parent : undefined}});
   }
 
@@ -9825,10 +9875,10 @@ function renderGroups(){
     const minus=document.createElement('button');
     minus.className='dev-x'; minus.textContent='−'; minus.title='Smaller';
     minus.style.marginLeft='3px';
-    minus.onclick=(ev)=>{ ev.stopPropagation(); g.padding=Math.max(8,(g.padding||26)-8); render(); autosave(); };
+    minus.onclick=(ev)=>{ ev.stopPropagation(); g.padding=Math.max(8,zonePad(g)-8); render(); autosave(); };
     const plus=document.createElement('button');
     plus.className='dev-x'; plus.textContent='+'; plus.title='Bigger';
-    plus.onclick=(ev)=>{ ev.stopPropagation(); g.padding=Math.min(120,(g.padding||26)+8); render(); autosave(); };
+    plus.onclick=(ev)=>{ ev.stopPropagation(); g.padding=Math.min(120,zonePad(g)+8); render(); autosave(); };
     const x=document.createElement('button'); x.className='dev-x'; x.textContent='×'; x.title='Remove';
     x.onclick=(ev)=>{
       ev.stopPropagation();
@@ -12539,6 +12589,14 @@ function loadProject(obj){
   STATE.groups = Array.isArray(obj.groups) ? obj.groups : [];
   if(obj.ui) STATE.ui=Object.assign({left:290,right:400,leftOpen:true,rightOpen:true}, obj.ui);
   if(obj.theme) STATE.theme=Object.assign({}, THEME_DEFAULT, obj.theme);
+  /* Projects saved while Arial was the default move to the controls' font
+     once; a font picked by hand afterwards is left alone. */
+  if(STATE.theme && !STATE.theme.fontV){
+    const OLD='Arial, Helvetica, sans-serif';
+    if(STATE.theme.devFont===OLD) STATE.theme.devFont=THEME_DEFAULT.devFont;
+    if(STATE.theme.zoneFont===OLD) STATE.theme.zoneFont=THEME_DEFAULT.zoneFont;
+    STATE.theme.fontV=2;
+  }
   STATE.savedView = obj.view || null;
   STATE._openView = (obj.view && isFinite(obj.view.zoom)) ? obj.view : null;   // applied by the first render
   STATE.anchors = obj.anchors || {};
@@ -12921,7 +12979,7 @@ document.getElementById('load-sample').onclick=()=>{
   STATE.fileName=null; STATE.fileHandle=null;
   if(typeof updateFileLabel==='function') updateFileLabel();
   STATE.devices=[]; STATE.lastTrace=null; STATE.positions={};
-  STATE.groups = LAB_ZONES.map(z=>({id:z.id, name:z.name, parent:z.parent, padding:34}));
+  STATE.groups = LAB_ZONES.map(z=>({id:z.id, name:z.name, parent:z.parent}));
   for(const d of LAB_DEVICES){
     addText(d.text, d.name);
     const dev=STATE.devices[STATE.devices.length-1];
