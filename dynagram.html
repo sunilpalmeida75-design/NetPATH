@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Dynagram 0.44 — dynamic network diagrams from device configs</title>
+<title>Dynagram 0.46 — dynamic network diagrams from device configs</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -932,6 +932,7 @@ td.mig-ok{color:var(--green,#58c48c)} td.mig-bad{color:var(--red,#e0625f)}
       <div class="rt-form">
         <input type="number" id="th-devFontSize" placeholder="device text size" min="9" max="48">
         <input type="number" id="th-zoneFontSize" placeholder="zone text size" min="9" max="48">
+        <input type="number" id="th-cloudFontSize" placeholder="cloud text size" min="9" max="48" title="Text size in the provider clouds. Blank: the same as the device boxes.">
       </div>
       <div class="rt-form" style="align-items:center">
         <label style="font-size:12px;color:var(--ink-dim)">Keep names readable when zoomed out, at least</label>
@@ -3714,7 +3715,7 @@ function applyBends(els){
 /* A small stable hash, so a link always starts from the same channel. */
 /* Still pre-1.0: the diagram, tracing and reports are solid, but the file
    format and the routing behaviour are both still moving. */
-const APP_VERSION='0.44';
+const APP_VERSION='0.46';
 function hashStr(t){ let h=0; for(let i=0;i<t.length;i++){ h=(h*31 + t.charCodeAt(i))|0; } return h; }
 function zoneAncestors(node){
   const out=new Set();
@@ -3737,6 +3738,27 @@ const ROUTE_M=14, ROUTE_GRID=20;
 /* Spread the links arriving at a box across the side they come from, so they
    meet its edge at separate points rather than all at its centre. */
 function anchorKey(e, isSource){ return (e.data('ekey')||e.id())+'|'+(isSource?'s':'t'); }
+/* Every link into a provider cloud ends at one point: the middle of the side
+   that faces most of its links, placed on the cloud outline itself (the flat
+   bottom, the top of the bumps, or the outer bump at either end), rather than
+   spread along the box around it. A point dragged by hand still wins. */
+const CLOUD_HUB={bottom:[0,0.425], top:[0.02,-0.33], left:[-0.455,0.19], right:[0.49,0.21]};
+function cloudEndpoints(n, here, w0, h0){
+  const edges=n.connectedEdges();
+  let sx=0, sy=0;
+  edges.forEach(e=>{ const o=e.source().id()===n.id()?e.target():e.source(); const p=o.position(); if(p&&isFinite(p.x)){ sx+=p.x-here.x; sy+=p.y-here.y; } });
+  const side = Math.abs(sx)>Math.abs(sy) ? (sx>=0?'right':'left') : (sy>=0?'bottom':'top');
+  const [px,py]=CLOUD_HUB[side];
+  edges.forEach(e=>{
+    const mine=e.source().id()===n.id();
+    const a=STATE.anchors[anchorKey(e,mine)];
+    const qx=a?a.px:px, qy=a?a.py:py, sd=a?a.side:side;
+    e.data(mine?'sep':'tep', (qx*100).toFixed(1)+'% '+(qy*100).toFixed(1)+'%');
+    e.data(mine?'spx':'tpx', here.x+qx*w0);
+    e.data(mine?'spy':'tpy', here.y+qy*h0);
+    e.data(mine?'sside':'tside', sd);
+  });
+}
 function assignEndpoints(cy){
   STATE.anchors = STATE.anchors || {};
   cy.nodes().forEach(n=>{
@@ -3744,6 +3766,7 @@ function assignEndpoints(cy){
     const here=n.position();
     if(!here || !isFinite(here.x)) return;
     const w0=n.outerWidth()||60, h0=n.outerHeight()||30;
+    if(n.data('kind')==='wan' || n.data('kind')==='cloud'){ cloudEndpoints(n, here, w0, h0); return; }
     const sides={top:[], bottom:[], left:[], right:[]};
     n.connectedEdges().forEach(e=>{
       const mine = e.source().id()===n.id();
@@ -4207,9 +4230,9 @@ function sizeNodes(els){
     if(k==='group') continue;
     if(k==='wan' || k==='cloud'){
       /* same text size and font as the device boxes */
-      const df=deviceFont(null);
-      el.data.fs=df.size; el.data.tdy=Math.round(df.size*0.35);   // a little below centre, under the bumps
-      const cs=cloudSize(el.data.label), s=cloudBoxSize(el.data.label, df.size, df.weight, df.fam);
+      const df=deviceFont(null), cfz=cloudFontSize();
+      el.data.fs=cfz; el.data.tdy=Math.round(cfz*0.35);   // a little below centre, under the bumps
+      const cs=cloudSize(el.data.label), s=cloudBoxSize(el.data.label, cfz, df.weight, df.fam);
       // a size set by dragging is kept, but never smaller than the name needs
       el.data.w=cs?Math.max(cs.w,s.w):s.w; el.data.h=cs?Math.max(cs.h,s.h):s.h; continue;
     }
@@ -7736,6 +7759,9 @@ function cloudUri(strokeOverride, widthOverride){
 }
 /* A cloud's size around its name: wider and taller than a box, because the
    outline's bumps and curves take room around the text. */
+/* Cloud text: its own size when one is set in Settings, otherwise the same
+   as the device boxes. */
+function cloudFontSize(){ return +TH('cloudFontSize') || deviceFont(null).size; }
 function cloudBoxSize(label, fs, fw, ff){
   const m=measureLabel(label, fs, fw, ff), th=m.lines*fs*DEV_LINE_H;
   return {w:Math.round(Math.max(fs*6, m.w*1.45+fs*2.2)), h:Math.round(Math.max(fs*3.4, th*1.9+fs*1.4))};
@@ -8367,13 +8393,23 @@ function render(){
           if(a.dev===b.dev) continue;
           let id;
           if(pairOnly){
-            // one bare link per device pair, however many subnets join them
+            /* One bare line per device pair for the links that work, however
+               many subnets join them. A link with either end shut down gets a
+               line of its own, drawn as down: folded into the pair's line it
+               took whichever state the first subnet had, so a shut link next
+               to a working one disappeared into an ordinary-looking line. */
             const pk=[a.dev.id,b.dev.id].sort().join('|');
-            id=pairEdge[pk];
-            if(!id){
-              id='e'+(++e); pairEdge[pk]=id;
-              els.push({data:{id, source:a.dev.id, target:b.dev.id, kind:'p2p', label:'',
-                              down: (a.iface.shutdown||b.iface.shutdown)?1:0}});
+            const dead=a.iface.shutdown||b.iface.shutdown;
+            if(dead){
+              id='e'+(++e);
+              els.push({data:{id, source:a.dev.id, target:b.dev.id, kind:'p2p', net:k, label:'', down:1,
+                              sLab:a.iface.shutdown?shortIf(a.iface.name)+' \u2717':'', tLab:b.iface.shutdown?shortIf(b.iface.name)+' \u2717':''}});
+            } else {
+              id=pairEdge[pk];
+              if(!id){
+                id='e'+(++e); pairEdge[pk]=id;
+                els.push({data:{id, source:a.dev.id, target:b.dev.id, kind:'p2p', label:'', down:0}});
+              }
             }
           } else {
             id='e'+(++e);
@@ -8938,9 +8974,9 @@ function paintTrace(res){
         steps.push({eid:pick.e.id(), forward:pick.e.source().id()===anchor.id()});
         seq.push(pick.n.id());
       } else {
-        const df=deviceFont(null), cs=cloudBoxSize('Internet', df.size, df.weight, df.fam);
+        const df=deviceFont(null), cfz=cloudFontSize(), cs=cloudBoxSize('Internet', cfz, df.weight, df.fam);
         cy.add([
-          {group:'nodes', data:{id:'__net', label:'Internet', kind:'cloud', w:cs.w, h:cs.h, fs:df.size, tdy:Math.round(df.size*0.35)},
+          {group:'nodes', data:{id:'__net', label:'Internet', kind:'cloud', w:cs.w, h:cs.h, fs:cfz, tdy:Math.round(cfz*0.35)},
            position:freeSpotNear(cy, anchor, cs.w, cs.h), classes:'tmp', grabbable:true, selectable:false},
           {group:'edges', data:{id:'__nete', source:seq[seq.length-1], target:'__net', kind:'exit',
            label: res.exitVia ? 'via '+res.exitVia : 'default route'}, classes:'tmp'}
@@ -13215,6 +13251,10 @@ function initTheme(){
     ztc.oninput=()=>{ STATE.theme.zoneTabColor=ztc.value; render(); renderGroups(); autosave(); };
   }
   const dfs=document.getElementById('th-devFontSize'), zfs=document.getElementById('th-zoneFontSize');
+  const cfs=document.getElementById('th-cloudFontSize');
+  if(cfs){ cfs.value=STATE.theme.cloudFontSize||'';
+    cfs.onchange=()=>{ const v=parseInt(cfs.value,10); if(v) STATE.theme.cloudFontSize=Math.max(9,Math.min(48,v)); else delete STATE.theme.cloudFontSize;
+      cfs.value=STATE.theme.cloudFontSize||''; applyTheme(); autosave(); }; }
   const wrn=document.getElementById('th-wrapNames');
   if(wrn){ wrn.checked=TH('wrapNames')!==false;
     wrn.onchange=()=>{ STATE.theme.wrapNames=wrn.checked; applyTheme(); if(typeof rebuild==='function') rebuild(); autosave(); }; }
@@ -13260,6 +13300,7 @@ function initTheme(){
     if(zff) fontOpts(zff, STATE.theme.zoneFont);
     if(dfs) dfs.value=STATE.theme.devFontSize||13;
     if(zfs) zfs.value=STATE.theme.zoneFontSize||12;
+    { const c=document.getElementById('th-cloudFontSize'); if(c) c.value=STATE.theme.cloudFontSize||''; }
     { const m=document.getElementById('th-minNamePx'); if(m) m.value=TH('minNamePx'); const w=document.getElementById('th-wrapNames'); if(w) w.checked=TH('wrapNames')!==false; }
     if(dBold) dBold.checked=!!STATE.theme.devBold;
     if(zBold) zBold.checked=!!STATE.theme.zoneBold;
