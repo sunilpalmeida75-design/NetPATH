@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Dynagram 0.47 — dynamic network diagrams from device configs</title>
+<title>Dynagram 0.48 — dynamic network diagrams from device configs</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -774,6 +774,10 @@ td.mig-ok{color:var(--green,#58c48c)} td.mig-bad{color:var(--red,#e0625f)}
       <button class="btn zoom-pct" id="zoom-pct" title="Back to 100% (the whole diagram)">100%</button>
       <button class="btn" id="fit">Fit</button>
       <button class="btn" id="compact" title="Compact layout: close up empty space between boxes and zones, keeping every row and column in order. Undo with ↶.">Compact</button>
+      </span>
+      <span class="zoom-group" id="site-all" style="display:none">
+      <button class="btn" id="sites-expand" title="Open every site to show its devices">⊞ Expand all</button>
+      <button class="btn" id="sites-collapse" title="Fold every site into one box">⊟ Collapse all</button>
       </span>
       <button class="btn" id="undo" title="Undo layout change">↶</button>
       <button class="btn" id="redo" title="Redo layout change">↷</button>
@@ -3723,7 +3727,7 @@ function applyBends(els){
 /* A small stable hash, so a link always starts from the same channel. */
 /* Still pre-1.0: the diagram, tracing and reports are solid, but the file
    format and the routing behaviour are both still moving. */
-const APP_VERSION='0.47';
+const APP_VERSION='0.48';
 function hashStr(t){ let h=0; for(let i=0;i<t.length;i++){ h=(h*31 + t.charCodeAt(i))|0; } return h; }
 function zoneAncestors(node){
   const out=new Set();
@@ -7789,6 +7793,58 @@ function cloudBoxSize(label, fs, fw, ff){
    box and a provider cloud) become one line labelled with how many links it
    stands for. Working and shut-down links stay separate lines. The box sits
    where the site's devices sit, so folding and unfolding keeps the map. */
+/* Folded site boxes: one size for every DC, one for every other site. */
+const SITE_BOX={dc:{w:340, h:170}, other:{w:240, h:120}};
+/* The bird's-eye keeps the sites where they are relative to each other but
+   pulls them together: every position is scaled toward the middle by the
+   empty space between them down to a set gap. A site opened with + moves as
+   a whole and keeps its full size, so the boxes around it make room. A box
+   dragged here stays where it was put. */
+function birdsEyeLayout(els){
+  const G=130;
+  const nodes=new Map(); for(const e of els) if(!e.data.source) nodes.set(e.data.id, e);
+  const topOf=(id)=>{ let n=nodes.get(id), top=null, guard=0;
+    while(n && guard++<30){ if(n.data.kind==='group') top=n; const par=n.data.parent; if(!par) break; n=nodes.get(par); }
+    return top; };
+  const items=new Map();
+  for(const e of nodes.values()){
+    if(e.data.kind==='group') continue;
+    if(!e.position) return;                       // first layout not done yet: leave it to the layout
+    let key, box=null, site=null;
+    if(e.data.kind==='site'){ key='S:'+e.data.siteId; box=e; }
+    else { const t=topOf(e.data.id); if(t){ key='O:'+t.data.id; site=t.data.label; } else key='L:'+e.data.id; }
+    let it=items.get(key); if(!it){ it={key, nodes:[], box, site}; items.set(key,it); }
+    it.nodes.push(e);
+  }
+  const arr=[...items.values()];
+  for(const it of arr){
+    if(it.box){ it.c={x:it.box.position.x, y:it.box.position.y}; it.w=it.box.data.w; it.h=it.box.data.h; continue; }
+    let x1=Infinity, y1=Infinity, x2=-Infinity, y2=-Infinity;
+    for(const n of it.nodes){ const hw=(n.data.w||150)/2, hh=(n.data.h||70)/2;
+      x1=Math.min(x1,n.position.x-hw); x2=Math.max(x2,n.position.x+hw); y1=Math.min(y1,n.position.y-hh); y2=Math.max(y2,n.position.y+hh); }
+    const pad=it.site?70:0;                       // an opened site's own border and name tab
+    it.c={x:(x1+x2)/2, y:(y1+y2)/2}; it.w=x2-x1+2*pad; it.h=y2-y1+2*pad;
+  }
+  /* Squeeze the empty bands between items down to a set gap on each axis —
+     the same idea as Compact: nothing passes anything else, so rows and
+     columns keep their order, and an opened site keeps its full size. */
+  const squeeze=(axis, size)=>{
+    const iv=arr.map(it=>({a:it.c[axis]-it[size]/2, b:it.c[axis]+it[size]/2})).sort((p,q)=>p.a-q.a);
+    const bands=[]; for(const v of iv){ const L=bands[bands.length-1]; if(L && v.a<=L.b) L.b=Math.max(L.b,v.b); else bands.push({a:v.a,b:v.b}); }
+    const gaps=[]; for(let i=1;i<bands.length;i++){ const w=bands[i].a-bands[i-1].b; gaps.push({s:bands[i-1].b, e:bands[i].a, cut:Math.max(0,w-G)}); }
+    return (v)=>{ let sh=0; for(const g of gaps){ if(v>=g.e) sh+=g.cut; else if(v>g.s){ sh+=g.cut*(v-g.s)/(g.e-g.s); break; } else break; } return v-sh; };
+  };
+  const fx=squeeze('x','w'), fy=squeeze('y','h');
+  const savedFor=(pkey)=>STATE.positions['sites|'+pkey];
+  for(const it of arr){
+    let P={x:fx(it.c.x), y:fy(it.c.y)};
+    if(it.box){ const sv=savedFor(it.box.data.pkey); it.box.position = sv ? {x:sv.x, y:sv.y} : P; continue; }
+    if(it.site){ const sv=savedFor('site:'+it.site); if(sv) P={x:sv.x, y:sv.y}; }
+    else if(it.nodes.length===1){ const n=it.nodes[0], sv=savedFor(nodePosKey(n.data)); if(sv) P={x:sv.x, y:sv.y}; }
+    const dx=P.x-it.c.x, dy=P.y-it.c.y;
+    for(const n of it.nodes) n.position={x:n.position.x+dx, y:n.position.y+dy};
+  }
+}
 const isDcSite=(name)=>/(^|[\s_-])DC\s*$/i.test(String(name||'').trim());
 function collapseSites(els, shut){
   STATE.collapsedMap={};
@@ -7819,27 +7875,22 @@ function collapseSites(els, shut){
     if(!devs.length && !Object.values(map).includes('site_'+gid)) continue;
     const name=g.name, big=isDcSite(name);
     const gc=zoneColor(g), df=deviceFont(null);
-    const key=ns+'site:'+name;
-    if(!STATE.positions[key] && !STATE.positions['site:'+name]){
-      let sx=0, sy=0, k=0;
-      for(const d of devs){ const p=savedPos(nodePosKey(d.data)); if(p){ sx+=p.x; sy+=p.y; k++; } }
-      if(k) STATE.positions[key]={x:sx/k, y:sy/k};
-    }
     const nz=zones[gid]||0;
-    /* The box takes a good share of the room the site had, so the folded map
-       reads at the same zoom as the full one: 60% of the site's width and
-       height for a DC, 40% for the rest. The name is sized to fill it. */
-    let x1=Infinity, y1=Infinity, x2=-Infinity, y2=-Infinity;
-    for(const d of devs){ const q=savedPos(nodePosKey(d.data)); if(!q) continue;
-      x1=Math.min(x1,q.x-80); x2=Math.max(x2,q.x+80); y1=Math.min(y1,q.y-40); y2=Math.max(y2,q.y+40); }
-    const share=big?0.6:0.4;
-    const W=Math.round(Math.max(big?360:220, isFinite(x1)?(x2-x1)*share:0));
-    const H=Math.round(Math.max(big?180:110, isFinite(y1)?(y2-y1)*share:0, W*0.42));
-    const label=name+'\n'+devs.length+' device'+(devs.length===1?'':'s')+(nz?' · '+nz+' zone'+(nz===1?'':'s'):'');
-    const m=measureLabel(label, 100, '700', df.fam);
-    const fs=Math.round(Math.max(14, Math.min(160, (W*0.8)/(m.w/100||1), (H*0.7)/(m.lines*DEV_LINE_H))));
-    out.push({data:{id:'site_'+gid, siteId:gid, kind:'site', pkey:'site:'+name, big:big?1:0, label, w:W, h:H,
-      bg:gc.bg, fg:gc.tabfg||TH('zoneText'), bd:gc.bd, bw:Math.max(big?5:3, Math.round(fs/(big?7:10))), ff:df.fam, fs}});
+    /* Every DC is the same size, every other site the same smaller size, and
+       the name is drawn like a device box's: its text colour, typeface and
+       weight, just bigger. A long name wraps rather than shrinking the box. */
+    const W=big?SITE_BOX.dc.w:SITE_BOX.other.w, H=big?SITE_BOX.dc.h:SITE_BOX.other.h;
+    const dfnt=deviceFont(null);
+    const label=wrapName(name)+'\n'+devs.length+' device'+(devs.length===1?'':'s')+(nz?' · '+nz+' zone'+(nz===1?'':'s'):'');
+    const want=Math.round(dfnt.size*(big?1.6:1.25));
+    const m=measureLabel(label, 100, dfnt.weight, dfnt.fam);
+    const fs=Math.round(Math.max(10, Math.min(want, (W*0.86)/(m.w/100||1), (H*0.8)/(m.lines*DEV_LINE_H))));
+    let cx=0, cy2=0, k=0;
+    for(const d of devs) if(d.position){ cx+=d.position.x; cy2+=d.position.y; k++; }
+    const saved=STATE.positions[(STATE.posNS||'simple|')+'site:'+name];
+    out.push({data:{id:'site_'+gid, siteId:gid, sname:name, kind:'site', pkey:'site:'+name, big:big?1:0, label, w:W, h:H,
+      bg:TH('devBg'), fg:TH('devText'), bd:gc.bd, bw:big?4:2.5, ff:dfnt.fam, fw:dfnt.weight, fs},
+      position: saved ? {x:saved.x, y:saved.y} : (k ? {x:cx/k, y:cy2/k} : undefined)});
   }
   const agg=new Map();
   for(const e of els){
@@ -7895,9 +7946,22 @@ function siteButtons(cy){
     for(const b of have.values()) b.remove();
   };
   const later=()=>{ if(!cy._sbRaf) cy._sbRaf=requestAnimationFrame(place); };
+  // Expand all / Collapse all only make sense when there are sites
+  { const box=document.getElementById('site-all'); if(box) box.style.display=(STATE.groups||[]).some(g=>!g.parent) && !STATE.viewIsPath ? '' : 'none'; }
   cy.on('render viewport position resize', later);
   later();
 }
+/* Open or fold every site at once — in the bird's-eye and in the topology
+   alike — then frame the result. */
+function setAllSites(open){
+  const tops=(STATE.groups||[]).filter(g=>!g.parent).map(g=>g.id);
+  if(STATE.sitesView) STATE.siteOpen=new Set(open?tops:[]);
+  else STATE.siteShut=new Set(open?[]:tops);
+  if(STATE.cy) capturePositions(STATE.cy);
+  STATE._needFit=true; render(); autosave();
+}
+document.getElementById('sites-expand').onclick=()=>setAllSites(true);
+document.getElementById('sites-collapse').onclick=()=>setAllSites(false);
 function toggleSite(gid){
   if(STATE.sitesView){ STATE.siteOpen.has(gid) ? STATE.siteOpen.delete(gid) : STATE.siteOpen.add(gid); }
   else { STATE.siteShut.has(gid) ? STATE.siteShut.delete(gid) : STATE.siteShut.add(gid); }
@@ -7969,8 +8033,9 @@ function graphStyle(){
       {selector:'node[kind="site"]', style:{
         'shape':'round-rectangle','width':'data(w)','height':'data(h)',
         'background-color':'data(bg)','border-width':'data(bw)','border-color':'data(bd)','border-style':'solid',
-        'label':'data(label)','color':'data(fg)','font-family':'data(ff)','font-size':'data(fs)','font-weight':700,
-        'text-valign':'center','text-halign':'center','text-wrap':'wrap','line-height':DEV_LINE_H,'z-index':5}},
+        'label':'data(label)','color':'data(fg)','font-family':'data(ff)','font-size':'data(fs)','font-weight':'data(fw)',
+        'text-valign':'center','text-halign':'center','text-wrap':'wrap','line-height':DEV_LINE_H,'z-index':5,
+        'text-outline-color':'data(fg)','text-outline-width':0.35,'text-outline-opacity':0.9}},
       {selector:'edge[kind="sitelink"]', style:{'width':'data(lw)','font-size':'data(lfs)','font-weight':600,'text-background-opacity':0.9}},
       {selector:'node[kind="wan"], node[kind="cloud"]', style:{
         'shape':'round-rectangle','width':'data(w)','height':'data(h)',
@@ -8628,15 +8693,7 @@ function render(){
   STATE.posNS = (view==='find'||view==='sel'||view==='vrf'||qActive())
     ? 'simple|' : view+'|';
   STATE.posWriteNS = view+'|';
-  // fold the sites that are shut: in the bird's-eye all but those opened, elsewhere those closed with −
-  STATE.siteOpen = STATE.siteOpen || new Set(); STATE.siteShut = STATE.siteShut || new Set();
-  if(!!STATE.sitesView !== sitesView && STATE.cy) STATE._needFit=true;   // entering or leaving the bird's-eye: frame it
-  STATE.sitesView = sitesView;
-  {
-    const tops=(STATE.groups||[]).filter(g=>!g.parent).map(g=>g.id);
-    const shut=new Set(sitesView ? tops.filter(id=>!STATE.siteOpen.has(id)) : tops.filter(id=>STATE.siteShut.has(id)));
-    if(shut.size){ const folded=collapseSites(els, shut); els.length=0; for(const x of folded) els.push(x); } else STATE.collapsedMap={};
-  }
+  if(sitesView) STATE.posWriteNS='sites|';      // the bird's-eye keeps its own arrangement
   const keyOf = e => nodePosKey(e.data);
   const nodes = els.filter(e=>!e.data.source && e.data.kind!=='group');
 
@@ -8727,6 +8784,18 @@ function render(){
   if(STATE.cy) STATE.cy.destroy();
   if((document.getElementById('opt-nolinks')||{}).checked){
     for(let i=els.length-1;i>=0;i--) if(els[i].data.source) els.splice(i,1);
+  }
+  /* Fold the sites that are shut — in the bird's-eye all but those opened,
+     elsewhere those closed with − — now that every device has its place and
+     every link, layer 2 included, is in. */
+  STATE.siteOpen = STATE.siteOpen || new Set(); STATE.siteShut = STATE.siteShut || new Set();
+  if(!!STATE.sitesView !== sitesView && STATE.cy) STATE._needFit=true;   // entering or leaving the bird's-eye: frame it
+  STATE.sitesView = sitesView;
+  {
+    const tops=(STATE.groups||[]).filter(g=>!g.parent).map(g=>g.id);
+    const shut=new Set(sitesView ? tops.filter(id=>!STATE.siteOpen.has(id)) : tops.filter(id=>STATE.siteShut.has(id)));
+    if(shut.size){ const folded=collapseSites(els, shut); els.length=0; for(const x of folded) els.push(x); } else STATE.collapsedMap={};
+    if(sitesView) birdsEyeLayout(els);
   }
   pruneDanglingLinks(els); assignLinkColors(els); applyBends(els); sizeNodes(els);
   const cy = cytoscape({
@@ -9107,6 +9176,7 @@ function freeSpotNear(cy, anchor, w, h){
    pan by as little as needed, and zoom out only if they cannot all fit. */
 function bringIntoView(cy, eles){
   if(!cy || !eles || !eles.length) return;
+  if(STATE._needFit || STATE._fitTimer) return;   // a full fit is on its way and will show everything
   const t=fitTarget(cy, eles); if(!t) return;
   const z=cy.zoom(), pan=cy.pan(), bb=eles.boundingBox({includeLabels:true});
   const r={x1:bb.x1*z+pan.x, x2:bb.x2*z+pan.x, y1:bb.y1*z+pan.y, y2:bb.y2*z+pan.y};
@@ -11943,6 +12013,7 @@ function fitTarget(cy, only){
 }
 function fitDiagram(cy){
   cy=cy||STATE.cy; if(!cy || (cy.destroyed && cy.destroyed())) return;
+  if(cy.stop) cy.stop(true, false);            // a pan still animating (keeping a trace in view) must not undo the fit
   const t=fitTarget(cy);
   if(t){ cy.viewport({zoom:t.zoom, pan:t.pan}); cy._fitBase=t.zoom; } else { cy.fit(undefined,20); cy._fitBase=cy.zoom(); }
   syncZoomUI(cy);
