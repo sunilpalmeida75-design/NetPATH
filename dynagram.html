@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Dynagram 0.46 — dynamic network diagrams from device configs</title>
+<title>Dynagram 0.47 — dynamic network diagrams from device configs</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -600,6 +600,11 @@ table.bb tr.bb-gap td{color:var(--ink-faint);text-align:center;font:italic 11.5p
 
 .mig-box{display:flex;flex-direction:column}
 .zoom-group{display:inline-flex;align-items:center;gap:6px;flex:none}
+#site-btns{position:absolute;inset:0;pointer-events:none;z-index:4;overflow:hidden}
+.site-btn{position:absolute;width:22px;height:22px;padding:0;border-radius:6px;pointer-events:auto;cursor:pointer;
+  background:rgba(27,34,42,.92);color:var(--ink);border:1px solid var(--rule);font:700 15px/20px var(--sans);text-align:center;
+  box-shadow:0 2px 6px rgba(0,0,0,.35)}
+.site-btn:hover{border-color:var(--cyan,#4fc3d9);color:var(--cyan,#4fc3d9)}
 .toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(8px);z-index:200;opacity:0;pointer-events:none;
   background:rgba(27,34,42,.96);color:var(--ink);border:1px solid var(--rule);border-radius:8px;padding:9px 16px;font-size:13px;
   box-shadow:0 8px 24px rgba(0,0,0,.35);transition:opacity .2s, transform .2s}
@@ -735,6 +740,7 @@ td.mig-ok{color:var(--green,#58c48c)} td.mig-bad{color:var(--red,#e0625f)}
         <select id="opt-view">
           <option value="simple" selected>Topology</option>
           <option value="transit">Topology + segments</option>
+          <option value="sites">Sites (bird's-eye)</option>
           <!-- the rest are reached by an action (trace, open a link, select,
                search) and only shown while you are in them -->
           <option value="path" class="ctx hidden" hidden disabled>Traced path</option>
@@ -3595,7 +3601,8 @@ function edgeKey(d){
 function pruneDanglingLinks(els){
   const byId={};
   for(const el of els) if(!el.data.source) byId[el.data.id]=el.data;
-  const isDevice=(id)=>byId[id] && byId[id].kind==='device';
+  // a folded site stands for its devices, so it counts as one here
+  const isDevice=(id)=>byId[id] && (byId[id].kind==='device' || byId[id].kind==='site');
 
   const keptEdges=[], degree={};
   for(const el of els){
@@ -3654,6 +3661,7 @@ function assignLinkColors(els){
   }
   const sitesOf=(id)=>{
     if(isDev(id)) return new Set([devSite[id]]);
+    if(byId[id] && byId[id].kind==='site') return new Set([byId[id].siteId]);
     const out=new Set();
     for(const d of (hubDevs[id]||[])) out.add(devSite[d]);
     return out;
@@ -3715,7 +3723,7 @@ function applyBends(els){
 /* A small stable hash, so a link always starts from the same channel. */
 /* Still pre-1.0: the diagram, tracing and reports are solid, but the file
    format and the routing behaviour are both still moving. */
-const APP_VERSION='0.46';
+const APP_VERSION='0.47';
 function hashStr(t){ let h=0; for(let i=0;i<t.length;i++){ h=(h*31 + t.charCodeAt(i))|0; } return h; }
 function zoneAncestors(node){
   const out=new Set();
@@ -4228,6 +4236,14 @@ function sizeNodes(els){
     if(el.data.w!=null) continue;
     const k=el.data.kind;
     if(k==='group') continue;
+    if(k==='site'){
+      if(el.data.w) continue;
+      const df=deviceFont(null), fs=el.data.fs, m=measureLabel(el.data.label, fs, '700', df.fam);
+      const big=el.data.big===1;
+      el.data.w=Math.round(Math.max(big?300:200, m.w+fs*(big?3:2.4)));
+      el.data.h=Math.round(Math.max(big?150:100, m.lines*fs*DEV_LINE_H+fs*(big?3.2:2.4)));
+      continue;
+    }
     if(k==='wan' || k==='cloud'){
       /* same text size and font as the device boxes */
       const df=deviceFont(null), cfz=cloudFontSize();
@@ -7766,6 +7782,132 @@ function cloudBoxSize(label, fs, fw, ff){
   const m=measureLabel(label, fs, fw, ff), th=m.lines*fs*DEV_LINE_H;
   return {w:Math.round(Math.max(fs*6, m.w*1.45+fs*2.2)), h:Math.round(Math.max(fs*3.4, th*1.9+fs*1.4))};
 }
+/* ---------- folding sites ----------
+   A folded site is one box. Everything inside it — zones, devices, local
+   segments — is taken out; links that leave the site are re-attached to the
+   box, and the links between the same two boxes (or a box and a device, or a
+   box and a provider cloud) become one line labelled with how many links it
+   stands for. Working and shut-down links stay separate lines. The box sits
+   where the site's devices sit, so folding and unfolding keeps the map. */
+const isDcSite=(name)=>/(^|[\s_-])DC\s*$/i.test(String(name||'').trim());
+function collapseSites(els, shut){
+  STATE.collapsedMap={};
+  if(!shut || !shut.size) return els;
+  const nodes=new Map(); for(const e of els) if(!e.data.source) nodes.set(e.data.id, e);
+  const topOf=(id)=>{ let n=nodes.get(id), top=null, guard=0;
+    while(n && guard++<30){ if(n.data.kind==='group') top=n.data.id; const par=n.data.parent; if(!par) break; n=nodes.get(par); }
+    return top; };
+  const map={}, members={}, zones={};
+  for(const [id,e] of nodes){
+    const t=topOf(id); if(!t) continue;
+    const gid=t.replace(/^g_/,''); if(!shut.has(gid)) continue;
+    if(e.data.kind==='group'){ if(id!==t) (zones[gid]=zones[gid]||0, zones[gid]++); }
+    else { map[id]='site_'+gid; if(e.data.kind==='device') (members[gid]=members[gid]||[]).push(e); }
+  }
+  STATE.collapsedMap=map;
+  const out=[];
+  for(const e of els){
+    if(e.data.source) continue;
+    const t=topOf(e.data.id);
+    if(t && shut.has(t.replace(/^g_/,''))) continue;           // inside a folded site
+    out.push(e);
+  }
+  const ns=STATE.posNS||'simple|';
+  for(const gid of shut){
+    const g=(STATE.groups||[]).find(x=>x.id===gid); if(!g) continue;
+    const devs=members[gid]||[];
+    if(!devs.length && !Object.values(map).includes('site_'+gid)) continue;
+    const name=g.name, big=isDcSite(name);
+    const gc=zoneColor(g), df=deviceFont(null);
+    const key=ns+'site:'+name;
+    if(!STATE.positions[key] && !STATE.positions['site:'+name]){
+      let sx=0, sy=0, k=0;
+      for(const d of devs){ const p=savedPos(nodePosKey(d.data)); if(p){ sx+=p.x; sy+=p.y; k++; } }
+      if(k) STATE.positions[key]={x:sx/k, y:sy/k};
+    }
+    const nz=zones[gid]||0;
+    /* The box takes a good share of the room the site had, so the folded map
+       reads at the same zoom as the full one: 60% of the site's width and
+       height for a DC, 40% for the rest. The name is sized to fill it. */
+    let x1=Infinity, y1=Infinity, x2=-Infinity, y2=-Infinity;
+    for(const d of devs){ const q=savedPos(nodePosKey(d.data)); if(!q) continue;
+      x1=Math.min(x1,q.x-80); x2=Math.max(x2,q.x+80); y1=Math.min(y1,q.y-40); y2=Math.max(y2,q.y+40); }
+    const share=big?0.6:0.4;
+    const W=Math.round(Math.max(big?360:220, isFinite(x1)?(x2-x1)*share:0));
+    const H=Math.round(Math.max(big?180:110, isFinite(y1)?(y2-y1)*share:0, W*0.42));
+    const label=name+'\n'+devs.length+' device'+(devs.length===1?'':'s')+(nz?' · '+nz+' zone'+(nz===1?'':'s'):'');
+    const m=measureLabel(label, 100, '700', df.fam);
+    const fs=Math.round(Math.max(14, Math.min(160, (W*0.8)/(m.w/100||1), (H*0.7)/(m.lines*DEV_LINE_H))));
+    out.push({data:{id:'site_'+gid, siteId:gid, kind:'site', pkey:'site:'+name, big:big?1:0, label, w:W, h:H,
+      bg:gc.bg, fg:gc.tabfg||TH('zoneText'), bd:gc.bd, bw:Math.max(big?5:3, Math.round(fs/(big?7:10))), ff:df.fam, fs}});
+  }
+  const agg=new Map();
+  for(const e of els){
+    if(!e.data.source) continue;
+    const s=map[e.data.source]||e.data.source, t=map[e.data.target]||e.data.target;
+    if(s===t) continue;                                      // inside one folded site
+    if(s===e.data.source && t===e.data.target){ out.push(e); continue; }   // untouched
+    const down=e.data.down===1?1:0;
+    const k=[s,t].sort().join('|')+'|'+down;
+    let a=agg.get(k);
+    if(!a){ a={data:{id:'sl_'+agg.size+'_'+s+'_'+t, source:s, target:t, kind:'sitelink', down, n:0, lw:2}}; agg.set(k,a); }
+    a.data.n++;
+  }
+  const boxFs={}; for(const o of out) if(o.data.kind==='site') boxFs[o.data.id]=o.data.fs;
+  for(const a of agg.values()){
+    const n=a.data.n;
+    a.data.lfs=Math.round(Math.max(12, 0.62*Math.max(boxFs[a.data.source]||0, boxFs[a.data.target]||0)));
+    a.data.label = a.data.down ? n+' shut' : (n>1 ? n+' links' : '');
+    a.data.lw = Math.min(6, 1.6+Math.log2(n)*1.2) * Math.max(1, a.data.lfs/20);
+    out.push(a);
+  }
+  return out;
+}
+/* The + and − on each site: real buttons over the diagram, so they stay
+   the same size on screen at any zoom and are always easy to hit. */
+function siteButtons(cy){
+  const stage=document.querySelector('.stage'); if(!stage || !cy) return;
+  let layer=document.getElementById('site-btns');
+  if(!layer){ layer=document.createElement('div'); layer.id='site-btns'; stage.appendChild(layer); }
+  const place=()=>{
+    cy._sbRaf=null;
+    if(cy.destroyed && cy.destroyed()) return;
+    if(STATE.cy!==cy || STATE.viewIsPath){ layer.innerHTML=''; return; }
+    const c=cy.container().getBoundingClientRect(), sr=stage.getBoundingClientRect();
+    const want=[];
+    cy.nodes('[kind="site"]').forEach(n=>want.push({id:n.data('siteId'), open:false, bb:n.renderedBoundingBox({includeLabels:false})}));
+    cy.nodes('[kind="group"]').forEach(n=>{ if(n.data('gkind')!=='site') return;
+      want.push({id:n.id().replace(/^g_/,''), open:true, bb:n.renderedBoundingBox({includeLabels:false})}); });
+    const have=new Map([...layer.children].map(b=>[b.dataset.site,b]));
+    for(const w of want){
+      let b=have.get(w.id);
+      if(!b){ b=document.createElement('button'); b.className='site-btn'; b.dataset.site=w.id; layer.appendChild(b);
+        b.onclick=(ev)=>{ ev.stopPropagation(); toggleSite(b.dataset.site); }; }
+      have.delete(w.id);
+      const g=(STATE.groups||[]).find(x=>x.id===w.id);
+      b.textContent=w.open?'−':'+';
+      b.title=(w.open?'Fold ':'Open ')+(g?g.name:'site')+(w.open?' into one box':' to show its devices');
+      const x=c.left-sr.left+w.bb.x2-11, y=c.top-sr.top+w.bb.y1-11;   // centred on the top-right corner
+      const off = x<-30 || y<-30 || x>sr.width || y>sr.height;
+      b.style.display=off?'none':'';
+      b.style.left=Math.round(x)+'px'; b.style.top=Math.round(y)+'px';
+    }
+    for(const b of have.values()) b.remove();
+  };
+  const later=()=>{ if(!cy._sbRaf) cy._sbRaf=requestAnimationFrame(place); };
+  cy.on('render viewport position resize', later);
+  later();
+}
+function toggleSite(gid){
+  if(STATE.sitesView){ STATE.siteOpen.has(gid) ? STATE.siteOpen.delete(gid) : STATE.siteOpen.add(gid); }
+  else { STATE.siteShut.has(gid) ? STATE.siteShut.delete(gid) : STATE.siteShut.add(gid); }
+  if(STATE.cy) capturePositions(STATE.cy);
+  render(); autosave();
+  // whatever just opened or folded, keep it on screen
+  setTimeout(()=>{ const cy=STATE.cy; if(!cy) return;
+    const n=cy.getElementById('g_'+gid).length ? cy.getElementById('g_'+gid) : cy.getElementById('site_'+gid);
+    if(n.length) bringIntoView(cy, n); }, 350);
+}
 function graphStyle(){
   return [
       {selector:'node[kind="device"]', style:{
@@ -7823,6 +7965,13 @@ function graphStyle(){
       /* Provider connections (Internet, carrier WANs) are drawn as a cloud:
          an outline image stretched to the node, in the Provider cloud colour,
          with the name in the same font and size as the device boxes. */
+      /* a folded site: one box for everything in it, a DC drawn bigger and heavier */
+      {selector:'node[kind="site"]', style:{
+        'shape':'round-rectangle','width':'data(w)','height':'data(h)',
+        'background-color':'data(bg)','border-width':'data(bw)','border-color':'data(bd)','border-style':'solid',
+        'label':'data(label)','color':'data(fg)','font-family':'data(ff)','font-size':'data(fs)','font-weight':700,
+        'text-valign':'center','text-halign':'center','text-wrap':'wrap','line-height':DEV_LINE_H,'z-index':5}},
+      {selector:'edge[kind="sitelink"]', style:{'width':'data(lw)','font-size':'data(lfs)','font-weight':600,'text-background-opacity':0.9}},
       {selector:'node[kind="wan"], node[kind="cloud"]', style:{
         'shape':'round-rectangle','width':'data(w)','height':'data(h)',
         'background-opacity':0,'border-width':0,
@@ -7893,6 +8042,10 @@ function render(){
      remain; a saved project asking for them gets the nearest. */
   if(view==='devices') view='simple';
   if(view==='all')     view='transit';
+  /* Sites (bird's-eye) is the topology with every site folded into one box;
+     a site opened with its + shows its devices in place, as in the topology. */
+  const sitesView = view==='sites';
+  if(sitesView) view='simple';
   const layer = (document.getElementById('opt-layer')||{}).value || 'both';
   // remember where we came from, unless this render is itself a Back
   STATE.viewHist = STATE.viewHist || [];
@@ -8475,6 +8628,15 @@ function render(){
   STATE.posNS = (view==='find'||view==='sel'||view==='vrf'||qActive())
     ? 'simple|' : view+'|';
   STATE.posWriteNS = view+'|';
+  // fold the sites that are shut: in the bird's-eye all but those opened, elsewhere those closed with −
+  STATE.siteOpen = STATE.siteOpen || new Set(); STATE.siteShut = STATE.siteShut || new Set();
+  if(!!STATE.sitesView !== sitesView && STATE.cy) STATE._needFit=true;   // entering or leaving the bird's-eye: frame it
+  STATE.sitesView = sitesView;
+  {
+    const tops=(STATE.groups||[]).filter(g=>!g.parent).map(g=>g.id);
+    const shut=new Set(sitesView ? tops.filter(id=>!STATE.siteOpen.has(id)) : tops.filter(id=>STATE.siteShut.has(id)));
+    if(shut.size){ const folded=collapseSites(els, shut); els.length=0; for(const x of folded) els.push(x); } else STATE.collapsedMap={};
+  }
   const keyOf = e => nodePosKey(e.data);
   const nodes = els.filter(e=>!e.data.source && e.data.kind!=='group');
 
@@ -8586,6 +8748,9 @@ function render(){
            padding:40, numIter:400, nodeDimensionsIncludeLabels:true}
   });
   readableLabels(cy);
+  siteButtons(cy);
+  // a double-click on a folded site opens it
+  cy.on('dbltap','node[kind="site"]', evt=>toggleSite(evt.target.data('siteId')));
 
   cy.on('tap','node[kind="device"]', evt=>{
     const d = STATE.model.devices.find(x=>x.id===evt.target.id());
@@ -8959,6 +9124,22 @@ function paintTrace(res){
   const cy=STATE.cy; if(!cy || !res || !res.hops) return;
   const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   const {steps, seq} = buildPath(res);
+  /* Hops inside a folded site are drawn as that site's box: light the box,
+     and the site-to-site lines between consecutive boxes and devices. */
+  const cmap=STATE.collapsedMap||{};
+  const disp=(id)=>cmap[id]||id;
+  if(Object.keys(cmap).length){
+    for(let i=0;i<seq.length;i++) seq[i]=disp(seq[i]);
+    for(let i=seq.length-1;i>0;i--) if(seq[i]===seq[i-1]) seq.splice(i,1);
+    const order=[]; for(const h of res.hops){ const id=disp(h.dev.id); if(order[order.length-1]!==id) order.push(id); }
+    for(let i=0;i+1<order.length;i++){
+      const A=cy.getElementById(order[i]), B=cy.getElementById(order[i+1]);
+      if(!A.length || !B.length) continue;
+      const ed=A.edgesWith(B).filter(x=>x.data('down')!==1);
+      if(ed.length && !steps.some(st=>st.eid===ed[0].id())) steps.push({eid:ed[0].id(), forward:ed[0].data('source')===order[i]});
+    }
+    for(const id of order) if(!seq.includes(id)) seq.push(id);
+  }
 
   // the packet leaves the network: draw where it goes
   if(res.exitsNetwork && seq.length){
@@ -8988,10 +9169,10 @@ function paintTrace(res){
   }
 
   for(const h of res.hops){
-    const n=cy.getElementById(h.dev.id);
+    const n=cy.getElementById(disp(h.dev.id));
     if(n.length && n.data('kind')!=='group') n.addClass('hot');
   }
-  const onPath=new Set(res.hops.map(h=>h.dev.id));
+  const onPath=new Set(res.hops.map(h=>disp(h.dev.id)));
   for(const id of seq){
     const n=cy.getElementById(id);
     if(!n.length || n.data('kind')==='group') continue;
@@ -9010,7 +9191,7 @@ function paintTrace(res){
   });
 
   if(res.verdict && !res.verdict.ok && res.hops.length)
-    cy.getElementById(res.hops[res.hops.length-1].dev.id).addClass('drop');
+    cy.getElementById(disp(res.hops[res.hops.length-1].dev.id)).addClass('drop');
 
   /* The whole path, and the cloud it leaves by with its label, must be on
      screen: a cloud placed off to the side used to sit under the panel or
@@ -12620,6 +12801,7 @@ function projectObject(){
           igp:document.getElementById('opt-igp').checked},
     trace:{src:document.getElementById('src').value, dst:document.getElementById('dst').value},
     positions:STATE.positions,
+    siteOpen:[...(STATE.siteOpen||[])], siteShut:[...(STATE.siteShut||[])],
     name:(document.getElementById('proj-name').value||'').trim(),
     ui:STATE.ui,
     version: APP_VERSION,
@@ -12735,6 +12917,7 @@ function loadProject(obj){
   STATE.freeLinks = obj.freeLinks || {};
   STATE.linkColors = obj.linkColors || {};
   STATE.linksLocked = !!obj.linksLocked;
+  STATE.siteOpen = new Set(obj.siteOpen||[]); STATE.siteShut = new Set(obj.siteShut||[]);
   STATE.flowText = obj.flowText||'';
   if(obj.zen) setTimeout(()=>setZen(true),0);
   STATE.linkStyle = obj.linkStyle || 'ortho';
