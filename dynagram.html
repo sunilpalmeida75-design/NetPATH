@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Dynagram 0.48 — dynamic network diagrams from device configs</title>
+<title>Dynagram 0.49 — dynamic network diagrams from device configs</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -950,6 +950,12 @@ td.mig-ok{color:var(--green,#58c48c)} td.mig-bad{color:var(--red,#e0625f)}
         <span style="font-size:12px;color:var(--ink-dim)">px (0 = off)</span>
       </div>
       <label class="toggle" style="margin:4px 0 6px"><input type="checkbox" id="th-wrapNames"> Wrap long device names over two lines</label>
+      <div class="rt-form" style="align-items:center">
+        <label style="font-size:12px;color:var(--ink-dim)">Folded site boxes: DC ×</label>
+        <input type="number" id="th-siteScaleDc" min="0.5" max="12" step="0.5" style="width:64px" title="Size of a folded DC box, as a multiple of the base size">
+        <label style="font-size:12px;color:var(--ink-dim)">other sites ×</label>
+        <input type="number" id="th-siteScale" min="0.5" max="12" step="0.5" style="width:64px" title="Size of every other folded site box">
+      </div>
       <div class="rt-form" style="align-items:center">
         <label style="font-size:12px;color:var(--ink-dim)">Zone name-tab text</label>
         <input type="color" id="th-zoneTabColor" title="Name-tab text colour for every zone">
@@ -3727,7 +3733,7 @@ function applyBends(els){
 /* A small stable hash, so a link always starts from the same channel. */
 /* Still pre-1.0: the diagram, tracing and reports are solid, but the file
    format and the routing behaviour are both still moving. */
-const APP_VERSION='0.48';
+const APP_VERSION='0.49';
 function hashStr(t){ let h=0; for(let i=0;i<t.length;i++){ h=(h*31 + t.charCodeAt(i))|0; } return h; }
 function zoneAncestors(node){
   const out=new Set();
@@ -7521,6 +7527,7 @@ const THEME_DEFAULT={
   devFontSize:15, devBold:false, devWeight:'600', zoneFontSize:13, zoneBold:false,
   minNamePx:0,                                 // if set, names are never drawn smaller than this on screen
   wrapNames:true,                              // long names over two lines
+  siteScaleDc:5, siteScale:3,                  // folded site boxes: times their base size
   devFont:'"IBM Plex Sans Condensed", system-ui, "Segoe UI", sans-serif', zoneFont:'"IBM Plex Sans Condensed", system-ui, "Segoe UI", sans-serif',
   linkWidth:1.4,
   netText:'#4fc3d9', linkText:'#61799a',
@@ -7533,7 +7540,7 @@ const THEME_VISIO={
   devBg:'#ffffff', devText:'#14304a',
   roleRouter:'#1f7a4d', roleSwitch:'#1f7a4d', roleFirewall:'#1f7a4d',
   zoneBg:'#ffffff', zoneText:'#4a6b80', zoneBorder:'#1f7a4d', zoneGrid:false,
-  textFill:0.8, showRole:true, minNamePx:0, wrapNames:true,
+  textFill:0.8, showRole:true, minNamePx:0, wrapNames:true, siteScaleDc:5, siteScale:3,
   linkIntra:'#8496a6', linkInter:'#c07a22', linkDown:'#c8453f',
   boxBorderW:3, boxW:null, boxH:null,
   devFontSize:15, devBold:false, devWeight:'600', zoneFontSize:13, zoneBold:false,
@@ -7795,13 +7802,20 @@ function cloudBoxSize(label, fs, fw, ff){
    where the site's devices sit, so folding and unfolding keeps the map. */
 /* Folded site boxes: one size for every DC, one for every other site. */
 const SITE_BOX={dc:{w:340, h:170}, other:{w:240, h:120}};
+/* How many times that base size the boxes are drawn: set in Settings,
+   5x for a DC and 3x for the rest unless changed. */
+function siteBoxSize(big){
+  const b=big?SITE_BOX.dc:SITE_BOX.other, k=Math.max(0.5, Math.min(12, +TH(big?'siteScaleDc':'siteScale')||1));
+  return {w:Math.round(b.w*k), h:Math.round(b.h*k), k};
+}
 /* The bird's-eye keeps the sites where they are relative to each other but
    pulls them together: every position is scaled toward the middle by the
    empty space between them down to a set gap. A site opened with + moves as
    a whole and keeps its full size, so the boxes around it make room. A box
    dragged here stays where it was put. */
 function birdsEyeLayout(els){
-  const G=130;
+  // the gap between neighbours grows with the boxes, so their links and labels still have room
+  const G=Math.round(Math.max(140, siteBoxSize(false).h*0.65));
   const nodes=new Map(); for(const e of els) if(!e.data.source) nodes.set(e.data.id, e);
   const topOf=(id)=>{ let n=nodes.get(id), top=null, guard=0;
     while(n && guard++<30){ if(n.data.kind==='group') top=n; const par=n.data.parent; if(!par) break; n=nodes.get(par); }
@@ -7837,11 +7851,33 @@ function birdsEyeLayout(els){
   const fx=squeeze('x','w'), fy=squeeze('y','h');
   const savedFor=(pkey)=>STATE.positions['sites|'+pkey];
   for(const it of arr){
-    let P={x:fx(it.c.x), y:fy(it.c.y)};
-    if(it.box){ const sv=savedFor(it.box.data.pkey); it.box.position = sv ? {x:sv.x, y:sv.y} : P; continue; }
-    if(it.site){ const sv=savedFor('site:'+it.site); if(sv) P={x:sv.x, y:sv.y}; }
-    else if(it.nodes.length===1){ const n=it.nodes[0], sv=savedFor(nodePosKey(n.data)); if(sv) P={x:sv.x, y:sv.y}; }
-    const dx=P.x-it.c.x, dy=P.y-it.c.y;
+    it.P={x:fx(it.c.x), y:fy(it.c.y)};
+    const sv = it.box ? savedFor(it.box.data.pkey) : it.site ? savedFor('site:'+it.site)
+             : it.nodes.length===1 ? savedFor(nodePosKey(it.nodes[0].data)) : null;
+    if(sv){ it.P={x:sv.x, y:sv.y}; it.pinned=true; }
+  }
+  /* Squeezing only removes space. Boxes bigger than the room their sites had
+     would overlap, so push apart any pair closer than the gap, along the
+     direction that needs the smaller move. A box placed by hand stays put
+     and its neighbour moves instead. */
+  for(let iter=0; iter<80; iter++){
+    let moved=false;
+    for(let i=0;i<arr.length;i++) for(let j=i+1;j<arr.length;j++){
+      const a=arr[i], b=arr[j];
+      const dx=b.P.x-a.P.x, dy=b.P.y-a.P.y;
+      const ox=(a.w+b.w)/2+G-Math.abs(dx), oy=(a.h+b.h)/2+G-Math.abs(dy);
+      if(ox<=0.5 || oy<=0.5) continue;
+      if(a.pinned && b.pinned) continue;
+      const wa = a.pinned?0 : b.pinned?1 : 0.5, wb=1-wa;
+      if(ox<oy){ const sgn=dx>=0?1:-1; a.P.x-=sgn*ox*wa; b.P.x+=sgn*ox*wb; }
+      else     { const sgn=dy>=0?1:-1; a.P.y-=sgn*oy*wa; b.P.y+=sgn*oy*wb; }
+      moved=true;
+    }
+    if(!moved) break;
+  }
+  for(const it of arr){
+    if(it.box){ it.box.position={x:it.P.x, y:it.P.y}; continue; }
+    const dx=it.P.x-it.c.x, dy=it.P.y-it.c.y;
     for(const n of it.nodes) n.position={x:n.position.x+dx, y:n.position.y+dy};
   }
 }
@@ -7879,17 +7915,17 @@ function collapseSites(els, shut){
     /* Every DC is the same size, every other site the same smaller size, and
        the name is drawn like a device box's: its text colour, typeface and
        weight, just bigger. A long name wraps rather than shrinking the box. */
-    const W=big?SITE_BOX.dc.w:SITE_BOX.other.w, H=big?SITE_BOX.dc.h:SITE_BOX.other.h;
+    const SB=siteBoxSize(big), W=SB.w, H=SB.h;
     const dfnt=deviceFont(null);
     const label=wrapName(name)+'\n'+devs.length+' device'+(devs.length===1?'':'s')+(nz?' · '+nz+' zone'+(nz===1?'':'s'):'');
-    const want=Math.round(dfnt.size*(big?1.6:1.25));
+    const want=Math.round(dfnt.size*(big?1.6:1.25)*SB.k);      // the name grows with the box
     const m=measureLabel(label, 100, dfnt.weight, dfnt.fam);
     const fs=Math.round(Math.max(10, Math.min(want, (W*0.86)/(m.w/100||1), (H*0.8)/(m.lines*DEV_LINE_H))));
     let cx=0, cy2=0, k=0;
     for(const d of devs) if(d.position){ cx+=d.position.x; cy2+=d.position.y; k++; }
     const saved=STATE.positions[(STATE.posNS||'simple|')+'site:'+name];
     out.push({data:{id:'site_'+gid, siteId:gid, sname:name, kind:'site', pkey:'site:'+name, big:big?1:0, label, w:W, h:H,
-      bg:TH('devBg'), fg:TH('devText'), bd:gc.bd, bw:big?4:2.5, ff:dfnt.fam, fw:dfnt.weight, fs},
+      bg:TH('devBg'), fg:TH('devText'), bd:gc.bd, bw:(big?4:2.5)*Math.sqrt(SB.k), ff:dfnt.fam, fw:dfnt.weight, fs},
       position: saved ? {x:saved.x, y:saved.y} : (k ? {x:cx/k, y:cy2/k} : undefined)});
   }
   const agg=new Map();
@@ -7907,9 +7943,9 @@ function collapseSites(els, shut){
   const boxFs={}; for(const o of out) if(o.data.kind==='site') boxFs[o.data.id]=o.data.fs;
   for(const a of agg.values()){
     const n=a.data.n;
-    a.data.lfs=Math.round(Math.max(12, 0.62*Math.max(boxFs[a.data.source]||0, boxFs[a.data.target]||0)));
+    a.data.lfs=Math.round(Math.max(12, 0.4*Math.max(boxFs[a.data.source]||0, boxFs[a.data.target]||0)));
     a.data.label = a.data.down ? n+' shut' : (n>1 ? n+' links' : '');
-    a.data.lw = Math.min(6, 1.6+Math.log2(n)*1.2) * Math.max(1, a.data.lfs/20);
+    a.data.lw = Math.min(6, 1.6+Math.log2(n)*1.2) * Math.max(1, Math.sqrt(a.data.lfs/20));
     out.push(a);
   }
   return out;
@@ -8034,9 +8070,11 @@ function graphStyle(){
         'shape':'round-rectangle','width':'data(w)','height':'data(h)',
         'background-color':'data(bg)','border-width':'data(bw)','border-color':'data(bd)','border-style':'solid',
         'label':'data(label)','color':'data(fg)','font-family':'data(ff)','font-size':'data(fs)','font-weight':'data(fw)',
-        'text-valign':'center','text-halign':'center','text-wrap':'wrap','line-height':DEV_LINE_H,'z-index':5,
+        'text-valign':'center','text-halign':'center','text-wrap':'wrap','line-height':DEV_LINE_H,'z-index-compare':'manual','z-index':5,
         'text-outline-color':'data(fg)','text-outline-width':0.35,'text-outline-opacity':0.9}},
-      {selector:'edge[kind="sitelink"]', style:{'width':'data(lw)','font-size':'data(lfs)','font-weight':600,'text-background-opacity':0.9}},
+      // the lines between sites, and their counts, sit above the boxes so a label is never hidden
+      {selector:'edge[kind="sitelink"]', style:{'width':'data(lw)','font-size':'data(lfs)','font-weight':600,'text-background-opacity':0.9,
+        'z-index-compare':'manual','z-index':9}},
       {selector:'node[kind="wan"], node[kind="cloud"]', style:{
         'shape':'round-rectangle','width':'data(w)','height':'data(h)',
         'background-opacity':0,'border-width':0,
@@ -13509,6 +13547,12 @@ function initTheme(){
   if(cfs){ cfs.value=STATE.theme.cloudFontSize||'';
     cfs.onchange=()=>{ const v=parseInt(cfs.value,10); if(v) STATE.theme.cloudFontSize=Math.max(9,Math.min(48,v)); else delete STATE.theme.cloudFontSize;
       cfs.value=STATE.theme.cloudFontSize||''; applyTheme(); autosave(); }; }
+  for(const [id,key,def] of [['th-siteScaleDc','siteScaleDc',5],['th-siteScale','siteScale',3]]){
+    const el=document.getElementById(id); if(!el) continue;
+    el.value=TH(key);
+    el.onchange=()=>{ const v=parseFloat(el.value); STATE.theme[key]=isFinite(v)?Math.max(0.5,Math.min(12,v)):def; el.value=STATE.theme[key];
+      STATE._needFit=true; applyTheme(); autosave(); };
+  }
   const wrn=document.getElementById('th-wrapNames');
   if(wrn){ wrn.checked=TH('wrapNames')!==false;
     wrn.onchange=()=>{ STATE.theme.wrapNames=wrn.checked; applyTheme(); if(typeof rebuild==='function') rebuild(); autosave(); }; }
@@ -13554,7 +13598,8 @@ function initTheme(){
     if(zff) fontOpts(zff, STATE.theme.zoneFont);
     if(dfs) dfs.value=STATE.theme.devFontSize||13;
     if(zfs) zfs.value=STATE.theme.zoneFontSize||12;
-    { const c=document.getElementById('th-cloudFontSize'); if(c) c.value=STATE.theme.cloudFontSize||''; }
+    { const c=document.getElementById('th-cloudFontSize'); if(c) c.value=STATE.theme.cloudFontSize||'';
+      for(const [id,key] of [['th-siteScaleDc','siteScaleDc'],['th-siteScale','siteScale']]){ const el=document.getElementById(id); if(el) el.value=TH(key); } }
     { const m=document.getElementById('th-minNamePx'); if(m) m.value=TH('minNamePx'); const w=document.getElementById('th-wrapNames'); if(w) w.checked=TH('wrapNames')!==false; }
     if(dBold) dBold.checked=!!STATE.theme.devBold;
     if(zBold) zBold.checked=!!STATE.theme.zoneBold;
