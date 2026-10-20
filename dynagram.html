@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Dynagram 0.51 — dynamic network diagrams from device configs</title>
+<title>Dynagram 0.53 — dynamic network diagrams from device configs</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -738,7 +738,8 @@ td.mig-ok{color:var(--green,#58c48c)} td.mig-bad{color:var(--red,#e0625f)}
       <button class="btn sb-collapse" id="sb-toggle" title="Hide the controls">×</button>
       <label class="toggle">View
         <select id="opt-view">
-          <option value="simple" selected>Topology</option>
+          <option value="simple" selected>Work Area</option>
+          <option value="topo" title="Read-only: the Work Area's layout with fixed rules for the lines">Topology</option>
           <option value="transit">Topology + segments</option>
           <option value="sites">Sites (bird's-eye)</option>
           <!-- the rest are reached by an action (trace, open a link, select,
@@ -3751,7 +3752,7 @@ function applyBends(els){
 /* A small stable hash, so a link always starts from the same channel. */
 /* Still pre-1.0: the diagram, tracing and reports are solid, but the file
    format and the routing behaviour are both still moving. */
-const APP_VERSION='0.51';
+const APP_VERSION='0.53';
 function hashStr(t){ let h=0; for(let i=0;i<t.length;i++){ h=(h*31 + t.charCodeAt(i))|0; } return h; }
 function zoneAncestors(node){
   const out=new Set();
@@ -3850,7 +3851,9 @@ function assignEndpoints(cy){
 
 function autoRouteEdges(cy, mode){
   // a delayed call can arrive after the diagram was redrawn and this one destroyed
-  if(!cy || (cy.destroyed && cy.destroyed()) || STATE.noAutoRoute || STATE.linksLocked) return;
+  if(!cy || (cy.destroyed && cy.destroyed())) return;
+  // locked links freeze the Work Area; Topology always draws by its own rules
+  if(!cy._topo && (STATE.noAutoRoute || STATE.linksLocked)) return;
   STATE.bends = STATE.bends || {};
   assignEndpoints(cy);
 
@@ -3940,6 +3943,7 @@ function autoRouteEdges(cy, mode){
      increasingly so (1.8x at 300 devices). Below that, test the plain list. */
   const allBoxes=dev.concat(zone);
   const ALL_GRID = allBoxes.length>=100 ? makeGrid(allBoxes) : allBoxes;
+  const topoStraight=[];
 
   cy.edges().forEach(e=>{
     const S=e.source(), T=e.target();
@@ -4041,8 +4045,23 @@ function autoRouteEdges(cy, mode){
        actually clear — including between zones. Bends are only for links whose
        direct line would cut through a zone they have nothing to do with, or
        through another device. */
+    /* Topology draws its lines by fixed rules: straight inside a zone, and
+       straight to a provider or private cloud and to another site; right
+       angles only between two zones of one site. */
+    if(cy._topo){
+      const topOf=(n)=>{ if(n.data('kind')==='site') return 'g_'+n.data('siteId');
+        let p=n.parent(), t=null; while(p && p.length){ t=p; p=p.parent(); } return t ? t.id() : null; };
+      const zoneOf=(n)=>{ const p=n.parent(); return p && p.length ? p.id() : null; };
+      const cloudy=['wan','cloud'].includes(S.data('kind')) || ['wan','cloud'].includes(T.data('kind'));
+      if(cloudy || topOf(S)!==topOf(T) || zoneOf(S)===zoneOf(T)){
+        e.data('ortho',1); e.data('bend',0);
+        toSeg([[ (A.x+B.x)/2, (A.y+B.y)/2 ]]);
+        topoStraight.push({e, key:String(key||e.id()), A:{x:A.x,y:A.y}, B:{x:B.x,y:B.y}, ends:[S.id(),T.id()], set:(m)=>toSeg([m])});
+        return;
+      }
+    }
     let directNow=false;
-    if(STATE.linkStyle==='direct'){
+    if(STATE.linkStyle==='direct' && !cy._topo){
       const skipD=new Set([S.id(), T.id()]);
       const inZonesD=new Set([...zoneAncestors(S), ...zoneAncestors(T)]);
       for(const z of inZonesD) skipD.add(z);
@@ -4259,6 +4278,111 @@ function autoRouteEdges(cy, mode){
     reserveAll(best.pts);
     toSeg(best.pts.slice(1,-1));
   });
+  if(cy._topo && topoStraight.length) placeTopoLines(cy, topoStraight, dev, segHitsBox);
+}
+/* Topology: every straight line stays straight, but no line may lie on top
+   of another or run behind a box, where it would be hidden. Lines may cross.
+   Each one is drawn as it is when it is clear; otherwise it gets a single
+   corner part-way along, pushed out to one side and then the other, a little
+   further each time, until it is clear (or as clear as it can be). */
+function placeTopoLines(cy, list, dev, segHitsBox){
+  const straightIds=new Set(list.map(L=>L.e.id()));
+  const placed=[];
+  // two legs hide each other when they run the same way, within a few pixels, over a stretch of their length
+  const overlap=(p1,p2,q1,q2)=>{
+    const ux=p2[0]-p1[0], uy=p2[1]-p1[1], L=Math.hypot(ux,uy);
+    const vx=q2[0]-q1[0], vy=q2[1]-q1[1], L2=Math.hypot(vx,vy);
+    if(L<1 || L2<1) return false;
+    if(Math.abs(ux*vy-uy*vx)/(L*L2) > 0.06) return false;
+    const off=(q)=>Math.abs((q[0]-p1[0])*uy-(q[1]-p1[1])*ux)/L;
+    if(off(q1)>5 || off(q2)>5) return false;
+    const at=(q)=>((q[0]-p1[0])*ux+(q[1]-p1[1])*uy)/L;
+    const a=Math.min(at(q1),at(q2)), b=Math.max(at(q1),at(q2));
+    return Math.min(L,b)-Math.max(0,a) > 6;
+  };
+  const cost=(pts, ends)=>{
+    let c=0;
+    for(const q of placed)
+      for(let i=0;i<pts.length-1;i++) for(let j=0;j<q.length-1;j++)
+        if(overlap(pts[i],pts[i+1],q[j],q[j+1])) c+=10;
+    for(const b of dev){
+      if(ends.includes(b.id)) continue;
+      for(let i=0;i<pts.length-1;i++) if(segHitsBox(pts[i][0],pts[i][1],pts[i+1][0],pts[i+1][1],b,3)){ c+=3; break; }
+    }
+    return c;
+  };
+  const boxHits=(pts, ends)=>{ let c=0;
+    for(const b of dev){ if(ends.includes(b.id)) continue;
+      for(let i=0;i<pts.length-1;i++) if(segHitsBox(pts[i][0],pts[i][1],pts[i+1][0],pts[i+1][1],b,3)){ c++; break; } }
+    return c; };
+  const legHides=(a,b)=>{ for(const q of placed) for(let j=0;j<q.length-1;j++) if(overlap(a,b,q[j],q[j+1])) return true; return false; };
+  /* The right-angle lines first. Where a run lies on top of one already
+     drawn, slide that run sideways into a free lane — only runs between two
+     corners move, so each line still leaves and meets its boxes where it did. */
+  const ortho=[];
+  cy.edges().forEach(e=>{ if(!straightIds.has(e.id())) ortho.push(e); });
+  ortho.sort((a,b)=>{ const x=String(a.data('ekey')||a.id()), y=String(b.data('ekey')||b.id()); return x<y?-1:x>y?1:0; });
+  for(const e of ortho){
+    let pts; try{ pts=edgePolyline(e).map(q=>[q[0],q[1]]); }catch(err){ continue; }
+    const S=e.source(), T=e.target(), ends=[S.id(), T.id()];
+    const hides=(P)=>{ let n=0; for(let i=0;i<P.length-1;i++) if(legHides(P[i],P[i+1])) n++; return n; };
+    let cur=hides(pts), changed=false;
+    const base=boxHits(pts, ends);
+    for(let pass=0; pass<3 && cur>0; pass++){
+      for(let i=0;i<pts.length-1 && cur>0;i++){
+        if(!legHides(pts[i],pts[i+1])) continue;
+        const horiz=Math.abs(pts[i][1]-pts[i+1][1]) < Math.abs(pts[i][0]-pts[i+1][0]);
+        const first=i===0, last=i===pts.length-2;
+        /* an end run moves its landing point along the side of its box, so it
+           can only slide as far as the box is long */
+        const node = first ? S : last ? T : null;
+        const lim = node ? Math.max(0, (horiz ? node.outerHeight() : node.outerWidth())/2 - 4) : 140;
+        const npos = node ? node.position() : null;
+        let bestQ=null, bestN=cur;
+        for(let k=1;k<=14;k++) for(const sg of [1,-1]){
+          const off=sg*k*(node?4:10), q=pts.map(v=>v.slice()), ax=horiz?1:0;
+          q[i][ax]+=off; q[i+1][ax]+=off;
+          if(node){ const endPt = first ? q[0] : q[q.length-1];
+            if(Math.abs(endPt[ax]-(ax?npos.y:npos.x)) > lim) continue; }
+          const n=hides(q);
+          if(n<bestN && boxHits(q, ends)<=base){ bestN=n; bestQ=q; }
+          if(bestN===0) break;
+        }
+        if(bestQ){ pts=bestQ; cur=bestN; changed=true; }
+      }
+    }
+    if(changed){
+      const s0=S.position(), t0=T.position();
+      const dx=t0.x-s0.x, dy=t0.y-s0.y, L=Math.hypot(dx,dy)||1, ux=dx/L, uy=dy/L, nx=-uy, ny=ux;
+      const inner=pts.slice(1,-1);
+      e.data('segW', inner.map(([x,y])=>(((x-s0.x)*ux+(y-s0.y)*uy)/L).toFixed(4)).join(' '));
+      e.data('segD', inner.map(([x,y])=>+(((x-s0.x)*nx+(y-s0.y)*ny)).toFixed(2)).join(' '));
+      const pct=(pt,n)=>{ const c=n.position(); return (((pt[0]-c.x)/(n.outerWidth()||1))*100).toFixed(1)+'% '+(((pt[1]-c.y)/(n.outerHeight()||1))*100).toFixed(1)+'%'; };
+      e.data('sep', pct(pts[0], S)); e.data('tep', pct(pts[pts.length-1], T));
+      e.data('spx', pts[0][0]); e.data('spy', pts[0][1]); e.data('tpx', pts[pts.length-1][0]); e.data('tpy', pts[pts.length-1][1]);
+    }
+    placed.push(pts);
+  }
+  list.sort((a,b)=>a.key<b.key?-1:a.key>b.key?1:0);
+  for(const L of list){
+    const A=[L.A.x,L.A.y], B=[L.B.x,L.B.y];
+    const dx=B[0]-A[0], dy=B[1]-A[1], len=Math.hypot(dx,dy)||1, nx=-dy/len, ny=dx/len;
+    const mid=[(A[0]+B[0])/2, (A[1]+B[1])/2];
+    let best={pts:[A,mid,B]}; best.c=cost(best.pts, L.ends);
+    const step=Math.max(14, Math.min(40, len*0.07));
+    for(let k=1; k<=12 && best.c>0; k++){
+      for(const sg of [1,-1]){
+        // the corner slides a little along the line too, so parallel detours do not stack
+        const along=0.5+((k%3)-1)*0.12*sg;
+        const m=[A[0]+dx*along+nx*sg*k*step, A[1]+dy*along+ny*sg*k*step];
+        const pts=[A,m,B], c=cost(pts, L.ends);
+        if(c<best.c) best={pts,c};
+        if(c===0) break;
+      }
+    }
+    L.set(best.pts[1]);
+    placed.push(best.pts);
+  }
 }
 
 
@@ -8172,6 +8296,7 @@ function siteButtons(cy){
 function setAllSites(open){
   const tops=(STATE.groups||[]).filter(g=>!g.parent).map(g=>g.id);
   if(STATE.sitesView) STATE.siteOpen=new Set(open?tops:[]);
+  else if(STATE.topoView) STATE.topoShut=new Set(open?[]:tops);
   else STATE.siteShut=new Set(open?[]:tops);
   if(STATE.cy) capturePositions(STATE.cy);
   STATE._needFit=true; render(); autosave();
@@ -8180,7 +8305,7 @@ document.getElementById('sites-expand').onclick=()=>setAllSites(true);
 document.getElementById('sites-collapse').onclick=()=>setAllSites(false);
 function toggleSite(gid){
   if(STATE.sitesView){ STATE.siteOpen.has(gid) ? STATE.siteOpen.delete(gid) : STATE.siteOpen.add(gid); }
-  else { STATE.siteShut.has(gid) ? STATE.siteShut.delete(gid) : STATE.siteShut.add(gid); }
+  else { const set=STATE.topoView ? STATE.topoShut : STATE.siteShut; set.has(gid) ? set.delete(gid) : set.add(gid); }
   if(STATE.cy) capturePositions(STATE.cy);
   render(); autosave();
   // whatever just opened or folded, keep it on screen
@@ -8370,6 +8495,13 @@ function render(){
      a site opened with its + shows its devices in place, as in the topology. */
   const sitesView = view==='sites';
   if(sitesView) view='simple';
+  /* Topology is the Work Area's drawing, read-only: the same boxes in the
+     same places (read from the Work Area, never written back), with its own
+     fixed rules for the lines. Every change is made in the Work Area. */
+  const topoView = view==='topo';
+  if(topoView) view='simple';
+  STATE.topoView = topoView;
+  { const ls=document.getElementById('opt-linkstyle'); if(ls){ ls.disabled=topoView; ls.title=topoView?'Topology draws its lines by fixed rules; change them in the Work Area':''; } }
   const layer = (document.getElementById('opt-layer')||{}).value || 'both';
   // remember where we came from, unless this render is itself a Back
   STATE.viewHist = STATE.viewHist || [];
@@ -8953,6 +9085,7 @@ function render(){
     ? 'simple|' : view+'|';
   STATE.posWriteNS = view+'|';
   if(sitesView) STATE.posWriteNS='sites|';      // the bird's-eye keeps its own arrangement
+  if(topoView){ STATE.posNS='simple|'; STATE.posWriteNS=null; }   // reads the Work Area, writes nothing
   const keyOf = e => nodePosKey(e.data);
   const nodes = els.filter(e=>!e.data.source && e.data.kind!=='group');
 
@@ -9047,16 +9180,19 @@ function render(){
   /* Fold the sites that are shut — in the bird's-eye all but those opened,
      elsewhere those closed with − — now that every device has its place and
      every link, layer 2 included, is in. */
-  STATE.siteOpen = STATE.siteOpen || new Set(); STATE.siteShut = STATE.siteShut || new Set();
+  STATE.siteOpen = STATE.siteOpen || new Set(); STATE.siteShut = STATE.siteShut || new Set(); STATE.topoShut = STATE.topoShut || new Set();
   if(!!STATE.sitesView !== sitesView && STATE.cy) STATE._needFit=true;   // entering or leaving the bird's-eye: frame it
   STATE.sitesView = sitesView;
   {
     const tops=(STATE.groups||[]).filter(g=>!g.parent).map(g=>g.id);
-    const shut=new Set(sitesView ? tops.filter(id=>!STATE.siteOpen.has(id)) : tops.filter(id=>STATE.siteShut.has(id)));
+    const shut=new Set(sitesView ? tops.filter(id=>!STATE.siteOpen.has(id))
+                     : tops.filter(id=>(topoView ? STATE.topoShut : STATE.siteShut).has(id)));
     if(shut.size){ const folded=collapseSites(els, shut); els.length=0; for(const x of folded) els.push(x); } else STATE.collapsedMap={};
     if(sitesView) birdsEyeLayout(els);
   }
-  pruneDanglingLinks(els); assignLinkColors(els); applyBends(els); sizeNodes(els); archDecorate(els);
+  pruneDanglingLinks(els); assignLinkColors(els);
+  if(topoView) topoZoneColors(els);
+  applyBends(els); sizeNodes(els); archDecorate(els);
   const cy = cytoscape({
     container: document.getElementById('cy'),
     elements: els,
@@ -9075,6 +9211,10 @@ function render(){
         : {name:'cose', animate:false, nodeRepulsion:12000, idealEdgeLength:110,
            padding:40, numIter:400, nodeDimensionsIncludeLabels:true}
   });
+  if(topoView){
+    cy._topo=true;
+    cy.autoungrabify(true); cy.boxSelectionEnabled(false);
+  }
   readableLabels(cy);
   siteButtons(cy);
   // a double-click on a folded site opens it
@@ -9102,6 +9242,7 @@ function render(){
      point to point, or recolour it. */
   cy.on('cxttap','edge', evt=>{
     const oe=evt.originalEvent||{};
+    if(cy._topo){ if(oe.preventDefault) oe.preventDefault(); readOnlyNote(); return; }
     openLinkMenu(cy, evt.target, oe.clientX||120, oe.clientY||120, evt.position||{x:0,y:0});
     if(oe.preventDefault) oe.preventDefault();
   });
@@ -9110,6 +9251,7 @@ function render(){
      with the pointer, and a new one is created if the link has none there
      yet, so a link can be walked around anything by hand. */
   cy.on('mousedown','edge', evt=>{
+    if(cy._topo) return;
     const edge=evt.target, p=evt.position;
     if(!p || (evt.originalEvent && evt.originalEvent.button===2)) return;
     const key=edge.data('ekey')||edge.id();
@@ -9155,6 +9297,7 @@ function render(){
   /* Drag either end-dot of a link around the border of its box. Grabbing
      within reach of an endpoint moves that end; the line re-routes to follow. */
   cy.on('mousedown','edge', evt=>{
+    if(cy._topo) return;
     const edge=evt.target;
     const p=evt.position; if(!p) return;
     const pick=(node, isSource)=>{
@@ -9193,6 +9336,7 @@ function render(){
   });
   /* Double-click an end-dot to hand it back to automatic placement. */
   cy.on('dbltap','edge', evt=>{
+    if(cy._topo) return;
     const edge=evt.target, p=evt.position;
     if(!p || !STATE.anchors) return;
     for(const isSource of [true,false]){
@@ -9206,6 +9350,7 @@ function render(){
   /* Grab the bottom-right corner of a box to resize it — a device, a zone or a
      WAN cloud. Anywhere else on it still does the normal drag-to-move. */
   cy.on('mousedown','node[kind="device"], node[kind="group"], node[kind="wan"]', evt=>{
+    if(cy._topo) return;
     const node=evt.target, kind=node.data('kind');
     // a zone under a device: the device's own corner wins
     if(kind==='group' && evt.originalEvent && evt.originalEvent.__dgHandled) return;
@@ -9248,7 +9393,7 @@ function render(){
     cy.on('mousemove', move); cy.on('mouseup', up); cy.on('tapend', up);
   });
   const writeNS = STATE.posWriteNS;
-  cy.on('grab','node', ()=>pushUndo());        // snapshot before the move, not after
+  cy.on('grab','node', ()=>{ if(!cy._topo) pushUndo(); });        // snapshot before the move, not after
   cy.on('dragfree','node', ()=>{ capturePositions(cy, writeNS); autosave(); });
   /* A layout does not finish synchronously. Capturing straight away would save
      half-settled coordinates and restore them next time as if the user had
@@ -12097,8 +12242,8 @@ document.getElementById('opt-locklinks').onchange=function(){
 document.getElementById('opt-nopolicy').onchange=()=>autosave();
 document.getElementById('opt-layer').onchange=()=>{ render(); autosave(); };
 document.getElementById('proj-name').addEventListener('input',()=>autosave());
-document.getElementById('rot-l').onclick=()=>rotateView(-15);
-document.getElementById('rot-r').onclick=()=>rotateView(15);
+document.getElementById('rot-l').onclick=()=>{ if(STATE.topoView) return readOnlyNote(); rotateView(-15); };
+document.getElementById('rot-r').onclick=()=>{ if(STATE.topoView) return readOnlyNote(); rotateView(15); };
 document.getElementById('grp-add').onclick=()=>{
   const el=document.getElementById('grp-name');
   const name=el.value.trim();
@@ -12237,8 +12382,8 @@ document.getElementById('exp-report').onclick=()=>exportChangeReport();
 document.getElementById('exp-svg').onclick=()=>exportSvg();
 document.getElementById('exp-png').onclick=()=>exportPng(2);
 document.getElementById('exp-viewer').onclick=()=>openViewerExport();
-document.getElementById('undo').onclick=undoLayout;
-document.getElementById('redo').onclick=redoLayout;
+document.getElementById('undo').onclick=()=>{ if(STATE.topoView) return readOnlyNote(); undoLayout(); };
+document.getElementById('redo').onclick=()=>{ if(STATE.topoView) return readOnlyNote(); redoLayout(); };
 window.addEventListener('keydown', (ev)=>{
   const tag=(ev.target&&ev.target.tagName)||'';
   if(/INPUT|TEXTAREA|SELECT/.test(tag)) return;      // never steal typing
@@ -12388,7 +12533,28 @@ function compactLayout(){
   toast(msg);
   return {before:{w:before.w,h:before.h}, after:{w:after.w,h:after.h}};
 }
-document.getElementById('compact').onclick=()=>compactLayout();
+document.getElementById('compact').onclick=()=>{ if(STATE.topoView) return readOnlyNote(); compactLayout(); };
+/* Topology: a line between two devices of the same zone is black (light
+   on a dark page), whatever the device; a colour set on that link by hand
+   still wins. Lines that leave the zone keep their colours. */
+function topoZoneColors(els){
+  const byId={}; for(const el of els) if(!el.data.source) byId[el.data.id]=el.data;
+  const ink = luminance(TH('canvasBg'))>0.5 ? '#111418' : '#e6e9ed';
+  for(const el of els){
+    const d=el.data; if(!d.source) continue;
+    const a=byId[d.source], b=byId[d.target];
+    if(!a || !b || a.kind!=='device' || b.kind!=='device') continue;
+    if((a.parent||null)!==(b.parent||null)) continue;
+    if(d.ekey && STATE.linkColors && STATE.linkColors[d.ekey]) continue;
+    if(STATE.linkColors && STATE.linkColors[edgeKey(d)]) continue;
+    d.lc=ink;
+  }
+}
+/* Topology is for reading; say where changes are made instead of failing silently. */
+function readOnlyNote(){
+  const now=Date.now(); if(STATE._roNote && now-STATE._roNote<2500) return; STATE._roNote=now;
+  toast('Topology is read-only — make changes in the Work Area');
+}
 document.getElementById('fit').onclick=()=>{
   if(!STATE.cy) return;
   fitDiagram(STATE.cy);
@@ -13036,13 +13202,13 @@ async function cytoscapeSource(){
    read the drawing off it, then put the screen back as it was. */
 function viewerSnapshot(opts){
   const sel=document.getElementById('opt-view');
-  const keep={view:sel.value, shut:STATE.siteShut, open:STATE.siteOpen, trace:STATE.lastTrace,
+  const keep={view:sel.value, shut:STATE.siteShut, tshut:STATE.topoShut, open:STATE.siteOpen, trace:STATE.lastTrace,
     vp: STATE.cy ? {zoom:STATE.cy.zoom(), pan:Object.assign({}, STATE.cy.pan())} : null};
   if(STATE.cy) capturePositions(STATE.cy);
   let nodes=[], edges=[];
   STATE.navBack=true;
   try{
-    sel.value='simple'; STATE.siteShut=new Set(); STATE.lastTrace=null;
+    sel.value='topo'; STATE.topoShut=new Set(); STATE.lastTrace=null;
     render();
     const cy=STATE.cy;
     if(cy){
@@ -13064,7 +13230,7 @@ function viewerSnapshot(opts){
       });
     }
   } finally {
-    sel.value=keep.view; STATE.siteShut=keep.shut; STATE.siteOpen=keep.open; STATE.lastTrace=keep.trace;
+    sel.value=keep.view; STATE.siteShut=keep.shut; STATE.topoShut=keep.tshut; STATE.siteOpen=keep.open; STATE.lastTrace=keep.trace;
     render(); STATE.navBack=false;
     if(keep.vp && STATE.cy){ STATE._needFit=false; STATE.cy.viewport(keep.vp); syncZoomUI(STATE.cy); }
   }
@@ -13478,6 +13644,7 @@ function exportChangeReport(){
 function capturePositions(cyArg, nsArg){
   const cy = cyArg || STATE.cy;
   if(!cy || (!cyArg && STATE.viewIsPath)) return;   // transient views never write positions
+  if(cy._topo) return;                              // Topology is read-only
   const ns = nsArg || STATE.posWriteNS || STATE.posNS || 'simple|';
   cy.nodes().forEach(n=>{
     if(n.hasClass('tmp')) return;
@@ -13495,7 +13662,7 @@ function projectObject(){
           igp:document.getElementById('opt-igp').checked},
     trace:{src:document.getElementById('src').value, dst:document.getElementById('dst').value},
     positions:STATE.positions,
-    siteOpen:[...(STATE.siteOpen||[])], siteShut:[...(STATE.siteShut||[])],
+    siteOpen:[...(STATE.siteOpen||[])], siteShut:[...(STATE.siteShut||[])], topoShut:[...(STATE.topoShut||[])],
     name:(document.getElementById('proj-name').value||'').trim(),
     ui:STATE.ui,
     version: APP_VERSION,
@@ -13611,7 +13778,7 @@ function loadProject(obj){
   STATE.freeLinks = obj.freeLinks || {};
   STATE.linkColors = obj.linkColors || {};
   STATE.linksLocked = !!obj.linksLocked;
-  STATE.siteOpen = new Set(obj.siteOpen||[]); STATE.siteShut = new Set(obj.siteShut||[]);
+  STATE.siteOpen = new Set(obj.siteOpen||[]); STATE.siteShut = new Set(obj.siteShut||[]); STATE.topoShut = new Set(obj.topoShut||[]);
   STATE.flowText = obj.flowText||'';
   if(obj.zen) setTimeout(()=>setZen(true),0);
   STATE.linkStyle = obj.linkStyle || 'ortho';
