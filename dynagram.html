@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Dynagram 0.49 — dynamic network diagrams from device configs</title>
+<title>Dynagram 0.51 — dynamic network diagrams from device configs</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -759,8 +759,8 @@ td.mig-ok{color:var(--green,#58c48c)} td.mig-bad{color:var(--red,#e0625f)}
       </label>
       <label class="toggle">Links
         <select id="opt-linkstyle">
-          <option value="ortho" selected>Right angles</option>
-          <option value="direct">Direct lines</option>
+          <option value="ortho">Right angles</option>
+          <option value="direct" selected>Direct lines</option>
         </select>
       </label>
       <button class="btn" id="viewback" style="display:none">← Back</button>
@@ -805,6 +805,7 @@ td.mig-ok{color:var(--green,#58c48c)} td.mig-bad{color:var(--red,#e0625f)}
             <button class="btn" id="exp-svg" title="Vector, opens in Visio">SVG</button>
             <button class="btn" id="exp-png" title="Picture at 2×">PNG</button>
             <button class="btn" id="exp-report" title="Markdown change report">Report</button>
+            <button class="btn" id="exp-viewer" title="Read-only HTML of the diagram for others to open">Viewer…</button>
           </div>
         </div>
       </div>
@@ -924,9 +925,14 @@ td.mig-ok{color:var(--green,#58c48c)} td.mig-bad{color:var(--red,#e0625f)}
         <label>Firewall <input type="color" id="th-roleFirewall"></label>
         <label>Provider cloud <input type="color" id="th-cloudBg"></label>
         <label>Cloud text <input type="color" id="th-cloudText"></label>
+        <label title="Architecture look">Firewall box <input type="color" id="th-fwBg"></label>
+        <label title="Architecture look">Site panel <input type="color" id="th-siteBg"></label>
+        <label title="Architecture look">Site border <input type="color" id="th-siteBorder"></label>
+        <label title="Architecture look">Link to firewall <input type="color" id="th-linkFw"></label>
+        <label title="Architecture look">Link to provider <input type="color" id="th-linkWan"></label>
       </div>
       <label class="auth" style="margin-top:6px">Border thickness
-        <input type="range" id="th-borderW" min="1" max="6" step="1" style="flex:1;accent-color:var(--cyan)"></label>
+        <input type="range" id="th-borderW" min="0.6" max="6" step="0.2" style="flex:1;accent-color:var(--cyan)"></label>
       <label class="auth">Link thickness
         <input type="range" id="th-linkWidth" min="0.5" max="6" step="0.5" style="flex:1;accent-color:var(--cyan)"></label>
       <label class="auth">Text fills the box
@@ -976,7 +982,9 @@ td.mig-ok{color:var(--green,#58c48c)} td.mig-bad{color:var(--red,#e0625f)}
       <label class="auth" style="margin-top:6px"><input type="checkbox" id="th-devBold"><span>Bold device text</span></label>
       <label class="auth"><input type="checkbox" id="th-zoneBold"><span>Bold zone text</span></label>
       <div class="btn-row" style="margin-top:0;margin-bottom:8px">
-        <button class="btn tiny" id="th-dark">Dark</button>
+        <button class="btn tiny" id="th-arch" title="Light page, grey sites, green zones, two-line boxes, lines coloured by what they join">Architecture</button>
+        <button class="btn tiny" id="th-archdark" title="The Architecture look on a dark page">Architecture dark</button>
+        <button class="btn tiny" id="th-dark">Classic dark</button>
         <button class="btn tiny" id="th-visio">Visio white</button>
       </div>
       <label class="auth" style="margin-top:8px"><input type="checkbox" id="th-canvasGrid">
@@ -3684,6 +3692,16 @@ function assignLinkColors(els){
     sites.delete(null);
     // more than one site involved, or one end placed and the other not
     const crosses = sites.size>1;
+    if(isArch()){
+      /* coloured by what the line joins: a provider, another site, a
+         firewall — anything else is a plain grey line inside the site */
+      const a=byId[el.data.source]||{}, b=byId[el.data.target]||{};
+      const toWan = el.data.kind==='wanlink' || ['wan','cloud'].includes(a.kind) || ['wan','cloud'].includes(b.kind);
+      const toFw  = a.role==='firewall' || b.role==='firewall';
+      el.data.lc = toWan ? TH('linkWan') : crosses ? TH('linkInter') : toFw ? TH('linkFw') : TH('linkIntra');
+      if(el.data.lw==null) el.data.lw = +TH('linkWidth') * (crosses&&!toWan ? 1.4 : toFw ? 1.15 : 1);
+      continue;
+    }
     el.data.lc = crosses ? TH('linkInter') : TH('linkIntra');
   }
   return els;
@@ -3733,7 +3751,7 @@ function applyBends(els){
 /* A small stable hash, so a link always starts from the same channel. */
 /* Still pre-1.0: the diagram, tracing and reports are solid, but the file
    format and the routing behaviour are both still moving. */
-const APP_VERSION='0.49';
+const APP_VERSION='0.51';
 function hashStr(t){ let h=0; for(let i=0;i<t.length;i++){ h=(h*31 + t.charCodeAt(i))|0; } return h; }
 function zoneAncestors(node){
   const out=new Set();
@@ -4030,6 +4048,12 @@ function autoRouteEdges(cy, mode){
       for(const z of inZonesD) skipD.add(z);
       const obsD=dev.concat(zone.filter(z=>!inZonesD.has(z.id)));
       directNow = !obsD.some(b=>!skipD.has(b.id) && segHitsBox(A.x,A.y,B.x,B.y,b,M*0.5));
+      /* Architecture look: the long runs — from one site to another, or out
+         to a provider outside every site — keep their right angles. */
+      if(directNow && isArch()){
+        const topOf=(n)=>{ let p=n.parent(), t=null; while(p && p.length){ t=p; p=p.parent(); } return t ? t.id() : null; };
+        if(topOf(S)!==topOf(T)) directNow=false;
+      }
     }
     if(directNow && !(key && STATE.freeLinks[key])){
       /* Keep the segment style: it draws straight lines through whatever points
@@ -7531,8 +7555,47 @@ const THEME_DEFAULT={
   devFont:'"IBM Plex Sans Condensed", system-ui, "Segoe UI", sans-serif', zoneFont:'"IBM Plex Sans Condensed", system-ui, "Segoe UI", sans-serif',
   linkWidth:1.4,
   netText:'#4fc3d9', linkText:'#61799a',
-  cloudBg:'#cfe6fa', cloudText:'#12324f'       // provider clouds: light blue, dark text
+  cloudBg:'#cfe6fa', cloudText:'#12324f',      // provider clouds: light blue, dark text
+  look:'classic',
+  /* used only by the Architecture look; here so every key has a value */
+  devSub:'#5b6470', fwBg:'#fde8e4', spineBg:'#dce8fb', spineBorder:'#3b6fc4', leafBg:'#f1f4f8',
+  siteBg:'#eef1f5', siteBorder:'#c5ccd5', siteText:'#1b1f24',
+  linkFw:'#c2553f', linkWan:'#3b6fc4', linkL2:'#c0287a'
 };
+/* Architecture look — the style of a drawn architecture diagram: a light
+   page, grey site panels with the site name large at the top left, white
+   zones outlined in green with their name at the top right, small white
+   boxes with the name in bold and what the device is underneath, and thin
+   lines coloured by what they join (grey inside a site, teal between sites,
+   red into a firewall, blue to a provider, magenta for layer 2). Straight
+   lines wherever the way is clear, right angles for the long runs. */
+const ARCH_FONT='system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+const THEME_ARCH={
+  look:'arch', canvasBg:'#ffffff', canvasGrid:false, gridStyle:'lines',
+  devBg:'#ffffff', devText:'#1b1f24', devSub:'#5b6470',
+  roleRouter:'#6b7480', roleSwitch:'#6b7480', roleFirewall:'#c2553f', fwBg:'#fde8e4',
+  spineBg:'#dce8fb', spineBorder:'#3b6fc4', leafBg:'#f1f4f8',
+  zoneBg:'#ffffff', zoneText:'#4f9d5d', zoneBorder:'#4f9d5d', zoneGrid:false, zoneTabColor:'#4f9d5d',
+  siteBg:'#eef1f5', siteBorder:'#c5ccd5', siteText:'#1b1f24',
+  linkIntra:'#59636e', linkInter:'#0f8a8a', linkDown:'#c47a00', linkFw:'#c2553f', linkWan:'#3b6fc4', linkL2:'#c0287a',
+  netText:'#5b6470', linkText:'#5b6470',
+  cloudBg:'#eceef1', cloudText:'#1b1f24',
+  textFill:0.8, showRole:false, minNamePx:0, wrapNames:false, siteScaleDc:5, siteScale:3,
+  boxBorderW:1.2, boxW:null, boxH:null, linkWidth:1.3,
+  devFontSize:13, devBold:false, devWeight:'700', zoneFontSize:12, zoneBold:true,
+  devFont:ARCH_FONT, zoneFont:ARCH_FONT
+};
+const THEME_ARCH_DARK=Object.assign({}, THEME_ARCH, {
+  canvasBg:'#1c2026', devBg:'#232830', devText:'#e6e9ed', devSub:'#9aa4ae',
+  roleRouter:'#8a939d', roleSwitch:'#8a939d', roleFirewall:'#e0735c', fwBg:'#3a2420',
+  spineBg:'#1f2d44', spineBorder:'#6f9be0', leafBg:'#242a32',
+  zoneBg:'#181c21', zoneText:'#4f9d5d', zoneBorder:'#4f9d5d', zoneTabColor:'#5fb06d',
+  siteBg:'#1f242b', siteBorder:'#3a424c', siteText:'#e6e9ed',
+  linkIntra:'#a9b2bc', linkInter:'#2fb8b8', linkDown:'#f0a92e', linkFw:'#e0735c', linkWan:'#6f9be0', linkL2:'#f06aa8',
+  netText:'#9aa4ae', linkText:'#9aa4ae', cloudBg:'#2a2f36', cloudText:'#e6e9ed'
+});
+const isArch=()=>TH('look')==='arch';
+const LOOK_KEYS=['devFont','zoneFont','devWeight','zoneBold','showRole','wrapNames','boxBorderW','linkWidth','cloudBg','cloudText'];
 /* Visio look: everything white, boxes outlined in green, grid on the canvas
    only — never inside a box. */
 const THEME_VISIO={
@@ -7547,9 +7610,10 @@ const THEME_VISIO={
   devFont:'"IBM Plex Sans Condensed", system-ui, "Segoe UI", sans-serif', zoneFont:'"IBM Plex Sans Condensed", system-ui, "Segoe UI", sans-serif',
   linkWidth:1.4,
   netText:'#12628f', linkText:'#3d5568',
-  cloudBg:'#cfe6fa', cloudText:'#12324f'
+  cloudBg:'#cfe6fa', cloudText:'#12324f', look:'classic'
 };
-STATE.theme = Object.assign({}, THEME_DEFAULT);
+STATE.theme = Object.assign({}, THEME_ARCH);    // a new project starts in the Architecture look
+STATE.linkStyle = 'direct';                      // …with its straight-where-clear lines
 STATE.theme.fontV=2;
 /* The boxes are measured and drawn in a web font. If it arrives after the
    first drawing, draw again so sizes and text use the real font. */
@@ -7625,6 +7689,7 @@ function zoneColor(g){
   return {bg, fg, bd, tabfg};
 }
 const FONTS=[
+  ['system-ui, -apple-system, "Segoe UI", Roboto, sans-serif','System (Segoe UI) — Architecture'],
   ['IBM Plex Mono, monospace','Plex Mono'],
   ['"IBM Plex Sans Condensed", system-ui, "Segoe UI", sans-serif','Plex Sans Cond (same as the controls)'],
   ['IBM Plex Sans Condensed, sans-serif','Plex Sans Cond'],
@@ -7644,7 +7709,9 @@ function deviceFont(d){
   const fam=(d&&d.font)||TH('devFont')||'IBM Plex Mono, monospace';
   const base=String(TH('devWeight')||'600');
   const heavier={'400':'700','500':'700','600':'800','700':'900','800':'900','900':'900'};
-  return {size, weight: bold ? (heavier[base]||'800') : base, fam};
+  /* the drawing library accepts 700 only as "bold" — the string "700" is rejected */
+  const w=bold ? (heavier[base]||'800') : base;
+  return {size, weight: w==='700' ? 'bold' : w, fam};
 }
 function zoneFont(g){
   const size=(g&&g.tabSize)||(g&&g.fontSize)||TH('zoneTabSize')||TH('zoneFontSize')||12;
@@ -7711,7 +7778,7 @@ function readableLabels(cy){
   const apply=()=>{
     cy._rl=null;
     if(cy.destroyed && cy.destroyed()) return;
-    const min=+TH('minNamePx')||0, z=cy.zoom();
+    const min=isArch() ? 0 : (+TH('minNamePx')||0), z=cy.zoom();
     const devs=cy.nodes('[kind="device"]');
     const pts=[]; devs.forEach(n=>{ const p=n.position(); pts.push({n, x:p.x, y:p.y, h:n.height()}); });
     cy.batch(()=>{
@@ -7756,6 +7823,115 @@ function wrapName(name){
     consider([join(toks.slice(0,i)), join(toks.slice(i,j)), join(toks.slice(j))]);
   if(!best || best.m>s.length*0.8) return s;             // no even break: leave it on one line
   return best.parts.join('\n');
+}
+/* ---------- Architecture look: the boxes ----------
+   A box carries two lines, as on a drawn architecture diagram: the name in
+   bold and, under it in a smaller grey, what the device is. A canvas label
+   has one font for all its lines, so the whole box — fill, outline, both
+   lines and the status dot — is drawn as a small vector picture sized to the
+   box. It stays sharp at any zoom. */
+function vendorLabel(d){
+  if(!d) return '';
+  if(d.vendor==='palo-alto') return 'Palo Alto';
+  const head=String(d.rawText||'').slice(0,6000);
+  if(/^\s*!\s*device:.*\bEOS\b|^\s*daemon TerminAttr|^\s*!\s*boot system flash:.*\.swi/mi.test(head)) return 'Arista';
+  if(/^\s*set system host-name\s|^\s*system\s*\{\s*$/m.test(head)) return 'Juniper';
+  if(typeof isNxos==='function' && isNxos(d)) return 'Cisco NX-OS';
+  return 'Cisco';
+}
+/* Fabric tiers, told from the name the way such fabrics are usually named
+   (…-S101 a spine, …-L101 a leaf), so they get the reference's colours. */
+function archTier(name){
+  const n=String(name||'');
+  if(/spine|(^|[-_.])S\d{2,4}$/i.test(n)) return 'spine';
+  if(/border.?leaf|(^|[-_.])(blf|bl)\d{2,4}$/i.test(n)) return 'border leaf';
+  if(/leaf|(^|[-_.])L\d{2,4}$/i.test(n)) return 'leaf';
+  return '';
+}
+function archSubtitle(d, role){
+  const tier=archTier(d && d.name);
+  if(tier) return tier;
+  return (vendorLabel(d)+' '+(role||'router')).trim();
+}
+function archColors(d, role){
+  const tier=archTier(d && d.name);
+  let bg=TH('devBg'), bd=role==='firewall'?TH('roleFirewall'):role==='switch'?TH('roleSwitch'):TH('roleRouter');
+  if(role==='firewall') bg=TH('fwBg');
+  else if(tier==='spine'){ bg=TH('spineBg'); bd=TH('spineBorder'); }
+  else if(tier==='leaf' || tier==='border leaf') bg=TH('leafBg');
+  if(d && d.bg) bg=d.bg;
+  if(d && d.bd) bd=d.bd;
+  let fg=(d && d.fg) || TH('devText'), sub=TH('devSub');
+  if(/^#[0-9a-f]{6}$/i.test(bg) && /^#[0-9a-f]{6}$/i.test(fg) && contrastRatio(fg,bg)<4.5)
+    fg = contrastRatio('#0b1620',bg) > contrastRatio('#f7fafc',bg) ? '#0b1620' : '#f7fafc';
+  if(/^#[0-9a-f]{6}$/i.test(bg) && /^#[0-9a-f]{6}$/i.test(sub) && contrastRatio(sub,bg)<3)
+    sub = luminance(bg)>0.5 ? '#4a525c' : '#b4bcc6';
+  return {bg, bd, fg, sub};
+}
+function archBoxUri(o){
+  const esc=(t)=>String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  const w=o.w, h=o.h, bw=o.bw, r=Math.min(6, h/5);
+  const lh=o.fs*DEV_LINE_H, slh=o.fsSub*1.2;
+  const total=o.lines.length*lh + (o.subText ? slh : 0);
+  let y=(h-total)/2 + o.fs*0.86;
+  let t='';
+  for(const l of o.lines){ t+='<text x="'+(w/2)+'" y="'+y.toFixed(1)+'" font-size="'+o.fs+'" font-weight="'+o.fw+'" fill="'+esc(o.fg)+'">'+esc(l)+'</text>'; y+=lh; }
+  if(o.subText){ y+= (o.fsSub*1.2 - lh) + o.fsSub*0.12;
+    t+='<text x="'+(w/2)+'" y="'+y.toFixed(1)+'" font-size="'+o.fsSub+'" fill="'+esc(o.sub)+'">'+esc(o.subText)+'</text>'; }
+  const dot = o.dot ? '<circle cx="'+(w-bw-5.5).toFixed(1)+'" cy="'+(bw+5.5).toFixed(1)+'" r="2.8" fill="'+o.dot+'"/>' : '';
+  const svg='<svg xmlns="http://www.w3.org/2000/svg" width="'+w+'" height="'+h+'" viewBox="0 0 '+w+' '+h+'">'+
+    '<rect x="'+(bw/2)+'" y="'+(bw/2)+'" width="'+(w-bw)+'" height="'+(h-bw)+'" rx="'+r.toFixed(1)+'" fill="'+esc(o.bg)+'" stroke="'+esc(o.bd)+'" stroke-width="'+bw+'"/>'+
+    '<g font-family="'+esc(o.ff)+'" text-anchor="middle">'+t+'</g>'+dot+'</svg>';
+  return 'data:image/svg+xml;utf8,'+encodeURIComponent(svg);
+}
+/* Size and draw every box, zone and site for the Architecture look. Runs
+   after sizeNodes, so a size set on a device or for every box still wins —
+   the text then shrinks to fit it. */
+function archDecorate(els){
+  if(!isArch()) return els;
+  const devById=new Map((STATE.devices||[]).map(d=>[d.id,d]));
+  for(const el of els){
+    const x=el.data; if(x.source) continue;
+    if(x.kind==='device'){
+      const d=devById.get(x.id); if(!d) continue;
+      const role=x.role||roleOf(d), col=archColors(d, role), df=deviceFont(d);
+      const prefix=(/^[☐☑] /.test(String(x.label||''))) ? String(x.label).slice(0,2) : '';
+      const lines=(prefix+(TH('wrapNames')===false ? d.name : wrapName(d.name))).split('\n');
+      const subText=archSubtitle(d, role);
+      let fs=df.size, fsSub=Math.max(7, Math.round(fs*0.8*10)/10);
+      const fw=df.weight, ff=df.fam, bw=+TH('boxBorderW')||1.2;
+      const nameW=Math.max(...lines.map(l=>measureLabel(l, fs, fw, ff).w)), subW=measureLabel(subText, fsSub, '400', ff).w;
+      const padX=Math.max(8, fs*0.85), padY=Math.max(5, fs*0.42);
+      const textH=lines.length*fs*DEV_LINE_H + fsSub*1.2;
+      let w, h;
+      const fixedW = x.overrideW || (TH('boxW') ? TH('boxW') : null), fixedH = x.overrideH || (TH('boxW') ? (TH('boxH')||48) : null);
+      if(fixedW){
+        w=fixedW; h=fixedH||Math.round(textH+2*padY);
+        const k=Math.min(1, (w-2*padX)/Math.max(nameW, subW, 1), (h-2*padY)/textH);
+        if(k<1){ fs=Math.max(6, Math.round(fs*k*10)/10); fsSub=Math.max(5, Math.round(fsSub*k*10)/10); }
+      } else {
+        w=Math.round(Math.max(fs*5, Math.max(nameW, subW)+2*padX));
+        h=Math.round(textH+2*padY);
+      }
+      x.w=w; x.h=h; x.bg=col.bg; x.bd=col.bd; x.fg=col.fg; x.nm=lines.join(' '); x.st=subText;
+      x.img=archBoxUri({w, h, bw, bg:col.bg, bd:col.bd, fg:col.fg, sub:col.sub, lines, subText, ff, fs, fsSub, fw,
+                        dot: readinessOf(d) ? '#3f9d63' : '#d0342c'});
+    } else if(x.kind==='group'){
+      const gid=String(x.id).replace(/^g_/,''), g=(STATE.groups||[]).find(z=>z.id===gid);
+      const site=x.gkind==='site', gf=zoneFont(g);
+      const fs=site ? Math.round(gf.size*1.7) : gf.size, fw='bold', ff=gf.fam;
+      if(site){ if(!(g&&g.bg)) x.bg=TH('siteBg'); if(!(g&&g.bd)) x.bd=TH('siteBorder'); }
+      x.tabfg = site ? ((g&&g.fg)||TH('siteText')) : ((g&&g.tabColor)||TH('zoneTabColor')||x.bd);
+      const tw=measureLabel(x.label, fs, fw, ff).w;
+      x.fs=fs; x.fw=fw; x.ff=ff;
+      // top left, inside, for a site; top right, inside, for a zone
+      x.adx = site ? Math.round(tw + Math.max(10, fs*0.6)) : -Math.round(tw + 8);
+      x.ady = site ? Math.round(fs*1.05 + 8) : Math.round(fs + 4);
+      const base=(g && g.padding) || ZONE_PAD;
+      x.pad = Math.round(site ? Math.max(base, fs*1.25+14) : Math.max(base, fs+9))+'px';
+    }
+  }
+  return els;
 }
 /* Space between a zone's border and what is inside it. Kept to a small
    margin so the boxes, and the names in them, get the room. */
@@ -7836,7 +8012,7 @@ function birdsEyeLayout(els){
     let x1=Infinity, y1=Infinity, x2=-Infinity, y2=-Infinity;
     for(const n of it.nodes){ const hw=(n.data.w||150)/2, hh=(n.data.h||70)/2;
       x1=Math.min(x1,n.position.x-hw); x2=Math.max(x2,n.position.x+hw); y1=Math.min(y1,n.position.y-hh); y2=Math.max(y2,n.position.y+hh); }
-    const pad=it.site?70:0;                       // an opened site's own border and name tab
+    const pad=it.site?(isArch()?95:70):0;         // an opened site's own border and name (the Architecture look pads more)
     it.c={x:(x1+x2)/2, y:(y1+y2)/2}; it.w=x2-x1+2*pad; it.h=y2-y1+2*pad;
   }
   /* Squeeze the empty bands between items down to a set gap on each axis —
@@ -7867,8 +8043,11 @@ function birdsEyeLayout(els){
       const dx=b.P.x-a.P.x, dy=b.P.y-a.P.y;
       const ox=(a.w+b.w)/2+G-Math.abs(dx), oy=(a.h+b.h)/2+G-Math.abs(dy);
       if(ox<=0.5 || oy<=0.5) continue;
-      if(a.pinned && b.pinned) continue;
-      const wa = a.pinned?0 : b.pinned?1 : 0.5, wb=1-wa;
+      /* Two boxes both placed by hand: an opened site gives way, since
+         opening it made it bigger than the box that was placed. */
+      let ap=a.pinned, bp=b.pinned;
+      if(ap && bp){ if(a.site) ap=false; else if(b.site) bp=false; else continue; }
+      const wa = ap?0 : bp?1 : 0.5, wb=1-wa;
       if(ox<oy){ const sgn=dx>=0?1:-1; a.P.x-=sgn*ox*wa; b.P.x+=sgn*ox*wb; }
       else     { const sgn=dy>=0?1:-1; a.P.y-=sgn*oy*wa; b.P.y+=sgn*oy*wb; }
       moved=true;
@@ -7925,7 +8104,8 @@ function collapseSites(els, shut){
     for(const d of devs) if(d.position){ cx+=d.position.x; cy2+=d.position.y; k++; }
     const saved=STATE.positions[(STATE.posNS||'simple|')+'site:'+name];
     out.push({data:{id:'site_'+gid, siteId:gid, sname:name, kind:'site', pkey:'site:'+name, big:big?1:0, label, w:W, h:H,
-      bg:TH('devBg'), fg:TH('devText'), bd:gc.bd, bw:(big?4:2.5)*Math.sqrt(SB.k), ff:dfnt.fam, fw:dfnt.weight, fs},
+      bg:isArch()&&!g.bg?TH('siteBg'):TH('devBg'), fg:isArch()?TH('siteText'):TH('devText'), bd:isArch()&&!g.bd?TH('siteBorder'):gc.bd,
+      bw:(big?4:2.5)*Math.sqrt(SB.k)*(isArch()?0.6:1), ff:dfnt.fam, fw:isArch()?'bold':dfnt.weight, fs},
       position: saved ? {x:saved.x, y:saved.y} : (k ? {x:cx/k, y:cy2/k} : undefined)});
   }
   const agg=new Map();
@@ -8009,6 +8189,47 @@ function toggleSite(gid){
     if(n.length) bringIntoView(cy, n); }, 350);
 }
 function graphStyle(){
+  const base=graphStyleBase();
+  if(!isArch()) return base;
+  /* The Architecture look goes on top of the common rules. The trace and
+     selection highlights are repeated after it so they still win. */
+  const efs=Math.max(8, Math.round((+TH('devFontSize')||13)*0.75*10)/10);
+  const arch=[
+    {selector:'node[kind="device"]', style:{
+      'shape':'round-rectangle','background-opacity':0,'border-width':0,'label':'',
+      'background-image':'data(img)','background-fit':'none','background-width':'100%','background-height':'100%',
+      'background-position-x':'50%','background-position-y':'50%','background-clip':'none','background-image-opacity':1}},
+    {selector:'node[kind="group"]', style:{
+      'border-width':Math.max(0.6, +TH('boxBorderW')||1.2),'background-opacity':1,
+      'text-valign':'top','text-halign':'left','text-margin-x':'data(adx)','text-margin-y':'data(ady)',
+      'text-background-opacity':0,'color':'data(tabfg)','font-weight':'data(fw)'}},
+    {selector:'node[gkind="zone"]', style:{'text-halign':'right'}},
+    {selector:'node[gkind="site"]', style:{'border-width':Math.max(0.8, (+TH('boxBorderW')||1.2)*1.25),'background-opacity':1}},
+    {selector:'edge', style:{
+      'source-arrow-shape':'none','target-arrow-shape':'none',
+      'color':'data(lc)','font-family':TH('devFont'),'font-size':efs,'font-weight':600,
+      'text-background-color':TH('zoneBg'),'text-background-opacity':1,'text-background-padding':1.5,
+      'source-text-offset':14,'target-text-offset':14}},
+    {selector:'edge[kind="vlanmap"]', style:{'line-color':TH('linkIntra'),'line-style':'dotted','width':1,'color':TH('linkIntra'),'opacity':0.8}},
+    {selector:'edge[kind="l2"]', style:{'line-color':TH('linkL2'),'line-style':'dashed','line-dash-pattern':[4,3],'width':1.2,'color':TH('linkL2')}},
+    {selector:'edge[trunk = 1]', style:{'line-style':'solid','width':1.8,'line-color':TH('linkL2'),'color':TH('linkL2')}},
+    {selector:'edge[kind="wanlink"]', style:{'line-color':'data(lc)','line-style':'solid','width':'data(lw)','color':'data(lc)'}},
+    {selector:'edge[kind="ha"]', style:{'line-color':TH('linkL2'),'line-style':'dotted','width':1.6,'color':TH('linkL2')}},
+    {selector:'edge[down = 1]', style:{'line-color':TH('linkDown'),'line-style':'dashed','line-dash-pattern':[6,4],'width':1.8,
+      'color':TH('linkDown'),'opacity':1}},
+    {selector:'edge[kind="sitelink"]', style:{'width':'data(lw)','font-size':'data(lfs)','font-weight':'bold'}},
+    {selector:'node[kind="site"]', style:{'text-outline-width':0,'font-weight':'bold'}},
+    {selector:'node[kind="wan"], node[kind="cloud"]', style:{'font-weight':'bold'}},
+    {selector:'node[kind="subnet"]', style:{'color':TH('netText'),'font-family':TH('devFont'),'text-background-color':TH('zoneBg')}},
+    {selector:'node[kind="device"].hot', style:{'border-width':2.5,'border-color':'#e8a13a'}},
+    {selector:'node[kind="device"].drop', style:{'border-width':2.5,'border-color':'#e0625f'}},
+    {selector:'node[kind="device"][picked = 1]', style:{'border-width':2.5,'border-color':'#4fc3d9'}},
+    {selector:'node[kind="device"].pick', style:{'border-width':2.5,'border-color':'#4fc3d9'}}
+  ];
+  const states=base.filter(r=>/\.(hot|drop|pick|fwd|rev)\b|picked/.test(r.selector) && !/^node\[kind="(device|group)"\]|^node\[gkind/.test(r.selector));
+  return base.concat(arch, states, arch.slice(-4));
+}
+function graphStyleBase(){
   return [
       {selector:'node[kind="device"]', style:{
         'shape':'round-rectangle','width':'data(w)','height':'data(h)',
@@ -8311,7 +8532,7 @@ function render(){
         }
       }
     }
-    pruneDanglingLinks(els); assignLinkColors(els); applyBends(els); sizeNodes(els);
+    pruneDanglingLinks(els); assignLinkColors(els); applyBends(els); sizeNodes(els); archDecorate(els);
     const vpP = (STATE.cy && !STATE.viewIsPath)
       ? {zoom:STATE.cy.zoom(), pan:Object.assign({}, STATE.cy.pan())} : null;
     const cyp = cytoscape({
@@ -8487,7 +8708,7 @@ function render(){
     }
 
     if(STATE.cy) STATE.cy.destroy();
-    pruneDanglingLinks(els); assignLinkColors(els); applyBends(els); sizeNodes(els);
+    pruneDanglingLinks(els); assignLinkColors(els); applyBends(els); sizeNodes(els); archDecorate(els);
     const vpL = (STATE.cy && !STATE.viewIsPath)
       ? {zoom:STATE.cy.zoom(), pan:Object.assign({}, STATE.cy.pan())} : null;
     if(STATE.cy) STATE.cy.destroy();
@@ -8835,7 +9056,7 @@ function render(){
     if(shut.size){ const folded=collapseSites(els, shut); els.length=0; for(const x of folded) els.push(x); } else STATE.collapsedMap={};
     if(sitesView) birdsEyeLayout(els);
   }
-  pruneDanglingLinks(els); assignLinkColors(els); applyBends(els); sizeNodes(els);
+  pruneDanglingLinks(els); assignLinkColors(els); applyBends(els); sizeNodes(els); archDecorate(els);
   const cy = cytoscape({
     container: document.getElementById('cy'),
     elements: els,
@@ -12015,6 +12236,7 @@ document.getElementById('zoom-out').onclick=()=>zoomBy(1/1.25);
 document.getElementById('exp-report').onclick=()=>exportChangeReport();
 document.getElementById('exp-svg').onclick=()=>exportSvg();
 document.getElementById('exp-png').onclick=()=>exportPng(2);
+document.getElementById('exp-viewer').onclick=()=>openViewerExport();
 document.getElementById('undo').onclick=undoLayout;
 document.getElementById('redo').onclick=redoLayout;
 window.addEventListener('keydown', (ev)=>{
@@ -12601,6 +12823,355 @@ function exportPng(scale){
   const uri=cy.png({full:true, scale:scale||2, bg:TH('canvasBg')});
   downloadUri(uri, exportName('png'));
 }
+/* ---------- read-only viewer ----------
+   This function is never run inside Dynagram. Export viewer… writes its
+   source into the exported file, where it draws the snapshot. It knows only
+   the drawing: boxes, zones, clouds, lines and their labels. It can fold a
+   site into one box and open it again, and arrange the sites bird's-eye;
+   there are no configs, routes or tools in it. */
+function __dynagramViewer(D){
+  'use strict';
+  const $=(id)=>document.getElementById(id);
+  const S={mode:D.start, open:new Set(), shut:new Set()};
+  const siteByEl={}; for(const id in D.sites) siteByEl[D.sites[id].el]=id;
+  const tops=Object.keys(D.sites);
+  // every line carries every field the drawing reads, so nothing is left to guess
+  for(const e of D.edges){ const d=e.data; for(const k of ['label','sLab','tLab']) if(d[k]==null) d[k]='';
+    if(d.lc==null) d.lc=D.colors.inter; if(d.dot==null) d.dot=d.lc; if(d.lw==null) d.lw=1.4; if(d.bend==null) d.bend=0;
+    if(d.sep==null) d.sep='outside-to-node'; if(d.tep==null) d.tep='outside-to-node'; }
+  for(const n of D.nodes){ const d=n.data; if(d.label==null) d.label=''; }
+  const clone=(o)=>JSON.parse(JSON.stringify(o));
+  let cy=null;
+
+  // which site a node sits in (its outermost zone)
+  const nodeIx=new Map(D.nodes.map(n=>[n.data.id,n]));
+  const topOf=(id)=>{ let n=nodeIx.get(id), top=null, g=0;
+    while(n && g++<30){ if(n.data.kind==='group') top=n.data.id; const p=n.data.parent; if(!p) break; n=nodeIx.get(p); }
+    return top; };
+  const siteOfNode={}; for(const n of D.nodes){ const t=topOf(n.data.id); if(t && siteByEl[t]) siteOfNode[n.data.id]=siteByEl[t]; }
+
+  function fold(shut){
+    const map={}, members={}, nodes=[], edges=[];
+    for(const n of D.nodes){
+      const sid=siteOfNode[n.data.id];
+      if(sid && shut.has(sid)){ if(n.data.kind!=='group'){ map[n.data.id]='site_'+sid; (members[sid]=members[sid]||[]).push(n); } continue; }
+      nodes.push(clone(n));
+    }
+    for(const sid of shut){
+      const ms=members[sid]; if(!ms) continue;
+      let x=0,y=0; for(const m of ms){ x+=m.position.x; y+=m.position.y; }
+      const pin=S.mode==='sites' && D.pins[sid];
+      nodes.push({data:Object.assign({}, D.sites[sid].box, {id:'site_'+sid, siteId:sid}), position: pin ? {x:pin.x, y:pin.y} : {x:x/ms.length, y:y/ms.length}});
+    }
+    const agg=new Map(), boxFs={};
+    for(const n of nodes) if(n.data.kind==='site') boxFs[n.data.id]=n.data.fs;
+    for(const e of D.edges){
+      const s=map[e.data.source]||e.data.source, t=map[e.data.target]||e.data.target;
+      if(s===t) continue;
+      if(s===e.data.source && t===e.data.target){ edges.push(clone(e)); continue; }
+      const down=e.data.down===1?1:0, k=[s,t].sort().join('|')+'|'+down;
+      let a=agg.get(k);
+      if(!a){ const lc=e.data.lc||D.colors.inter;
+        a={data:{id:'agg_'+agg.size, source:s, target:t, kind:'sitelink', down, n:0, lc, dot:e.data.dot||lc,
+          bend:0, sep:'outside-to-node', tep:'outside-to-node', sLab:'', tLab:''}, classes:'agg'}; agg.set(k,a); }
+      a.data.n++;
+    }
+    for(const a of agg.values()){
+      const n=a.data.n, lfs=Math.round(Math.max(12, 0.4*Math.max(boxFs[a.data.source]||0, boxFs[a.data.target]||0)));
+      a.data.label = D.linkLabels ? (a.data.down ? n+' shut' : (n>1 ? n+' links' : '')) : '';
+      a.data.lfs=lfs; a.data.lw=Math.min(6,1.6+Math.log2(n)*1.2)*Math.max(1,Math.sqrt(lfs/20));
+      edges.push(a);
+    }
+    return {nodes, edges};
+  }
+
+  /* bird's-eye: squeeze out empty space, then push apart anything too close */
+  function birdsEye(g){
+    const ix=new Map(g.nodes.map(n=>[n.data.id,n]));
+    const top=(id)=>{ let n=ix.get(id), t=null, k=0; while(n && k++<30){ if(n.data.kind==='group') t=n; const p=n.data.parent; if(!p) break; n=ix.get(p); } return t; };
+    const items=new Map(), itemOf={};
+    for(const n of g.nodes){
+      if(n.data.kind==='group') continue;
+      let key, box=null, site=false, sid=null;
+      if(n.data.kind==='site'){ key='S:'+n.data.id; box=n; sid=n.data.siteId; }
+      else { const t=top(n.data.id); if(t){ key='O:'+t.data.id; site=true; sid=siteByEl[t.data.id]; } else key='L:'+n.data.id; }
+      let it=items.get(key); if(!it){ it={nodes:[], box, site, sid}; items.set(key,it); }
+      it.nodes.push(n); itemOf[n.data.id]=key;
+    }
+    const arr=[...items.values()];
+    for(const it of arr){
+      if(it.box){ it.c={...it.box.position}; it.w=it.box.data.w; it.h=it.box.data.h; continue; }
+      let x1=Infinity,y1=Infinity,x2=-Infinity,y2=-Infinity;
+      for(const n of it.nodes){ const hw=(n.data.w||150)/2, hh=(n.data.h||70)/2;
+        x1=Math.min(x1,n.position.x-hw); x2=Math.max(x2,n.position.x+hw); y1=Math.min(y1,n.position.y-hh); y2=Math.max(y2,n.position.y+hh); }
+      const pad=it.site?70:0; it.c={x:(x1+x2)/2, y:(y1+y2)/2}; it.w=x2-x1+2*pad; it.h=y2-y1+2*pad;
+    }
+    const G=D.gap;
+    const squeeze=(ax,sz)=>{
+      const iv=arr.map(it=>({a:it.c[ax]-it[sz]/2, b:it.c[ax]+it[sz]/2})).sort((p,q)=>p.a-q.a);
+      const bands=[]; for(const v of iv){ const L=bands[bands.length-1]; if(L && v.a<=L.b) L.b=Math.max(L.b,v.b); else bands.push({a:v.a,b:v.b}); }
+      const gaps=[]; for(let i=1;i<bands.length;i++){ const w=bands[i].a-bands[i-1].b; gaps.push({s:bands[i-1].b, e:bands[i].a, cut:Math.max(0,w-G)}); }
+      return (v)=>{ let sh=0; for(const q of gaps){ if(v>=q.e) sh+=q.cut; else if(v>q.s){ sh+=q.cut*(v-q.s)/(q.e-q.s); break; } else break; } return v-sh; };
+    };
+    const fx=squeeze('x','w'), fy=squeeze('y','h');
+    for(const it of arr){ it.P={x:fx(it.c.x), y:fy(it.c.y)}; const pin=it.sid && D.pins[it.sid]; if(pin){ it.P={x:pin.x, y:pin.y}; it.pinned=true; } }
+    for(let iter=0; iter<80; iter++){
+      let moved=false;
+      for(let i=0;i<arr.length;i++) for(let j=i+1;j<arr.length;j++){
+        const a=arr[i], b=arr[j], dx=b.P.x-a.P.x, dy=b.P.y-a.P.y;
+        const ox=(a.w+b.w)/2+G-Math.abs(dx), oy=(a.h+b.h)/2+G-Math.abs(dy);
+        if(ox<=0.5 || oy<=0.5 || (a.pinned && b.pinned)) continue;
+        const wa=a.pinned?0:b.pinned?1:0.5, wb=1-wa;
+        if(ox<oy){ const s=dx>=0?1:-1; a.P.x-=s*ox*wa; b.P.x+=s*ox*wb; } else { const s=dy>=0?1:-1; a.P.y-=s*oy*wa; b.P.y+=s*oy*wb; }
+        moved=true;
+      }
+      if(!moved) break;
+    }
+    for(const it of arr){ const dx=it.P.x-it.c.x, dy=it.P.y-it.c.y; for(const n of it.nodes) n.position={x:n.position.x+dx, y:n.position.y+dy}; }
+    // a line between two things that moved apart is redrawn plain; one inside an opened site keeps its shape
+    for(const e of g.edges) if(itemOf[e.data.source]!==itemOf[e.data.target]){ e.classes='agg'; e.data.ortho=0; e.data.bend=0; e.data.sep=e.data.tep='outside-to-node'; }
+  }
+
+  function draw(fit){
+    const shut = S.mode==='sites' ? new Set(tops.filter(s=>!S.open.has(s))) : new Set(tops.filter(s=>S.shut.has(s)));
+    const g=fold(shut);
+    if(S.mode==='sites') birdsEye(g);
+    const vp = (cy && !fit) ? {zoom:cy.zoom(), pan:cy.pan()} : null;
+    if(cy) cy.destroy();
+    cy=cytoscape({container:$('cy'), elements:[...g.nodes, ...g.edges], style:D.style.concat(EXTRA),
+      layout:{name:'preset', fit:false}, autoungrabify:true, autounselectify:true, boxSelectionEnabled:false,
+      minZoom:0.02, maxZoom:4, pixelRatio:'auto'});
+    if(vp) cy.viewport(vp); else doFit();
+    cy.on('render viewport', placeButtons);
+    cy.on('mouseover','node', ev=>tip(ev, ev.target)); cy.on('mouseout','node', ()=>tip(null));
+    cy.on('dbltap','node[kind="site"]', ev=>toggle(ev.target.data('siteId')));
+    placeButtons(); $('mode-sites').classList.toggle('on', S.mode==='sites'); $('mode-topo').classList.toggle('on', S.mode!=='sites');
+  }
+  const EXTRA=[
+    // a line whose ends were moved apart runs straight between them (parallel ones fan out)
+    {selector:'.agg', style:{'curve-style':'bezier','control-point-step-size':60,
+      'source-endpoint':'outside-to-node','target-endpoint':'outside-to-node'}},
+    {selector:'edge[kind="sitelink"]', style:{'z-index-compare':'manual','z-index':9}}];
+  function doFit(){
+    const bar=$('bar').getBoundingClientRect(), c=cy.container().getBoundingClientRect();
+    const top=Math.max(20, bar.bottom-c.top+16), els=cy.elements(); if(!els.length) return;
+    const bb=els.boundingBox(), W=c.width-40, H=c.height-top-20;
+    const z=Math.max(0.02, Math.min(2, W/bb.w, H/bb.h));
+    cy.viewport({zoom:z, pan:{x:20+(W-bb.w*z)/2-bb.x1*z, y:top+(H-bb.h*z)/2-bb.y1*z}});
+  }
+  function toggle(sid){
+    if(S.mode==='sites'){ S.open.has(sid)?S.open.delete(sid):S.open.add(sid); }
+    else { S.shut.has(sid)?S.shut.delete(sid):S.shut.add(sid); }
+    draw(false);
+    const o=cy.getElementById(D.sites[sid].el), n=o.length ? o : cy.getElementById('site_'+sid);
+    if(n && n.length){ const r=n.renderedBoundingBox(), c=cy.container().getBoundingClientRect();
+      if(r.x1<0||r.y1<0||r.x2>c.width||r.y2>c.height) cy.animate({fit:{eles:n, padding:60}}, {duration:250}); }
+  }
+  function placeButtons(){
+    const layer=$('btns'); const c=cy.container().getBoundingClientRect(), L=layer.getBoundingClientRect();
+    const want=[];
+    cy.nodes('[kind="site"]').forEach(n=>want.push({id:n.data('siteId'), open:false, bb:n.renderedBoundingBox({includeLabels:false})}));
+    for(const sid of tops){ const n=cy.getElementById(D.sites[sid].el); if(n.length) want.push({id:sid, open:true, bb:n.renderedBoundingBox({includeLabels:false})}); }
+    const have=new Map([...layer.children].map(b=>[b.dataset.site,b]));
+    for(const w of want){
+      let b=have.get(w.id);
+      if(!b){ b=document.createElement('button'); b.className='sb'; b.dataset.site=w.id; b.onclick=()=>toggle(b.dataset.site); layer.appendChild(b); }
+      have.delete(w.id);
+      b.textContent=w.open?'−':'+'; b.title=(w.open?'Fold ':'Open ')+D.sites[w.id].name;
+      b.style.left=Math.round(c.left-L.left+w.bb.x2-11)+'px'; b.style.top=Math.round(c.top-L.top+w.bb.y1-11)+'px';
+    }
+    for(const b of have.values()) b.remove();
+  }
+  function tip(ev, n){
+    const t=$('tip');
+    if(!ev || !D.hover){ t.style.display='none'; return; }
+    const d=n.data(); let txt='';
+    if(d.kind==='device'){
+      const ls=String(d.label||'').split('\n'); if(ls.length>1 && /^(Router|Switch|Firewall)$/.test(ls[0])) ls.shift();
+      const name=ls.reduce((s,l)=>s+(s && !/[-_.]$/.test(s)?' ':'')+l,'');            // undo the wrapping
+      txt=name+(d.sub?'\n'+d.sub:'')+(d.siteName?'\n'+d.siteName:''); }
+    else if(d.kind==='site') txt=String(d.label||'').replace(/\n/g,' · ')+'\nDouble-click or + to open';
+    else if(d.kind==='group') txt=d.label;
+    else txt=d.label||'';
+    if(!txt){ t.style.display='none'; return; }
+    t.textContent=txt; t.style.display='block';
+    const p=ev.renderedPosition, c=cy.container().getBoundingClientRect();
+    t.style.left=Math.round(c.left+p.x+14)+'px'; t.style.top=Math.round(c.top+p.y+14)+'px';
+  }
+  $('mode-sites').onclick=()=>{ S.mode='sites'; draw(true); };
+  $('mode-topo').onclick=()=>{ S.mode='topology'; draw(true); };
+  $('all-open').onclick=()=>{ if(S.mode==='sites') S.open=new Set(tops); else S.shut=new Set(); draw(true); };
+  $('all-shut').onclick=()=>{ if(S.mode==='sites') S.open=new Set(); else S.shut=new Set(tops); draw(true); };
+  $('fit').onclick=()=>doFit();
+  $('zin').onclick=()=>cy.zoom({level:cy.zoom()*1.25, renderedPosition:{x:cy.width()/2, y:cy.height()/2}});
+  $('zout').onclick=()=>cy.zoom({level:cy.zoom()/1.25, renderedPosition:{x:cy.width()/2, y:cy.height()/2}});
+  $('full').onclick=()=>{ if(document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen().catch(()=>{}); };
+  window.addEventListener('resize', ()=>{ clearTimeout(window.__rt); window.__rt=setTimeout(()=>{ cy.resize(); doFit(); },150); });
+  if(!tops.length){ $('all-open').style.display=$('all-shut').style.display=$('mode-sites').style.display='none'; S.mode='topology'; }
+  draw(true);
+}
+
+/* ============================================================
+   Export viewer — a read-only copy of the drawing
+
+   One HTML file someone else can open in a browser: the diagram as drawn
+   in Topology, with every site, zone, box, cloud and line, and the same
+   bird's-eye with + and − per site. It carries no configs, no routing
+   tables and none of the tools — only what is needed to draw the picture.
+   Cytoscape goes inside the file so it opens with no network.
+   ============================================================ */
+const VIEWER_KEEP=['id','source','target','parent','kind','gkind','label','w','h','fs','fg','bg','bd','bw','ff','fw',
+  'lw','lc','dot','dotUri','sep','tep','tdy','tabfg','tabdx','sLab','tLab','segW','segD','pad','minw','minh','lfs',
+  'bend','trunk','ortho','meta','down','img','adx','ady','tabfg','nm','st'];
+const IP_RE=/\b\d{1,3}(?:\.\d{1,3}){3}(?:\/\d{1,2})?\b/g;
+let _cyLib=null;
+async function cytoscapeSource(){
+  if(_cyLib) return _cyLib;
+  const src=[...document.scripts].map(s=>s.src).find(u=>/cytoscape[^/]*\.js/.test(u||''));
+  if(!src) return null;
+  try{ const r=await fetch(src, {mode:'cors'}); if(r.ok){ const t=await r.text(); if(t.length>100000) return (_cyLib={text:t, src}); } }catch(e){}
+  return {text:null, src};
+}
+/* Draw the plain topology once, with every site open and no trace on it,
+   read the drawing off it, then put the screen back as it was. */
+function viewerSnapshot(opts){
+  const sel=document.getElementById('opt-view');
+  const keep={view:sel.value, shut:STATE.siteShut, open:STATE.siteOpen, trace:STATE.lastTrace,
+    vp: STATE.cy ? {zoom:STATE.cy.zoom(), pan:Object.assign({}, STATE.cy.pan())} : null};
+  if(STATE.cy) capturePositions(STATE.cy);
+  let nodes=[], edges=[];
+  STATE.navBack=true;
+  try{
+    sel.value='simple'; STATE.siteShut=new Set(); STATE.lastTrace=null;
+    render();
+    const cy=STATE.cy;
+    if(cy){
+      autoRouteEdges(cy,'ortho');
+      const pick=(d)=>{ const o={}; for(const k of VIEWER_KEEP) if(d[k]!=null) o[k]=d[k]; return o; };
+      const groupName={}; for(const g of (STATE.groups||[])) groupName['g_'+g.id]=g.name;
+      const topName=(n)=>{ let p=n.parent(), t=null; while(p && p.length){ t=p; p=p.parent(); } return t ? groupName[t.id()]||t.data('label') : ''; };
+      cy.nodes().forEach(n=>{
+        const d=pick(n.data());
+        if(opts.hover && n.data('kind')==='device'){ d.sub=n.data('sub')||''; d.siteName=topName(n); }
+        nodes.push({data:d, position:{x:Math.round(n.position('x')*10)/10, y:Math.round(n.position('y')*10)/10}});
+      });
+      cy.edges().forEach(e=>{
+        const d=pick(e.data());
+        // the topology draws no addresses on its lines; should one ever be there, it stays out of the copy
+        if(opts.labels==='none'){ d.label=''; d.sLab=''; d.tLab=''; }
+        else d.label=String(d.label||'').replace(IP_RE,'').replace(/\s{2,}/g,' ').trim();
+        edges.push({data:d});
+      });
+    }
+  } finally {
+    sel.value=keep.view; STATE.siteShut=keep.shut; STATE.siteOpen=keep.open; STATE.lastTrace=keep.trace;
+    render(); STATE.navBack=false;
+    if(keep.vp && STATE.cy){ STATE._needFit=false; STATE.cy.viewport(keep.vp); syncZoomUI(STATE.cy); }
+  }
+  return {nodes, edges};
+}
+function viewerSites(snap){
+  const sites={}, pins={};
+  const tops=(STATE.groups||[]).filter(g=>!g.parent);
+  const els=snap.nodes.map(n=>({data:Object.assign({},n.data), position:Object.assign({},n.position)}));
+  const keepMap=STATE.collapsedMap, keepNS=STATE.posNS;
+  STATE.posNS='simple|';
+  try{
+    const folded=collapseSites(els, new Set(tops.map(g=>g.id)));
+    for(const f of folded){
+      if(f.data.kind!=='site') continue;
+      const g=tops.find(x=>x.id===f.data.siteId); if(!g) continue;
+      const box={}; for(const k of ['kind','label','w','h','bg','fg','bd','bw','ff','fw','fs','big']) box[k]=f.data[k];
+      sites[g.id]={name:g.name, el:'g_'+g.id, box};
+      const p=STATE.positions['sites|site:'+g.name]; if(p) pins[g.id]={x:p.x, y:p.y};
+    }
+  } finally { STATE.collapsedMap=keepMap; STATE.posNS=keepNS; }
+  return {sites, pins};
+}
+const htmlEsc=(t)=>String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+async function exportViewer(opts){
+  if(!STATE.cy || !STATE.model || !STATE.model.devices.length){ toast('Nothing to export yet'); return; }
+  const lib=await cytoscapeSource();
+  const snap=viewerSnapshot(opts);
+  if(!snap.nodes.length){ toast('Nothing to export yet'); return; }
+  const {sites, pins}=viewerSites(snap);
+  const name=(document.getElementById('proj-name').value||'').trim() || 'Network diagram';
+  const D={nodes:snap.nodes, edges:snap.edges, sites, pins, start:opts.start, hover:!!opts.hover,
+    linkLabels:opts.labels!=='none', style:graphStyle(), gap:Math.round(Math.max(140, siteBoxSize(false).h*0.65)),
+    colors:{inter:TH('linkInter')}};
+  const json=JSON.stringify(D).replace(/</g,'\\u003c');
+  const bg=TH('canvasBg'), ink=TH('devText'), when=new Date().toISOString().slice(0,16).replace('T',' ');
+  const libTag = lib && lib.text
+    ? '<script>'+lib.text.replace(/<\/script/gi,'<\\/script')+'<\/script>'
+    : '<script src="'+htmlEsc((lib&&lib.src)||'https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js')+'"><\/script>';
+  const html='<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'+
+'<meta name="viewport" content="width=device-width,initial-scale=1">'+
+'<title>'+htmlEsc(name)+' — diagram</title>'+
+'<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&display=swap" rel="stylesheet">'+
+'<style>'+
+'html,body{margin:0;height:100%;background:'+bg+';font:13px "IBM Plex Sans Condensed",system-ui,"Segoe UI",sans-serif;overflow:hidden}'+
+'#cy{position:fixed;inset:0}'+
+'#bar{position:fixed;top:10px;left:10px;right:10px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;z-index:5;pointer-events:none}'+
+'#bar>*{pointer-events:auto}'+
+'.grp{display:flex;gap:2px;background:rgba(255,255,255,.94);border:1px solid #c9d3df;border-radius:8px;padding:3px;box-shadow:0 1px 4px rgba(0,0,0,.12)}'+
+'.grp button{font:inherit;border:0;background:transparent;color:#1d2b3a;padding:5px 10px;border-radius:6px;cursor:pointer;white-space:nowrap}'+
+'.grp button:hover{background:#e8eef5}.grp button.on{background:#1d4f7c;color:#fff}'+
+'#title{font-weight:600;color:#1d2b3a;background:rgba(255,255,255,.94);border:1px solid #c9d3df;border-radius:8px;padding:7px 12px;box-shadow:0 1px 4px rgba(0,0,0,.12)}'+
+'#title small{font-weight:400;color:#6a7b8d;margin-left:8px}'+
+'#btns{position:fixed;inset:0;pointer-events:none;z-index:4}'+
+'.sb{position:absolute;width:22px;height:22px;padding:0;border-radius:50%;border:1px solid #1d4f7c;background:#fff;color:#1d4f7c;'+
+'font:600 15px/20px system-ui,sans-serif;text-align:center;cursor:pointer;pointer-events:auto;box-shadow:0 1px 3px rgba(0,0,0,.25)}'+
+'.sb:hover{background:#1d4f7c;color:#fff}'+
+'#tip{position:fixed;display:none;z-index:6;max-width:340px;white-space:pre-line;background:#1d2b3a;color:#fff;padding:6px 9px;border-radius:6px;font-size:12px;pointer-events:none}'+
+'#ro{position:fixed;right:10px;bottom:8px;color:'+ink+';opacity:.55;font-size:11px;z-index:5}'+
+'@media (max-width:640px){#title small{display:none}.grp button{padding:5px 7px}}'+
+'</style></head><body>'+
+'<div id="cy"></div><div id="btns"></div><div id="tip"></div>'+
+'<div id="bar"><div id="title">'+htmlEsc(name)+'<small>read-only · '+when+'</small></div>'+
+'<div class="grp"><button id="mode-sites" title="Every site as one box">Sites</button><button id="mode-topo" title="Every device">Topology</button></div>'+
+'<div class="grp"><button id="all-open" title="Open every site">⊞ Expand all</button><button id="all-shut" title="Fold every site">⊟ Collapse all</button></div>'+
+'<div class="grp"><button id="zout" title="Zoom out">−</button><button id="fit" title="Fit the diagram">Fit</button><button id="zin" title="Zoom in">+</button><button id="full" title="Full screen">⛶</button></div></div>'+
+'<div id="ro">Read-only snapshot from Dynagram '+APP_VERSION+'</div>'+
+libTag+
+'<script>'+__dynagramViewer.toString()+'\n__dynagramViewer('+json+');<\/script>'+
+'</body></html>';
+  const blob=new Blob([html], {type:'text/html'});
+  const url=URL.createObjectURL(blob);
+  downloadUri(url, exportName('html').replace(/\.html$/,'-viewer.html'));
+  setTimeout(()=>URL.revokeObjectURL(url), 4000);
+  toast(lib && lib.text ? 'Viewer saved — opens offline' : 'Viewer saved — it needs internet to load the drawing library');
+}
+function openViewerExport(){
+  let dlg=document.getElementById('xv');
+  if(!dlg){
+    dlg=document.createElement('div'); dlg.id='xv'; dlg.className='pick'; dlg.style.width='min(440px,94vw)';
+    dlg.innerHTML='<header><h2>Export viewer</h2><span class="sp"></span><button class="btn" id="xv-cancel">Cancel</button></header>'+
+      '<div style="padding:12px 16px 16px;display:grid;gap:12px;font-size:13px">'+
+      '<div class="note" style="margin:0">One HTML file anyone can open in a browser: the drawing only, read-only, with pan, zoom, '+
+      'the bird’s-eye and + / − per site. No configs or routing go in it.</div>'+
+      '<label><input type="checkbox" id="xv-labels" checked> Link labels — how many links join two sites, and which ports are shut down</label>'+
+      '<label>Opens in <select id="xv-start" style="margin-left:6px">'+
+        '<option value="sites">Sites (bird’s-eye)</option><option value="topology">Topology</option></select></label>'+
+      '<label><input type="checkbox" id="xv-hover" checked> Show device details on hover (role, site)</label>'+
+      '<div style="display:flex;justify-content:flex-end"><button class="btn btn-go" id="xv-go">Save viewer</button></div></div>';
+    const back=document.createElement('div'); back.className='pick-back'; back.id='xv-back';
+    document.body.appendChild(back); document.body.appendChild(dlg);
+    const close=()=>{ dlg.classList.add('hidden'); back.classList.add('hidden'); };
+    back.onclick=close; dlg.querySelector('#xv-cancel').onclick=close;
+    dlg.querySelector('#xv-go').onclick=async ()=>{
+      const b=dlg.querySelector('#xv-go'); b.disabled=true; b.textContent='Saving…';
+      try{ await exportViewer({labels:dlg.querySelector('#xv-labels').checked?'names':'none', start:dlg.querySelector('#xv-start').value,
+                               hover:dlg.querySelector('#xv-hover').checked}); close(); }
+      catch(e){ toast('Could not export: '+(e.message||e)); }
+      finally{ b.disabled=false; b.textContent='Save viewer'; }
+    };
+  }
+  const hasSites=(STATE.groups||[]).some(g=>!g.parent);
+  dlg.querySelector('#xv-start').value = hasSites ? 'sites' : 'topology';
+  dlg.querySelector('#xv-start').disabled = !hasSites;
+  dlg.classList.remove('hidden'); document.getElementById('xv-back').classList.remove('hidden');
+}
+
 function exportName(ext){
   const nm=(document.getElementById('proj-name').value||'').trim()
     .replace(/[^\w .-]+/g,'').replace(/\s+/g,'-') || 'dynagram';
@@ -12659,8 +13230,11 @@ function exportSvg(){
     out.push('<rect x="'+(b.x1+ox).toFixed(1)+'" y="'+(b.y1+oy).toFixed(1)+
       '" width="'+b.w.toFixed(1)+'" height="'+b.h.toFixed(1)+'" rx="10" fill="'+xmlEsc(n.data('bg')||'none')+
       '" stroke="'+xmlEsc(n.data('bd')||'#888')+'" stroke-width="'+(TH('boxBorderW')||2)+'"/>');
-    out.push('<text x="'+((b.x1+b.x2)/2+ox).toFixed(1)+'" y="'+(b.y2+oy-6).toFixed(1)+
-      '" text-anchor="middle" font-family="'+xmlEsc(n.data('ff')||'sans-serif')+'" font-size="'+(n.data('fs')||12)+
+    const arch=isArch(), site=n.data('gkind')==='site', zfs=+(n.data('fs')||12);
+    const lx = !arch ? (b.x1+b.x2)/2+ox : site ? b.x1+ox+Math.max(10,zfs*0.6) : b.x2+ox-8;
+    const ly = !arch ? b.y2+oy-6 : b.y1+oy+(site ? zfs*1.05+6 : zfs+3);
+    out.push('<text x="'+lx.toFixed(1)+'" y="'+ly.toFixed(1)+
+      '" text-anchor="'+(!arch?'middle':site?'start':'end')+'" font-family="'+xmlEsc(n.data('ff')||'sans-serif')+'" font-size="'+(n.data('fs')||12)+
       '" font-weight="'+xmlEsc(n.data('fw')||'normal')+'" fill="'+xmlEsc(n.data('tabfg')||'#fff')+'">'+
       xmlEsc(n.data('label'))+'</text>');
   });
@@ -12694,6 +13268,17 @@ function exportSvg(){
       out.push('<text x="'+((b.x1+b.x2)/2+ox).toFixed(1)+'" y="'+((b.y1+b.y2)/2+oy+4).toFixed(1)+
         '" text-anchor="middle" font-family="monospace" font-size="11" fill="'+xmlEsc(TH('netText'))+'">'+
         xmlEsc(n.data('label'))+'</text>');
+      return;
+    }
+    if(kind==='device' && isArch() && n.data('nm')){
+      /* the Architecture box: name in bold, what the device is underneath */
+      const fs=+n.data('fs')||13, cx=(b.x1+b.x2)/2+ox, cy0=(b.y1+b.y2)/2+oy;
+      out.push('<rect x="'+(b.x1+ox).toFixed(1)+'" y="'+(b.y1+oy).toFixed(1)+'" width="'+b.w.toFixed(1)+'" height="'+b.h.toFixed(1)+
+        '" rx="5" fill="'+xmlEsc(n.data('bg'))+'" stroke="'+xmlEsc(n.data('bd'))+'" stroke-width="'+(TH('boxBorderW')||1.2)+'"/>');
+      out.push('<text x="'+cx.toFixed(1)+'" y="'+(cy0-fs*0.15).toFixed(1)+'" text-anchor="middle" font-family="'+xmlEsc(n.data('ff'))+
+        '" font-size="'+fs+'" font-weight="'+xmlEsc(n.data('fw')||'700')+'" fill="'+xmlEsc(n.data('fg'))+'">'+xmlEsc(n.data('nm'))+'</text>');
+      out.push('<text x="'+cx.toFixed(1)+'" y="'+(cy0+fs*0.95).toFixed(1)+'" text-anchor="middle" font-family="'+xmlEsc(n.data('ff'))+
+        '" font-size="'+(fs*0.8).toFixed(1)+'" fill="'+xmlEsc(TH('devSub'))+'">'+xmlEsc(n.data('st')||'')+'</text>');
       return;
     }
     out.push('<rect x="'+(b.x1+ox).toFixed(1)+'" y="'+(b.y1+oy).toFixed(1)+
@@ -13030,6 +13615,17 @@ function loadProject(obj){
   STATE.flowText = obj.flowText||'';
   if(obj.zen) setTimeout(()=>setZen(true),0);
   STATE.linkStyle = obj.linkStyle || 'ortho';
+  /* Projects saved before the Architecture look existed move to it once:
+     its colours, typeface and lines, keeping the text sizes. Settings →
+     Classic dark puts the old look back, and that choice is then kept. */
+  if(obj.theme && !obj.theme.look){
+    const keys=['look','canvasBg','canvasGrid','devBg','devText','devSub','roleRouter','roleSwitch','roleFirewall','fwBg',
+      'spineBg','spineBorder','leafBg','zoneBg','zoneText','zoneBorder','zoneGrid','zoneTabColor','siteBg','siteBorder','siteText',
+      'linkIntra','linkInter','linkDown','linkFw','linkWan','linkL2','netText','linkText'].concat(LOOK_KEYS);
+    for(const k of keys) STATE.theme[k]=THEME_ARCH[k];
+    STATE.linkStyle='direct';
+  }
+  setTimeout(()=>{ try{ if(STATE._syncThemeUI) STATE._syncThemeUI(); const st=document.querySelector('.stage'); if(st) st.style.background=stageBackground(); }catch(e){} },0);
   STATE.cloudSizes = obj.cloudSizes || {};
   { const g=document.getElementById('opt-nopolicy'); if(g) g.checked=!!obj.noPolicyAll; }
   setTimeout(()=>{ try{ syncSecurityUI(); }catch(e){} },0);
@@ -13458,6 +14054,7 @@ if(typeof cytoscape==='undefined'){
 }
 function initTheme(){
   const map={canvasBg:'th-canvasBg', linkText:'th-linkText', devBg:'th-devBg', cloudBg:'th-cloudBg', cloudText:'th-cloudText',
+             fwBg:'th-fwBg', siteBg:'th-siteBg', siteBorder:'th-siteBorder', linkFw:'th-linkFw', linkWan:'th-linkWan',
              devText:'th-devText', zoneBg:'th-zoneBg', zoneText:'th-zoneText',
              zoneBorder:'th-zoneBorder', roleRouter:'th-roleRouter',
              roleSwitch:'th-roleSwitch', roleFirewall:'th-roleFirewall',
@@ -13465,7 +14062,7 @@ function initTheme(){
   for(const k in map){
     const el=document.getElementById(map[k]);
     if(!el) continue;
-    el.value=STATE.theme[k];
+    el.value=TH(k);
     /* A colour input fires continuously while the picker is open. Re-rendering
        the whole diagram on every one of those is what made this crawl, so the
        value is stored immediately and the redraw is coalesced. */
@@ -13480,8 +14077,8 @@ function initTheme(){
   }
   const bw=document.getElementById('th-borderW');
   if(bw){
-    bw.value=STATE.theme.boxBorderW||2;
-    bw.oninput=()=>{ STATE.theme.boxBorderW=parseInt(bw.value,10)||2; applyTheme(); autosave(); };
+    bw.value=TH('boxBorderW')||2;
+    bw.oninput=()=>{ STATE.theme.boxBorderW=parseFloat(bw.value)||1.2; applyTheme(); autosave(); };
   }
   const gs=document.getElementById('th-gridStyle');
   if(gs){
@@ -13582,11 +14179,28 @@ function initTheme(){
      size, name wrapping and line widths you had set. Those are kept now; only
      Reset puts everything back to the defaults. */
   const PRESET_KEYS=['canvasBg','canvasGrid','gridStyle','devBg','devText','roleRouter','roleSwitch','roleFirewall',
-                     'zoneBg','zoneText','zoneBorder','zoneGrid','zoneTabColor','linkIntra','linkInter','linkDown','netText','linkText'];
+                     'zoneBg','zoneText','zoneBorder','zoneGrid','zoneTabColor','linkIntra','linkInter','linkDown','netText','linkText',
+                     'devSub','fwBg','spineBg','spineBorder','leafBg','siteBg','siteBorder','siteText','linkFw','linkWan','linkL2'];
   const applyPreset=(t, everything)=>{
+    const fromLook=TH('look'), toLook=t.look||'classic';
     if(everything) STATE.theme=Object.assign({}, t, {fontV:2});
-    else { STATE.theme=Object.assign({}, STATE.theme); for(const k of PRESET_KEYS){ if(k in t) STATE.theme[k]=t[k]; else delete STATE.theme[k]; } }
-    for(const k in map) if(document.getElementById(map[k])) document.getElementById(map[k]).value=STATE.theme[k];
+    else {
+      STATE.theme=Object.assign({}, STATE.theme);
+      /* A colour scheme within the same look changes colours only. Moving
+         to another look also brings that look's typeface, weight, outlines,
+         line width and provider clouds; text sizes stay as you set them. */
+      const keys=PRESET_KEYS.concat(['look'], (fromLook!==toLook || toLook==='arch') ? LOOK_KEYS : []);
+      for(const k of keys){ if(k in t) STATE.theme[k]=t[k]; else delete STATE.theme[k]; }
+    }
+    if(fromLook!==toLook || everything){
+      STATE.linkStyle = toLook==='arch' ? 'direct' : 'ortho';
+      const ls=document.getElementById('opt-linkstyle'); if(ls) ls.value=STATE.linkStyle;
+    }
+    syncThemeUI();
+    applyTheme(); autosave();
+  };
+  const syncThemeUI=()=>{
+    for(const k in map) if(document.getElementById(map[k])) document.getElementById(map[k]).value=TH(k);
     for(const k in boolMap) if(document.getElementById(boolMap[k])) document.getElementById(boolMap[k]).checked=!!STATE.theme[k];
     if(bw) bw.value=STATE.theme.boxBorderW||2;
     if(gs) gs.value=STATE.theme.gridStyle||'dots';
@@ -13603,8 +14217,12 @@ function initTheme(){
     { const m=document.getElementById('th-minNamePx'); if(m) m.value=TH('minNamePx'); const w=document.getElementById('th-wrapNames'); if(w) w.checked=TH('wrapNames')!==false; }
     if(dBold) dBold.checked=!!STATE.theme.devBold;
     if(zBold) zBold.checked=!!STATE.theme.zoneBold;
-    applyTheme(); autosave();
+    if(dw) dw.value=String(TH('devWeight')||'600');
+    if(ztc && TH('zoneTabColor')) ztc.value=TH('zoneTabColor');
   };
+  STATE._syncThemeUI=syncThemeUI;
+  document.getElementById('th-arch').onclick=()=>applyPreset(THEME_ARCH);
+  document.getElementById('th-archdark').onclick=()=>applyPreset(THEME_ARCH_DARK);
   document.getElementById('th-dark').onclick=()=>applyPreset(THEME_DEFAULT);
   document.getElementById('th-visio').onclick=()=>applyPreset(THEME_VISIO);
   /* Reset clears the per-device and per-zone overrides too, otherwise a box
@@ -13618,12 +14236,13 @@ function initTheme(){
       delete d.boxW; delete d.boxH;
     }
     for(const g of groups()){ delete g.bg; delete g.fg; delete g.font; delete g.fontSize; delete g.bold; }
-    applyPreset(THEME_DEFAULT, true);
+    applyPreset(THEME_ARCH, true);
     renderGroups();
   };
 }
 initPanels();
 initTheme();
+{ const st=document.querySelector('.stage'); if(st) st.style.background=stageBackground(); }
 const verEl=document.getElementById('app-ver');
 if(verEl) verEl.textContent='v'+APP_VERSION;
 initQueryBar();
